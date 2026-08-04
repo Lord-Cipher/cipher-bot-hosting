@@ -1956,7 +1956,7 @@ def back_kb(target: str, label: str = "Back") -> types.InlineKeyboardMarkup:
 def plans_kb() -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup()
     for k, v in PLAN_LIMITS.items():
-        price = "Free" if v["price"] == 0 else f"{v['price']}\u09F3"
+        price = "Free" if v["price"] == 0 else f"{v['price']}{cur_sym()}"
         style = "success" if v["price"] == 0 else "primary"
         kb.add(Btn(
             f"{G['star']}  {sc(v['name'])}  {G['bullet']}  {price}",
@@ -2660,7 +2660,9 @@ def start_child(b: Dict[str, Any]) -> Dict[str, Any]:
 
     info = {
         "proc": proc, "kind": kind, "started": time.time() * 1000,
-        "log": log, "dir": str(bot_dir), "name": b["name"],
+        # Key is "log_ring" (not "log") to match what action_bot_logs and
+        # render_adm_bc_logs both read via RUNNING.get(bid, {}).get("log_ring").
+        "log_ring": log, "dir": str(bot_dir), "name": b["name"],
         "owner": b["owner"], "manual_stop": False,
     }
     with _runner_lock:
@@ -3028,7 +3030,7 @@ def child_status(bot_id: str, b_doc: Dict[str, Any]) -> Dict[str, Any]:
         "kind":      (info["kind"] if info else kind) or "—",
         "uptimeMs":  int(time.time() * 1000 - info["started"]) if running else 0,
         "sizeBytes": sz,
-        "logs":      info["log"] if info else [],
+        "logs":      info["log_ring"] if info else [],
         "cpuPct":    cpu,
         "memBytes":  mem,
         "sandboxed": True,
@@ -5017,6 +5019,26 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         audit(call.from_user.id, f"bc_toggle_{flag_key}", f"now={not cur}")
         ack(call, f"{flag_key}: {'ON' if not cur else 'OFF'}")
         return render_adm_bot_cfg(call)
+    # Currency preset quick-select buttons (e.g. adm_bc_set_currency_BDT_৳)
+    # MUST be checked BEFORE the generic adm_bc_set_ catch-all below, otherwise
+    # the catch-all fires first and puts the user into an input-wait flow instead
+    # of immediately applying the preset.
+    if data == "adm_bc_set_currency_symbol":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_bc_set", "bc_key": "currency_symbol"}
+        bot.send_message(call.message.chat.id, f"{G['settings']} Send new currency symbol (e.g. ₹ $ €):", parse_mode="HTML"); return
+    if data.startswith("adm_bc_set_currency_") and len(data.split("_")) >= 6:
+        parts = data[len("adm_bc_set_currency_"):].split("_", 1)
+        if len(parts) == 2:
+            set_setting("payment_currency", parts[0])
+            set_setting("currency_symbol", parts[1])
+            ack(call, f"{G['ok']} Currency set: {parts[0]} {parts[1]}")
+        return render_adm_pay_config(call)
+    # Add Secret Name — special case: must be checked before the generic
+    # adm_bc_set_ catch-all so we can set the right flow key.
+    if data == "adm_bc_set_add_secret_name":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_bc_set", "bc_key": "add_secret_name"}
+        bot.send_message(call.message.chat.id, f"{G['settings']} Send the env var name to add to the secret strip list:", parse_mode="HTML"); return
+    # Generic bot-config setter — prompts for a new value then writes it.
     if data.startswith("adm_bc_set_"):
         USER_STATES[call.from_user.id] = {"flow": "await_adm_bc_set", "bc_key": data[len("adm_bc_set_"):]}
         bot.send_message(call.message.chat.id, f"{G['settings']} {sc('Send new value')}:", parse_mode="HTML"); return
@@ -5035,21 +5057,6 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         _PHOTO_FILE_IDS.clear()
         ack(call, f"{G['ok']} Banner cache cleared — photos will reload fresh")
         return render_adm_app_banner(call)
-    if data == "adm_bc_set_currency_symbol":
-        USER_STATES[call.from_user.id] = {"flow": "await_adm_bc_set", "bc_key": "currency_symbol"}
-        bot.send_message(call.message.chat.id, f"{G['settings']} Send new currency symbol (e.g. ₹ $ €):", parse_mode="HTML"); return
-    if data.startswith("adm_bc_set_currency_") and len(data.split("_")) >= 6:
-        parts = data[len("adm_bc_set_currency_"):].split("_", 1)
-        if len(parts) == 2:
-            # These were being written via _bc_set (adds a "bc_" prefix, and
-            # under the wrong key "currency_code") while every screen that
-            # displays currency reads bare "payment_currency" and
-            # "currency_symbol" — so this button silently changed nothing
-            # any reader ever looked at.
-            set_setting("payment_currency", parts[0])
-            set_setting("currency_symbol", parts[1])
-            ack(call, f"{G['ok']} Currency set: {parts[0]} {parts[1]}")
-        return render_adm_pay_config(call)
     if data == "adm_app_emoji_reset":
         if not is_owner(call.from_user.id): ack(call, "Owner only"); return
         set_setting("custom_emojis", {})
@@ -5098,10 +5105,13 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     # Referral System
     if data == "adm_referral_sys":        return render_adm_referral_sys(call)
     if data == "adm_ref_toggle":
-        cur = bool(get_setting("referral_enabled", True))
-        set_setting("referral_enabled", not cur)
-        audit(call.from_user.id, "referral_toggle", f"now={not cur}")
-        ack(call, f"Referrals: {'ON' if not cur else 'OFF'}")
+        # Use _ff_toggle('referral_system') so the toggle writes to the
+        # canonical feature_flags dict that _ff_get() reads everywhere.
+        # The old code wrote a flat 'referral_enabled' key that _ff_get()
+        # never read, causing the toggle to appear stuck.
+        new_val = _ff_toggle("referral_system")
+        audit(call.from_user.id, "referral_toggle", f"now={new_val}")
+        ack(call, f"Referrals: {'ON' if new_val else 'OFF'}")
         return render_adm_referral_sys(call)
     if data == "adm_ref_stats":           return render_adm_ref_stats(call)
     if data == "adm_ref_rewards":         return render_adm_ref_rewards(call)
@@ -5150,14 +5160,19 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_feature_flags":       return render_adm_feature_flags(call)
     if data.startswith("adm_ff_toggle_"):
         ff_key = data[len("adm_ff_toggle_"):]
-        cur = bool(get_setting(f"ff_{ff_key}", _FEATURE_FLAG_DEFAULTS.get(ff_key, True)))
-        set_setting(f"ff_{ff_key}", not cur)
-        audit(call.from_user.id, f"ff_toggle_{ff_key}", f"now={not cur}")
-        ack(call, f"Flag {ff_key}: {'ON' if not cur else 'OFF'}")
+        # Use _ff_toggle() which reads/writes the canonical "feature_flags"
+        # dict that _ff_get() and render_adm_feature_flags() also use.
+        # The old code wrote to a flat "ff_{key}" key that _ff_get() never
+        # read, so toggles appeared to do nothing.
+        new_val = _ff_toggle(ff_key)
+        audit(call.from_user.id, f"ff_toggle_{ff_key}", f"now={new_val}")
+        ack(call, f"Flag {ff_key}: {'ON' if new_val else 'OFF'}")
         return render_adm_feature_flags(call)
     if data == "adm_ff_reset_all":
-        for k, v in _FEATURE_FLAG_DEFAULTS.items():
-            set_setting(f"ff_{k}", v)
+        # Use _ff_reset_all() which writes to the canonical "feature_flags"
+        # dict. The old code wrote flat "ff_{key}" keys that _ff_get() never
+        # read, so reset appeared to do nothing.
+        _ff_reset_all()
         audit(call.from_user.id, "ff_reset_all", "")
         ack(call, "All feature flags reset to defaults")
         return render_adm_feature_flags(call)
@@ -6403,8 +6418,8 @@ _MESSAGE_TEMPLATES: Dict[str, Dict[str, str]] = {
     },
     "payment_received": {
         "label": "Payment Received",
-        "default": "✅ Payment of {amount}৳ received for {plan} plan. Your account has been upgraded!",
-        "vars": "{name}, {amount}, {plan}, {tx_id}, {date}",
+        "default": "✅ Payment of {amount}{sym} received for {plan} plan. Your account has been upgraded!",
+        "vars": "{name}, {amount}, {sym}, {plan}, {tx_id}, {date}",
     },
     "plan_expired": {
         "label": "Plan Expiry Warning",
@@ -6423,8 +6438,8 @@ _MESSAGE_TEMPLATES: Dict[str, Dict[str, str]] = {
     },
     "referral_reward": {
         "label": "Referral Reward",
-        "default": "🎁 You earned {amount}৳ for referring {referred_name}! Keep sharing!",
-        "vars": "{name}, {amount}, {referred_name}",
+        "default": "🎁 You earned {amount}{sym} for referring {referred_name}! Keep sharing!",
+        "vars": "{name}, {amount}, {sym}, {referred_name}",
     },
     "ticket_reply": {
         "label": "Ticket Reply",
@@ -7213,7 +7228,7 @@ def render_adm_bc_env(call: types.CallbackQuery) -> None:
 
 
 def render_adm_bc_sandbox(call: types.CallbackQuery) -> None:
-    wipe   = bool(get_setting("ff_sandbox_wipe", True))
+    wipe   = _ff_get("sandbox_wipe")
     delay  = _bc_get("sandbox_wipe_delay")
     net    = bool(_bc_get("sandbox_network"))
     cap = (
@@ -7242,7 +7257,7 @@ def render_adm_bc_sandbox(call: types.CallbackQuery) -> None:
 
 
 def render_adm_bc_policy(call: types.CallbackQuery) -> None:
-    auto_r  = bool(get_setting("ff_auto_restart_bots", True))
+    auto_r  = _ff_get("auto_restart_bots")
     max_r   = _bc_get("max_crash_restarts")
     delay_r = _bc_get("crash_restart_delay")
     auto_dg = bool(get_setting("auto_downgrade_expired", True))
@@ -7550,7 +7565,7 @@ def render_adm_templates(call: types.CallbackQuery) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_adm_referral_sys(call: types.CallbackQuery) -> None:
-    enabled   = bool(get_setting("referral_enabled", True))
+    enabled   = _ff_get("referral_system")
     reward    = get_setting("referral_reward_amount", 20)
     min_plan  = get_setting("referral_min_plan", "free")
     d = db_load()
@@ -9112,16 +9127,141 @@ def on_text(m: types.Message) -> None:
         if flow == "await_gh_repo":
             gh_set_config({"repo": text}); gh_load_config()
             USER_STATES.pop(uid, None); bot.reply_to(m, f"{G['ok']} {sc('repo saved')}"); return
-        if flow == "await_gh_repo_url" or flow == "await_gh_user_token":
-            # This whole "clone your own GitHub repo as a bot" feature only
-            # has its prompts wired up — the actual clone-then-register-as-
-            # a-bot glue and per-user token storage were never built. Rather
-            # than silently swallowing the message (which is what happened
-            # before), tell the person plainly so it's not a mystery.
+        if flow == "await_gh_user_token":
+            # Store the user's GitHub token (encrypted) in their user doc.
             USER_STATES.pop(uid, None)
-            bot.reply_to(m,
-                f"{G['warn']} {sc('This feature (cloning your own GitHub repo directly) is not available yet')}.\n"
-                f"{sc('Please upload your bot as a .py or .zip file instead, or use the admin GitHub browser')}.")
+            token = text.strip()
+            if not token:
+                bot.reply_to(m, f"{G['no']} Empty token — nothing saved."); return
+            try:
+                # Encrypt the token with a per-user Fernet key.
+                # Pattern: key stored in KEYRING, cipher stored in user doc.
+                import base64 as _b64
+                key_id, key, cipher = encrypt_file(token.encode())
+                KEYRING.store(key_id, key, {"purpose": "gh_user_token", "uid": uid})
+                d = db_load()
+                if str(uid) in d["users"]:
+                    # Store both key_id (to retrieve key from KEYRING) and
+                    # the cipher (base64-encoded) so we can decrypt later.
+                    d["users"][str(uid)]["gh_token_key_id"] = key_id
+                    d["users"][str(uid)]["gh_token_cipher"] = _b64.b64encode(cipher).decode()
+                    db_save(d)
+                audit(uid, "gh_user_token_set", "")
+                bot.reply_to(m, f"{G['ok']} GitHub token saved securely. You can now clone a repo.",
+                             parse_mode="HTML")
+            except Exception as e:
+                bot.reply_to(m, f"{G['no']} Could not save token: <code>{esc(e)}</code>", parse_mode="HTML")
+            return
+        if flow == "await_gh_repo_url":
+            # Clone the given GitHub repo URL and register it as a bot.
+            USER_STATES.pop(uid, None)
+            repo_url = text.strip()
+            if not (repo_url.startswith("https://github.com/") or repo_url.startswith("http://github.com/")):
+                bot.reply_to(m, f"{G['no']} Please send a valid GitHub URL like:\n<code>https://github.com/user/repo</code>",
+                             parse_mode="HTML"); return
+            u_doc = db_load()["users"].get(str(uid), {})
+            if not _user_can_host_gh(u_doc):
+                bot.reply_to(m, f"{G['no']} Pro+ plan required to clone GitHub repos."); return
+            # Check bot slot quota
+            existing_bots = list_user_bots(uid)
+            plan_key = u_doc.get("plan", "free")
+            max_bots = int(get_setting(f"plan_max_bots_{plan_key}",
+                                       PLAN_LIMITS.get(plan_key, {}).get("max_bots", 2)))
+            bonus = int(u_doc.get("bot_slots_bonus", 0))
+            if len(existing_bots) >= max_bots + bonus:
+                bot.reply_to(m, f"{G['no']} Bot slot limit reached ({max_bots + bonus} bots). Upgrade your plan."); return
+            bot.reply_to(m, f"⏳ Cloning <code>{esc(repo_url)}</code>…", parse_mode="HTML")
+            def _clone_bg():
+                try:
+                    import urllib.request, zipfile, io as _io
+                    # Derive the zip URL from the repo URL
+                    clean = repo_url.rstrip("/")
+                    if clean.endswith(".git"):
+                        clean = clean[:-4]
+                    zip_url = clean + "/archive/refs/heads/main.zip"
+                    # Try to get user token for private repos
+                    token_key_id = db_load()["users"].get(str(uid), {}).get("gh_token_key_id")
+                    headers = {"User-Agent": "cipher-bot-hosting/1.0"}
+                    if token_key_id:
+                        try:
+                            import base64 as _b64
+                            u_data = db_load()["users"].get(str(uid), {})
+                            cipher_b64 = u_data.get("gh_token_cipher", "")
+                            if cipher_b64:
+                                key = KEYRING.fetch(token_key_id)
+                                if key:
+                                    raw_tok = decrypt_with(key, _b64.b64decode(cipher_b64))
+                                    headers["Authorization"] = f"token {raw_tok.decode()}"
+                        except Exception:
+                            pass
+                    req = urllib.request.Request(zip_url, headers=headers)
+                    try:
+                        with urllib.request.urlopen(req, timeout=60) as resp:
+                            raw_zip = resp.read()
+                    except Exception:
+                        # Try master branch
+                        zip_url2 = clean + "/archive/refs/heads/master.zip"
+                        req2 = urllib.request.Request(zip_url2, headers=headers)
+                        with urllib.request.urlopen(req2, timeout=60) as resp2:
+                            raw_zip = resp2.read()
+                    if len(raw_zip) > MAX_UPLOAD_BYTES:
+                        bot.send_message(uid, f"{G['no']} Repo zip too large (>{MAX_UPLOAD_BYTES//1024//1024} MB).")
+                        return
+                    # Create bot doc
+                    bot_id_new = secrets.token_hex(8)
+                    repo_name = clean.split("/")[-1]
+                    bot_dir = DIRS["sandbox"] / f"{uid}_{bot_id_new}"
+                    bot_dir.mkdir(parents=True, exist_ok=True)
+                    # Extract zip
+                    files_added = []
+                    with zipfile.ZipFile(_io.BytesIO(raw_zip)) as zf:
+                        for member in zf.infolist():
+                            if member.is_dir(): continue
+                            rel = "/".join(member.filename.split("/")[1:])  # strip top-level dir
+                            if not rel or ".." in rel.split("/"): continue
+                            try:
+                                safe_path_join(bot_dir, rel)
+                            except ValueError:
+                                continue
+                            files_added.append((rel, zf.read(member)))
+                    if not files_added:
+                        bot.send_message(uid, f"{G['no']} Repo appears empty."); return
+                    # Security scan
+                    scan = _run_security_scan(files_added, uploader_uid=uid)
+                    if scan.get("recommendation") == "REJECT":
+                        bot.send_message(uid,
+                            f"{G['no']} Security scan rejected this repo.\n"
+                            f"<code>{esc(scan.get('summary',''))}</code>", parse_mode="HTML")
+                        rmrf(bot_dir); return
+                    # Encrypt and store files
+                    enc_files = []
+                    for rel, content in files_added:
+                        tgt = safe_path_join(bot_dir, rel)
+                        tgt.parent.mkdir(parents=True, exist_ok=True)
+                        tgt.write_bytes(content)
+                        stored = store_uploaded_file(m.from_user, rel, content)
+                        enc_files.append({"key_id": stored["key_id"], "enc_path": stored["path"],
+                                          "filename": rel, "rel_path": rel})
+                    name = safe_name(repo_name) + "_gh"
+                    doc = {
+                        "_id": bot_id_new, "owner": uid, "name": name,
+                        "dir": str(bot_dir), "created": ts_iso(),
+                        "enc_files": enc_files, "env": {}, "status": "stopped", "cron": {},
+                        "source": "github", "gh_repo": repo_url,
+                    }
+                    d = db_load()
+                    d["bots"][bot_id_new] = doc
+                    db_save(d)
+                    audit(uid, "gh_clone", f"repo={repo_url} bot_id={bot_id_new}")
+                    bot.send_message(uid,
+                        f"<b>{G['ok']} Repo cloned!</b>\n"
+                        f"{bullet('Bot', name)}\n"
+                        f"{bullet('ID', bot_id_new)}\n"
+                        f"{bullet('Files', len(files_added))}\n"
+                        f"{sc('Go to My Bots to start it.')}{FOOTER}", parse_mode="HTML")
+                except Exception as e:
+                    bot.send_message(uid, f"{G['no']} Clone failed: <code>{esc(e)}</code>", parse_mode="HTML")
+            threading.Thread(target=_clone_bg, daemon=True).start()
             return
         if flow == "await_adm_private_apgrp":
             if not is_owner(uid): USER_STATES.pop(uid, None); return
@@ -9505,6 +9645,25 @@ def on_text(m: types.Message) -> None:
             # ever read, so the change silently appeared to do nothing.
             # Only genuine bot-config keys (the ones in
             # _BOT_CONFIG_DEFAULTS, read via _bc_get) should get the prefix.
+            if key == "add_secret_name":
+                # Special case: add the typed name to the in-memory
+                # SECRET_ENV_NAMES set and also persist it so it survives
+                # restarts via the settings store.
+                name_to_add = str(val_store).strip().upper()
+                if name_to_add:
+                    SECRET_ENV_NAMES.add(name_to_add)
+                    existing = list(get_setting("extra_secret_names", []) or [])
+                    if name_to_add not in existing:
+                        existing.append(name_to_add)
+                        set_setting("extra_secret_names", existing)
+                    audit(uid, "add_secret_name", name_to_add)
+                    USER_STATES.pop(uid, None)
+                    bot.reply_to(m, f"{G['ok']} Added <code>{esc(name_to_add)}</code> to secret strip list.",
+                                 parse_mode="HTML")
+                else:
+                    USER_STATES.pop(uid, None)
+                    bot.reply_to(m, f"{G['no']} Empty name — nothing added.")
+                return
             if key in _BOT_CONFIG_DEFAULTS:
                 set_setting(f"bc_{key}", val_store)
             else:
@@ -11851,7 +12010,7 @@ def _sched_broadcast(msg, target="all"):
 # ─── Referral Engine ────────────────────────────────────────────────────────
 
 def _ref_process(new_uid, ref_uid):
-    if not _ff_get("referral_enabled") or new_uid == ref_uid:
+    if not _ff_get("referral_system") or new_uid == ref_uid:
         return False
     d       = db_load()
     ref_u   = d["users"].get(str(ref_uid), {})
@@ -15325,7 +15484,7 @@ def render_github_subroute(call: types.CallbackQuery, data: str) -> None:
                 res = gh_backup_now()
                 bot.send_message(uid,
                     f"<b>{'OK' if res.get('ok') else G['no']} GitHub Backup</b>\n"
-                    f"{bullet('Size', fmt_bytes(res.get('sizeBytes', 0)))}\n"
+                    f"{bullet('Size', str(res.get('sizeMB', '?')) + ' MB')}\n"
                     f"{bullet('Error', res.get('error', '') or 'none')}", parse_mode="HTML")
             except Exception as e:
                 bot.send_message(uid, f"{G['no']} {esc(e)}", parse_mode="HTML")
@@ -15407,10 +15566,15 @@ def _handle_pip_install(m: types.Message, st: Dict[str, Any]) -> None:
         try:
             bot_dir = Path(b.get("dir", ""))
             bot_dir.mkdir(parents=True, exist_ok=True)
-            venv_pip = bot_dir / "venv" / "bin" / "pip"
-            pip_cmd = str(venv_pip) if venv_pip.exists() else "pip"
-            result = _sp.run([pip_cmd, "install"] + packages[:10],
-                             capture_output=True, text=True, timeout=120)
+            # Install into the bot's own .deps directory (same as install_deps)
+            # so packages are isolated per-bot and don't pollute the host env.
+            deps_dir = bot_dir / ".deps"
+            deps_dir.mkdir(parents=True, exist_ok=True)
+            result = _sp.run(
+                [sys.executable, "-m", "pip", "install",
+                 "--target", str(deps_dir),
+                 "--quiet", "--no-warn-script-location"] + packages[:10],
+                capture_output=True, text=True, timeout=120)
             out = (result.stdout + result.stderr)[-1500:]
             ok = result.returncode == 0
             audit(m.from_user.id, "pip_install", f"bot={bot_id} ok={ok}")
@@ -16129,6 +16293,10 @@ def main() -> int:
         ANNOUNCE_CHANNEL = ac
     gh_load_config()
     GH["autoEnabled"] = bool(get_setting("github_auto_enabled", True))
+    # Load any admin-added extra secret env names from settings
+    for _esn in (get_setting("extra_secret_names", []) or []):
+        if isinstance(_esn, str) and _esn.strip():
+            SECRET_ENV_NAMES.add(_esn.strip().upper())
     _load_required_groups()
     _apply_plan_overrides()
     _apply_payment_method_overrides()
