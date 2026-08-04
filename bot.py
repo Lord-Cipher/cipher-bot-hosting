@@ -7069,7 +7069,7 @@ def action_adm_pay_method_number(call: types.CallbackQuery, data: str) -> None:
             ack(call, "Unknown method"); return
         return render_adm_confirm_custom(call, f"adm_pay_method_del_{key}",
                                          f"Delete payment method {m['name']}", "adm_pay_methods")
-    if data.startswith("adm_pay_method_del_"):
+    elif data.startswith("adm_pay_method_del_"):
         key = data[len("adm_pay_method_del_"):]
         if _delete_payment_method(key):
             audit(call.from_user.id, "pm_delete", key)
@@ -14294,14 +14294,15 @@ def render_bot_delete_confirm(call: types.CallbackQuery, bot_id: str) -> None:
     if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
         ack(call, "Not yours"); return
     cap = (
-        f"<b>{G['warn']} {sc('Confirm Delete')}</b>\n{G['div']}\n"
-        f"{sc('Delete')} <b>{esc(b['name'])}</b>?\n"
-        f"{sc('Keeps files but removes the bot record')}.{FOOTER}"
+        f"<b>{G['warn']} {sc('Delete Options')}</b>\n{G['div']}\n"
+        f"{sc('Select how you want to delete')} <b>{esc(b['name'])}</b>:{FOOTER}"
     )
-    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        Btn(f"{G['ok']}  Delete Record", callback_data=f"bot_delyes_{bot_id}", style="danger"),
-        Btn(f"{G['no']}  Cancel",         callback_data=f"bot_view_{bot_id}",  style="primary"),
+        Btn(f"{G['no']}  Delete Everything", callback_data=f"bot_delall_{bot_id}", style="danger"),
+        Btn(f"\U0001f5d1\ufe0f  Delete Files Only", callback_data=f"bot_delfiles_{bot_id}", style="danger"),
+        Btn(f"{G['ok']}  Delete Record Only", callback_data=f"bot_delyes_{bot_id}", style="danger"),
+        Btn(f"{G['back']}  Cancel",            callback_data=f"bot_view_{bot_id}",  style="primary"),
     )
     show_text(call.message.chat.id, cap, kb, call=call)
 
@@ -14361,8 +14362,8 @@ def render_bot_delall_confirm(call: types.CallbackQuery, bot_id: str) -> None:
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        Btn(f"{G['no']}  Delete All", callback_data=f"bot_delalyes_{bot_id}", style="danger"),
-        Btn(f"{G['ok']}  Cancel",     callback_data=f"bot_view_{bot_id}",     style="primary"),
+        Btn(f"{G['no']}  Delete All", callback_data=f"bot_delallyes_{bot_id}", style="danger"),
+        Btn(f"{G['ok']}  Cancel",     callback_data=f"bot_view_{bot_id}",      style="primary"),
     )
     show_text(call.message.chat.id, cap, kb, call=call)
 
@@ -14378,7 +14379,7 @@ def action_bot_delall(call: types.CallbackQuery, bot_id: str) -> None:
         pass
     delete_bot_doc(bot_id)
     audit(call.from_user.id, "bot_delall", f"bot={bot_id}")
-    ack(call, "Deleted everything")
+    ack(call, "Everything deleted")
     render_bots_menu(call)
 
 
@@ -16095,10 +16096,13 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_tunnel_"):      start_tunnel_flow(call, data.split("_", 2)[2]); return
     if data.startswith("bot_delete_"):      render_bot_delete_confirm(call, data.split("_", 2)[2]); return
     if data.startswith("bot_delyes_"):      action_bot_delete(call, data.split("_", 2)[2]); return
-    if data.startswith("bot_delfiles_"):    render_bot_delfiles_confirm(call, data.split("_", 2)[2]); return
-    if data.startswith("bot_delall_"):      render_bot_delall_confirm(call, data.split("_", 2)[2]); return
+    # Fixed: specific prefixes (longer) must come before general prefixes (shorter)
+    # to avoid incorrect matching (e.g. bot_delfilesyes_ matching bot_delfiles_).
     if data.startswith("bot_delfilesyes_"): action_bot_delfiles(call, data.split("_", 2)[2]); return
-    if data.startswith("bot_delalyes_"):    action_bot_delall(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_delfiles_"):    render_bot_delfiles_confirm(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_delallyes_"):   action_bot_delall(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_delall_"):      render_bot_delall_confirm(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_delalyes_"):    action_bot_delall(call, data.split("_", 2)[2]); return # Backwards compatibility
     # GitHub user hosting
     if data == "gh_host_clone":       action_gh_host_clone(call); return
     if data == "gh_host_set_token":   action_gh_host_set_token(call); return
