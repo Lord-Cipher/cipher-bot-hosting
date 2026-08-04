@@ -1292,7 +1292,7 @@ def admin_can(uid: int, action: str) -> bool:
         return action in {
             "view_stats", "view_users", "find_user", "ban_user", "give_plan",
             "approve_payment", "reply_ticket", "broadcast_view", "user_note",
-            "manage_coupons",
+            "manage_coupons", "manage_plans",
         }
     if role == "view-only":
         return action in {"view_stats", "view_users", "find_user"}
@@ -1922,10 +1922,16 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f" Wᴀʟʟᴇᴛ",     callback_data="menu_wallet",   style="primary"),
         Btn(f"Tɪᴄᴋᴇᴛꜱ",    callback_data="menu_tickets",  style="primary"),
     )
-    kb.add(
-        Btn(f" Fʀᴇᴇ Tʀɪᴀʟ",    callback_data="menu_trial",    style="primary"),
-        Btn(f" Cᴏᴜᴘᴏɴ",        callback_data="menu_coupon",   style="primary"),
-    )
+    if bool(get_setting("trial_enabled", True)):
+        kb.add(
+            Btn(f" Fʀᴇᴇ Tʀɪᴀʟ",    callback_data="menu_trial",    style="primary"),
+            Btn(f" Cᴏᴜᴘᴏɴ",        callback_data="menu_coupon",   style="primary"),
+        )
+    else:
+        kb.add(
+            Btn(f" Cᴏᴜᴘᴏɴ",        callback_data="menu_coupon",   style="primary"),
+        )
+        
     kb.add(
         Btn(f"Hᴇʟᴘ",          callback_data="menu_help",     style="primary"),
         Btn(f"Sᴜᴘᴘᴏʀᴛ", callback_data="menu_support",  style="primary"),
@@ -2031,13 +2037,14 @@ def admin_kb(uid: int = 0) -> types.InlineKeyboardMarkup:
     row((f"{G['plus']}  Gɪᴠᴇ Pʟᴀɴ",      "adm_giveplan", "success"),
         (f"{G['ok']}  Aᴘᴘʀᴏᴠᴇ Pᴀʏ",      "adm_approve",  "success"))
     row((f"{G['key']}  Cᴏᴜᴘᴏɴꜱ",         "adm_coupons",  "primary"),
-        (f"{G['ticket']}  Tɪᴄᴋᴇᴛꜱ",      "adm_tickets",  "primary"))
-    row((f"{G['shield']}  Aᴅᴍɪɴꜱ",       "adm_admins",   "primary"),
+        (f"{G['eye']}  Fʀᴇᴇ Tʀɪᴀʟ",       "adm_trial",    "primary"))
+    row((f"{G['ticket']}  Tɪᴄᴋᴇᴛꜱ",      "adm_tickets",  "primary"),
         (f"{G['eye']}  Aᴜᴅɪᴛ Lᴏɢ",       "adm_audit",    "primary"))
-    row((f"{G['cog']}  Gɪᴛʜᴜʙ Bᴀᴄᴋᴜᴘ",   "adm_github",   "primary"),
-        (f"{G['lock']}  Sᴇᴄᴜʀɪᴛʏ",       "adm_security", "danger"))
-    row((f"{G['warn']}  Mᴀɪɴᴛᴇɴᴀɴᴄᴇ",    "adm_maint",    "danger"),
-        (f"{G['settings']}  Sᴇᴛᴛɪɴɢꜱ",   "adm_settings", "primary"))
+    row((f"{G['shield']}  Aᴅᴍɪɴꜱ",       "adm_admins",   "primary"),
+        (f"{G['cog']}  Gɪᴛʜᴜʙ Bᴀᴄᴋᴜᴘ",   "adm_github",   "primary"))
+    row((f"{G['lock']}  Sᴇᴄᴜʀɪᴛʏ",       "adm_security", "danger"),
+        (f"{G['warn']}  Mᴀɪɴᴛᴇɴᴀɴᴄᴇ",    "adm_maint",    "danger"))
+    row((f"{G['settings']}  Sᴇᴛᴛɪɴɢꜱ",   "adm_settings", "primary"))
     if uid == 0 or _admin_menu_role_ok(uid, "adm_settings"):
         appr_on = bool(get_setting("approval_required", True))
         pend_n = len(get_setting("pending_uploads", {}) or {})
@@ -4048,6 +4055,7 @@ _ADMIN_ROUTE_ACTION: Dict[str, str] = {
     "adm_tickets": "reply_ticket",
     "adm_broadcast": "broadcast_view",
     "adm_coupons": "manage_coupons",
+    "adm_trial": "manage_plans",
     "adm_github": "github_backup",
     "adm_force_backup": "github_backup",
 }
@@ -4542,6 +4550,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_payments(call)
     if data == "adm_coupons":
         return render_adm_coupons(call)
+    if data == "adm_trial":
+        return render_adm_trial(call)
     if data == "adm_tickets":
         return render_adm_tickets(call)
     if data == "adm_admins":
@@ -4558,8 +4568,21 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         cur = bool(get_setting("maintenance", False))
         set_setting("maintenance", not cur)
         audit(call.from_user.id, "maintenance_toggle", f"now={not cur}")
-        ack(call, f"Maintenance: {'ON' if not cur else 'OFF'}")
+        ack(call, f"Maintenance {'ON' if not cur else 'OFF'}")
         return render_adm_maintenance(call)
+    if data == "adm_trial_toggle":
+        cur = bool(get_setting("trial_enabled", True))
+        set_setting("trial_enabled", not cur)
+        ack(call, f"Trial {'disabled' if cur else 'enabled'}")
+        return render_adm_trial(call)
+    if data == "adm_trial_setplan":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_trial_plan"}
+        bot.send_message(call.message.chat.id, f"Send the plan name for free trial (e.g. pro, starter):")
+        return ack(call)
+    if data == "adm_trial_setdays":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_trial_days"}
+        bot.send_message(call.message.chat.id, f"Send the number of days for free trial:")
+        return ack(call)
     if data == "adm_settings":
         return render_adm_settings(call)
     if data == "adm_approval_toggle":
@@ -9132,6 +9155,26 @@ def on_text(m: types.Message) -> None:
             return _handle_coupon_user(m)
         if flow == "await_coupon_admin":
             return _handle_coupon_admin(m)
+        if flow == "await_adm_trial_plan":
+            plan = text.lower()
+            if plan not in PLAN_LIMITS:
+                bot.reply_to(m, f"Invalid plan. Available: {', '.join(PLAN_LIMITS.keys())}")
+                return
+            set_setting("trial_plan", plan)
+            USER_STATES.pop(uid, None)
+            bot.reply_to(m, f"Free trial plan set to {plan}")
+            return
+        if flow == "await_adm_trial_days":
+            try:
+                days = int(text)
+                if days <= 0: raise ValueError
+            except:
+                bot.reply_to(m, "Please send a positive number.")
+                return
+            set_setting("trial_days", days)
+            USER_STATES.pop(uid, None)
+            bot.reply_to(m, f"Free trial duration set to {days} days")
+            return
         if flow == "await_admin_admins":
             return _handle_admin_admins(m)
         if flow == "await_ticket_subject":
@@ -13980,31 +14023,45 @@ def render_support(call: types.CallbackQuery) -> None:
 
 
 def render_trial(call: types.CallbackQuery) -> None:
+    if not bool(get_setting("trial_enabled", True)):
+        ack(call, "Free trial is currently disabled."); return
+        
     uid = call.from_user.id
     u = db_load()["users"][str(uid)]
+    plan = get_setting("trial_plan", "pro")
+    days = int(get_setting("trial_days", 2))
+    hours = days * 24
+    
     cap = (
         f"<b>{G['eye']} {sc('Free Trial')}</b>\n"
         f"{G['div_eq']}\n"
-        f"{sc('Get a free 48-hour Pro trial — one time per account')}.\n"
+        f"{sc(f'Get a free {hours}-hour {plan.capitalize()} trial — one time per account')}.\n"
         f"{bullet('Status', 'Already used' if u.get('trial_used') else 'Available')}{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup()
     if not u.get("trial_used"):
-        kb.add(Btn(f"{G['ok']}  {sc('Claim 48h Pro Trial')}", callback_data="trial_claim"))
+        kb.add(Btn(f"{G['ok']}  {sc(f'Claim {hours}h {plan.capitalize()} Trial')}", callback_data="trial_claim"))
     kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main"))
     show_menu(call.message.chat.id, PHOTOS.get("trial", PHOTOS["main"]), cap, kb, call=call)
 
 
 def action_trial_claim(call: types.CallbackQuery) -> None:
+    if not bool(get_setting("trial_enabled", True)):
+        ack(call, "Disabled"); return
+        
     uid = call.from_user.id
     d = db_load()
     u = d["users"][str(uid)]
     if u.get("trial_used"):
         ack(call, "Already used"); return
+        
+    plan = get_setting("trial_plan", "pro")
+    days = int(get_setting("trial_days", 2))
+    
     u["trial_used"] = True
     db_save(d)
-    grant_plan(uid, "pro", days=2)
-    audit(0, "trial_grant", f"uid={uid}")
+    grant_plan(uid, plan, days=days)
+    audit(0, "trial_grant", f"uid={uid} plan={plan} days={days}")
     ack(call, "Trial activated!")
     render_main_menu(call.message.chat.id, uid, call)
 
@@ -14662,7 +14719,7 @@ def render_adm_approve(call: types.CallbackQuery) -> None:
 def render_adm_coupons(call: types.CallbackQuery) -> None:
     d = db_load()["coupons"]
     rows = "\n".join(
-        f"{G['bullet']} <code>{esc(code)}</code> \u2014 {esc(c.get('percent'))}% {G['bullet']} {esc(c.get('uses_left'))} uses"
+        f"{G['bullet']} <code>{esc(code)}</code> \u2014 {esc(c.get('percent', c.get('pct', 0)))}% {G['bullet']} {esc(c.get('uses_left'))} uses"
         for code, c in d.items()
     ) or f"<i>{sc('no coupons yet')}</i>"
     cap = (
@@ -14691,6 +14748,33 @@ def render_adm_tickets(call: types.CallbackQuery) -> None:
         kb.add(Btn(f"{G['eye']}  #{t['id']}", callback_data=f"ticket_view_{t['id']}"))
     kb.add(Btn(f"{G['back']}  {sc('Admin')}", callback_data="menu_admin"))
     show_menu(call.message.chat.id, PHOTOS.get("ticket", PHOTOS["admin"]), cap, kb, call=call)
+
+
+def render_adm_trial(call: types.CallbackQuery) -> None:
+    enabled = bool(get_setting("trial_enabled", True))
+    plan = get_setting("trial_plan", "pro")
+    days = int(get_setting("trial_days", 2))
+    
+    cap = (
+        f"<b>{G['eye']} {sc('Free Trial Settings')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"{bullet('Status', 'ENABLED' if enabled else 'DISABLED')}\n"
+        f"{bullet('Trial Plan', plan.capitalize())}\n"
+        f"{bullet('Duration', f'{days} days')}\n"
+        f"{G['div']}\n"
+        f"Users can claim this trial once.{FOOTER}"
+    )
+    
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        Btn(f"{G['ok'] if enabled else G['no']} {'Disable' if enabled else 'Enable'}", callback_data="adm_trial_toggle", style="danger" if enabled else "success"),
+        Btn(f"{G['star']} Set Plan", callback_data="adm_trial_setplan", style="primary"),
+    )
+    kb.add(
+        Btn(f"{G['clock']} Set Days", callback_data="adm_trial_setdays", style="primary"),
+        Btn(f"{G['back']} Admin", callback_data="menu_admin", style="primary"),
+    )
+    show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
 def render_adm_admins(call: types.CallbackQuery) -> None:
