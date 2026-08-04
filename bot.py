@@ -1292,6 +1292,7 @@ def admin_can(uid: int, action: str) -> bool:
         return action in {
             "view_stats", "view_users", "find_user", "ban_user", "give_plan",
             "approve_payment", "reply_ticket", "broadcast_view", "user_note",
+            "manage_coupons",
         }
     if role == "view-only":
         return action in {"view_stats", "view_users", "find_user"}
@@ -3255,8 +3256,12 @@ def gh_backup_now() -> Dict[str, Any]:
         tar = _make_tarball()
         buf = tar.read_bytes()
         size_mb = len(buf) / 1024 / 1024
-        if size_mb > 95:
-            raise RuntimeError(f"Backup {size_mb:.1f} MB > 95 MB GitHub limit")
+        # GitHub API has a 25MB limit for 'contents' PUT.
+        # Files up to 100MB are allowed in the repo but require the Git Data API
+        # which is not currently implemented here.
+        if size_mb > 25:
+            raise RuntimeError(f"Backup {size_mb:.1f} MB > 25 MB GitHub API limit. "
+                               f"Please use per-bot sync for large data.")
         ts = ts_iso().replace(":", "-").replace(".", "-")
         ok1 = _gh_put_file("backups/latest.tar.gz", buf, f"chore(panel): backup {ts}")
         ok2 = _gh_put_file(f"backups/{ts}.tar.gz", buf, f"chore(panel): snapshot {ts}")
@@ -3266,7 +3271,8 @@ def gh_backup_now() -> Dict[str, Any]:
             raise RuntimeError("upload failed")
         GH["lastBackup"] = ts
         GH["lastError"] = None
-        return {"ok": True, "sizeMB": f"{size_mb:.2f}", "ts": ts}
+        # BUGS_AND_FIXES.md note: UI expects sizeBytes for formatting
+        return {"ok": True, "sizeMB": f"{size_mb:.2f}", "sizeBytes": len(buf), "ts": ts}
     except Exception as e:
         GH["lastError"] = str(e)
         return {"ok": False, "error": str(e)}
@@ -3468,11 +3474,24 @@ def _gh_get_file(path: str) -> Optional[bytes]:
     if not gh_enabled():
         return None
     try:
+        # Use a longer timeout for downloads
         r = _gh("GET", _gh_repo_url(f"contents/{path}"),
-                params={"ref": GH["branch"]})
+                params={"ref": GH["branch"]}, timeout=120)
         if r.status_code != 200:
             return None
-        return base64.b64decode(r.json()["content"])
+        
+        js = r.json()
+        # If file is > 1MB, GitHub won't include 'content' in the JSON.
+        # We must use the 'download_url'.
+        if "content" not in js and "download_url" in js:
+            raw_url = js["download_url"]
+            # Download raw content directly
+            r_raw = requests.get(raw_url, headers={"Authorization": f"token {GH['token']}"}, timeout=300)
+            if r_raw.status_code == 200:
+                return r_raw.content
+            return None
+            
+        return base64.b64decode(js.get("content", ""))
     except Exception:
         return None
 
@@ -4028,6 +4047,9 @@ _ADMIN_ROUTE_ACTION: Dict[str, str] = {
     "adm_pay_reject_select": "approve_payment",
     "adm_tickets": "reply_ticket",
     "adm_broadcast": "broadcast_view",
+    "adm_coupons": "manage_coupons",
+    "adm_github": "github_backup",
+    "adm_force_backup": "github_backup",
 }
 
 
@@ -9073,13 +9095,18 @@ def on_text(m: types.Message) -> None:
     if not RATE.allow(uid):
         maybe_auto_ban(uid, "rate")
         return
+        
+    # Security check: verified & joined groups
+    if not require_verified(m.chat.id, uid):
+        return
+    if not require_group_membership(m.chat.id, uid):
+        return
+        
     text = (m.text or "").strip()
     if text.startswith("/"):
         return  # handled by command handlers
     get_or_create_user(m.from_user)
     if maintenance_block(uid):
-        return
-    if not require_verified(m.chat.id, uid):
         return
 
     st = USER_STATES.get(uid) or {}
@@ -9951,6 +9978,9 @@ def on_text(m: types.Message) -> None:
                     d["coupons"][code] = {
                         "plan":       plan_key,
                         "pct":        disc_pct,
+                        "percent":    disc_pct,
+                        "discount_pct": disc_pct,
+                        "discount":    disc_pct,
                         "max_uses":   max_uses,
                         "uses_left":  max_uses,
                         "expiry":     expiry_ts,
@@ -12308,10 +12338,20 @@ def _payment_create_request(uid, plan, amount, method, coupon=""):
     import random, string
     req_id   = "pay_" + "".join(random.choices(string.ascii_lowercase+string.digits, k=12))
     discount = 0.0
+    
+    # Auto-apply active coupon if none provided
+    if not coupon:
+        u = db_load_ro()["users"].get(str(uid)) or {}
+        coupon = u.get("active_coupon", "")
+        
     if coupon:
-        ok, _, c = _coupon_validate(coupon, uid)
-        if ok:
-            discount = float(c.get("discount_pct", 0))
+        # Note: _coupon_validate checks if uid in c['used_by']. 
+        # For a pre-redeemed coupon, it's already in used_by.
+        # We need a way to validate without the 'used_by' check if it's already redeemed.
+        d = db_load_ro()
+        c = d.get("coupons", {}).get(coupon.upper())
+        if c:
+            discount = float(c.get("discount_pct", c.get("percent", 0)))
             flat     = float(c.get("discount_flat", 0))
             if discount: amount = round(amount*(1-discount/100), 2)
             if flat:     amount = max(0, round(amount-flat, 2))
@@ -12354,6 +12394,12 @@ def _payment_approve(req_id, admin_uid, note=""):
             u["wallet"] = int(u.get("wallet", 0)) + int(req.get("amount", 0))
     elif plan:
         grant_plan(uid, plan)
+    
+    # Clear active coupon after successful purchase
+    u = d["users"].get(str(uid))
+    if u:
+        u.pop("active_coupon", None)
+        
     db_save(d)
     audit(admin_uid, "payment_approved", f"req={req_id} uid={uid} plan={plan}")
     _wh_fire("payment_approved", {"req_id": req_id, "uid": uid, "plan": plan})
@@ -13786,6 +13832,18 @@ def render_payment_screen(call: types.CallbackQuery, data: str) -> None:
         ack(call, "This payment method is currently unavailable.")
         return render_plan_detail(call, plan) if plan else None
     p = PLAN_LIMITS.get(plan or "")
+    
+    # Calculate discount if active coupon exists
+    u_doc = db_load_ro()["users"].get(str(call.from_user.id)) or {}
+    active_coupon = u_doc.get("active_coupon")
+    discount = 0.0
+    flat = 0.0
+    if active_coupon:
+        c_doc = db_load_ro().get("coupons", {}).get(active_coupon.upper())
+        if c_doc:
+            discount = float(c_doc.get("discount_pct", c_doc.get("percent", 0)))
+            flat = float(c_doc.get("discount_flat", 0))
+
     cap = (
         f"<b>{pm['tag']} {esc(pm['name'])} \u2014 {sc('Payment')}</b>\n"
         f"{G['div_eq']}\n"
@@ -13793,7 +13851,14 @@ def render_payment_screen(call: types.CallbackQuery, data: str) -> None:
         f"{bullet('Type', pm['type'])}\n"
     )
     if p:
-        price_txt = f"{p['price']}{cur_sym()}"
+        price = float(p.get("price", 0))
+        if discount: price = round(price * (1 - discount / 100), 2)
+        if flat: price = max(0, round(price - flat, 2))
+        
+        price_txt = f"{price}{cur_sym()}"
+        if discount or flat:
+            price_txt += f" (Coupon: {active_coupon} applied)"
+            
         cap += f"{bullet('Plan', p['name'])}\n{bullet('Amount', price_txt)}\n"
     cap += (
         f"{G['div']}\n"
@@ -13811,7 +13876,11 @@ def render_payment_screen(call: types.CallbackQuery, data: str) -> None:
 
 
 def start_proof_flow(call: types.CallbackQuery) -> None:
-    USER_STATES[call.from_user.id] = {"flow": "await_payment_proof"}
+    # Preserve existing method/plan if present
+    st = USER_STATES.get(call.from_user.id) or {}
+    st["flow"] = "await_payment_proof"
+    USER_STATES[call.from_user.id] = st
+    
     bot.send_message(
         call.message.chat.id,
         f"{G['plus']} {sc('Send your payment screenshot or transaction id now')}. /cancel {sc('to abort')}.",
@@ -14813,14 +14882,20 @@ def render_adm_github(call: types.CallbackQuery) -> None:
     repo = GH.get("repo", "\u2014")
     branch = GH.get("branch", "main")
     interval = GH.get("intervalMin", 360)
+    last_ts = GH.get("lastBackup", "\u2014")
+    last_err = GH.get("lastError")
+    status_line = "Active" if enabled else "Not Configured"
+    if last_err:
+        status_line = f"Error: {esc(last_err[:30])}"
+        
     cap = (
         f"<b>{G['cog']} {sc('GitHub Backup')}</b>\n"
         f"{G['div_eq']}\n"
-        f"{bullet('Status', 'Active' if enabled else 'Not Configured')}\n"
-        f"{bullet('Repo', repo)}\n"
-        f"{bullet('Branch', branch)}\n"
-        f"{bullet('Interval', f'{interval}min')}\n"
-        f"{bullet('Auto', 'ON' if auto else 'OFF')}\n"
+        f"{bullet('Status',   status_line)}\n"
+        f"{bullet('Repo',     repo)}\n"
+        f"{bullet('Branch',   branch)}\n"
+        f"{bullet('Last Sync', last_ts)}\n"
+        f"{bullet('Auto',     'ON' if auto else 'OFF')}\n"
         f"{G['div']}{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
@@ -15683,6 +15758,8 @@ def _handle_ban_cmd(m: types.Message) -> None:
 
 def _handle_giveplan_cmd(m: types.Message) -> None:
     USER_STATES.pop(m.from_user.id, None)
+    if not admin_can(m.from_user.id, "give_plan"):
+        bot.reply_to(m, f"{G['no']} {sc('Insufficient permission')}."); return
     parts = (m.text or "").split()
     if len(parts) < 2:
         bot.reply_to(m, f"{G['no']} Format: <code>uid plan [days]</code>", parse_mode="HTML"); return
@@ -15700,7 +15777,7 @@ def _handle_giveplan_cmd(m: types.Message) -> None:
 
 
 def _handle_broadcast(m: types.Message) -> None:
-    if not is_admin(m.from_user.id):
+    if not admin_can(m.from_user.id, "broadcast_view"):
         USER_STATES.pop(m.from_user.id, None); return
     text = (m.text or "").strip()
     USER_STATES.pop(m.from_user.id, None)
@@ -15774,26 +15851,44 @@ def _handle_broadcast(m: types.Message) -> None:
 
 def _handle_coupon_user(m: types.Message) -> None:
     code = (m.text or "").strip().upper()
-    USER_STATES.pop(m.from_user.id, None)
+    uid = m.from_user.id
+    USER_STATES.pop(uid, None)
+    
+    ok, err, c = _coupon_validate(code, uid)
+    if not ok:
+        bot.reply_to(m, f"{G['no']} {err}"); return
+        
     d = db_load()
-    c = d["coupons"].get(code)
-    if not c:
-        bot.reply_to(m, f"{G['no']} Invalid code"); return
-    if int(c.get("uses_left", 0)) <= 0:
-        bot.reply_to(m, f"{G['no']} Code expired"); return
-    c["uses_left"] = int(c.get("uses_left", 0)) - 1
-    pct = int(c.get("percent", 0))
-    d["users"].get(str(m.from_user.id), {}).setdefault("coupons_used", []).append(code)
+    # Decrement uses
+    c_in_db = d["coupons"].get(code)
+    if c_in_db and c_in_db.get("uses_left") is not None:
+        c_in_db["uses_left"] = max(0, c_in_db["uses_left"] - 1)
+    
+    # Add to used list
+    u = d["users"].get(str(uid))
+    if not u:
+        bot.reply_to(m, f"{G['no']} User not found"); return
+        
+    u.setdefault("coupons_used", []).append(code)
+    # Store as active coupon for next purchase
+    u["active_coupon"] = code
+    
     db_save(d)
-    audit(m.from_user.id, "coupon_redeem", f"code={code} pct={pct}")
+    
+    pct = c.get("discount_pct", c.get("percent", 0))
+    flat = c.get("discount_flat", 0)
+    
+    disc_txt = f"{pct}% off" if pct else f"{flat}{cur_sym()} off"
+    audit(uid, "coupon_redeem", f"code={code} pct={pct} flat={flat}")
+    
     bot.reply_to(m,
         f"<b>{G['ok']} Coupon applied</b>: <code>{esc(code)}</code>\n"
-        f"{bullet('Discount', f'{pct}% off next plan purchase')}",
+        f"{bullet('Discount', f'{disc_txt} next plan purchase')}",
         parse_mode="HTML")
 
 
 def _handle_coupon_admin(m: types.Message) -> None:
-    if not is_admin(m.from_user.id):
+    if not admin_can(m.from_user.id, "manage_coupons"):
         USER_STATES.pop(m.from_user.id, None); return
     parts = (m.text or "").strip().split()
     if not parts: return
@@ -15806,7 +15901,17 @@ def _handle_coupon_admin(m: types.Message) -> None:
             uses = int(parts[3])
         except Exception:
             bot.reply_to(m, f"{G['no']} bad numbers"); return
-        d["coupons"][code] = {"percent": pct, "uses_left": uses, "created": ts_iso()}
+        # Unify all schema variants for maximum compatibility
+        d["coupons"][code] = {
+            "percent": pct, 
+            "discount_pct": pct,
+            "pct": pct,
+            "discount": pct,
+            "uses_left": uses,
+            "max_uses": uses,
+            "created": ts_iso(),
+            "created_by": m.from_user.id
+        }
         db_save(d)
         audit(m.from_user.id, "coupon_add", f"code={code}")
         USER_STATES.pop(m.from_user.id, None)
@@ -15826,8 +15931,8 @@ def _handle_coupon_admin(m: types.Message) -> None:
 
 
 def _handle_admin_admins(m: types.Message) -> None:
-    if not is_owner(m.from_user.id):
-        return
+    if not admin_can(m.from_user.id, "manage_admins"):
+        bot.reply_to(m, f"{G['no']} {sc('Only owners can manage admins')}."); return
     USER_STATES.pop(m.from_user.id, None)
     parts = m.text.split()
     if len(parts) < 2:
@@ -15934,15 +16039,30 @@ def _handle_ticket_reply(m: types.Message, st: Dict[str, Any]) -> None:
 
 
 def _handle_payment_proof(m: types.Message, st: Dict[str, Any]) -> None:
+    uid = m.from_user.id
     method = st.get("method") or "unknown"
     plan   = st.get("plan")
     p = PLAN_LIMITS.get(plan or "")
+    
+    # Calculate amount with discount
+    price = float((p or {}).get("price", 0))
+    u_doc = db_load_ro()["users"].get(str(uid)) or {}
+    active_coupon = u_doc.get("active_coupon")
+    if active_coupon:
+        c_doc = db_load_ro().get("coupons", {}).get(active_coupon.upper())
+        if c_doc:
+            discount = float(c_doc.get("discount_pct", c_doc.get("percent", 0)))
+            flat = float(c_doc.get("discount_flat", 0))
+            if discount: price = round(price * (1 - discount / 100), 2)
+            if flat: price = max(0, round(price - flat, 2))
+
     pid = rand_token(8)
     d = db_load()
     d["payments"].append({
-        "id": pid, "uid": m.from_user.id, "method": method, "plan": plan,
-        "amount": (p or {}).get("price", 0),
+        "id": pid, "uid": uid, "method": method, "plan": plan,
+        "amount": price,
         "status": "pending", "ts": ts_iso(), "telegram_msg_id": m.message_id,
+        "coupon": active_coupon
     })
     db_save(d)
     USER_STATES.pop(m.from_user.id, None)
