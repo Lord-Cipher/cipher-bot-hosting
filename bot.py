@@ -14085,24 +14085,36 @@ def render_support(call: types.CallbackQuery) -> None:
     show_menu(call.message.chat.id, PHOTOS.get("support", PHOTOS["main"]), cap, back_main_kb(), call=call)
 
 
+def get_active_trial_epoch() -> int:
+    return int(get_setting("active_trial_epoch", 1))
+
+def set_active_trial_epoch(epoch: int) -> None:
+    set_setting("active_trial_epoch", int(epoch))
+
 def render_trial(call: types.CallbackQuery) -> None:
     if not bool(get_setting("trial_enabled", True)):
         ack(call, "Free trial is currently disabled."); return
         
     uid = call.from_user.id
-    u = db_load()["users"][str(uid)]
+    d = db_load()
+    u = d["users"][str(uid)]
     plan = get_setting("trial_plan", "pro")
     days = int(get_setting("trial_days", 2))
     hours = days * 24
+
+    current_epoch = get_active_trial_epoch()
+    user_epoch = int(u.get("trial_epoch", 0))
+    claimed_this_epoch = user_epoch >= current_epoch
+    status_txt = 'Already claimed this trial' if claimed_this_epoch else 'Available'
     
     cap = (
         f"<b>{G['eye']} {sc('Free Trial')}</b>\n"
         f"{G['div_eq']}\n"
-        f"{sc(f'Get a free {hours}-hour {plan.capitalize()} trial — one time per account')}.\n"
-        f"{bullet('Status', 'Already used' if u.get('trial_used') else 'Available')}{FOOTER}"
+        f"{sc(f'Get a free {hours}-hour {plan.capitalize()} trial. When admin issues a new trial campaign, you can claim it once active')}.\n"
+        f"{bullet('Status', status_txt)}{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup()
-    if not u.get("trial_used"):
+    if not claimed_this_epoch:
         kb.add(Btn(f"{G['ok']}  {sc(f'Claim {hours}h {plan.capitalize()} Trial')}", callback_data="trial_claim"))
     kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main"))
     show_menu(call.message.chat.id, PHOTOS.get("trial", PHOTOS["main"]), cap, kb, call=call)
@@ -14115,16 +14127,19 @@ def action_trial_claim(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
     d = db_load()
     u = d["users"][str(uid)]
-    if u.get("trial_used"):
-        ack(call, "Already used"); return
+    current_epoch = get_active_trial_epoch()
+    user_epoch = int(u.get("trial_epoch", 0))
+    if user_epoch >= current_epoch:
+        ack(call, "Already claimed this trial campaign"); return
         
     plan = get_setting("trial_plan", "pro")
     days = int(get_setting("trial_days", 2))
     
+    u["trial_epoch"] = current_epoch
     u["trial_used"] = True
     db_save(d)
     grant_plan(uid, plan, days=days)
-    audit(0, "trial_grant", f"uid={uid} plan={plan} days={days}")
+    audit(0, "trial_grant", f"uid={uid} plan={plan} days={days} epoch={current_epoch}")
     ack(call, "Trial activated!")
     render_main_menu(call.message.chat.id, uid, call)
 
@@ -14341,9 +14356,11 @@ def action_bot_start(call: types.CallbackQuery, bot_id: str) -> None:
     if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
         ack(call, "Not found / not yours"); return
     loading(call, "Starting bot")
-    res = start_child(b)
-    ack(call, "Started" if res["ok"] else f"Err: {res.get('error')}")
-    render_bot_view(call, bot_id)
+    def _bg():
+        res = start_child(b)
+        ack(call, "Started" if res["ok"] else f"Err: {res.get('error')}")
+        render_bot_view(call, bot_id)
+    threading.Thread(target=_bg, daemon=True).start()
 
 
 def action_bot_stop(call: types.CallbackQuery, bot_id: str) -> None:
@@ -14351,9 +14368,11 @@ def action_bot_stop(call: types.CallbackQuery, bot_id: str) -> None:
     if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
         ack(call, "Not found / not yours"); return
     loading(call, "Stopping bot")
-    stop_child(bot_id, manual=True)
-    ack(call, "Stopped")
-    render_bot_view(call, bot_id)
+    def _bg():
+        stop_child(bot_id, manual=True)
+        ack(call, "Stopped")
+        render_bot_view(call, bot_id)
+    threading.Thread(target=_bg, daemon=True).start()
 
 
 def action_bot_restart(call: types.CallbackQuery, bot_id: str) -> None:
@@ -14361,9 +14380,11 @@ def action_bot_restart(call: types.CallbackQuery, bot_id: str) -> None:
     if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
         ack(call, "Not found / not yours"); return
     loading(call, "Restarting bot")
-    res = restart_child(b)
-    ack(call, "Restarted" if res.get("ok") else f"Err: {res.get('error')}")
-    render_bot_view(call, bot_id)
+    def _bg():
+        res = restart_child(b)
+        ack(call, "Restarted" if res["ok"] else f"Err: {res.get('error')}")
+        render_bot_view(call, bot_id)
+    threading.Thread(target=_bg, daemon=True).start()
 
 
 def action_bot_logs(call: types.CallbackQuery, bot_id: str) -> None:
