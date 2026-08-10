@@ -4742,6 +4742,21 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         audit(call.from_user.id, "trial_campaign_new", f"epoch={next_epoch}")
         ack(call, "New trial campaign is active")
         return render_adm_trial(call)
+    if data == "adm_trial_reset_epoch":
+        set_active_trial_epoch(max(1, get_active_trial_epoch() - 1))
+        audit(call.from_user.id, "trial_campaign_reset", f"epoch={get_active_trial_epoch()}")
+        ack(call, "Trial campaign epoch decremented")
+        return render_adm_trial(call)
+    if data == "adm_trial_wipe_claims":
+        d = db_load()
+        for u in d["users"].values():
+            u.pop("trial_epoch", None)
+            u.pop("trial_used", None)
+            u.pop("trial_active_until", None)
+        db_save(d)
+        audit(call.from_user.id, "trial_wipe_claims", "all user trial history reset")
+        ack(call, "All user trial claims reset!")
+        return render_adm_trial(call)
     if data == "adm_settings":
         return render_adm_settings(call)
     if data == "adm_approval_toggle":
@@ -13839,13 +13854,14 @@ def _check_group_membership(uid: int) -> List[Dict[str, Any]]:
             if member.status in ("left", "kicked", "banned"):
                 not_joined.append(grp)
         except Exception as e:
-            # If the bot lacks permissions or chat is inaccessible, don't falsely block users
+            # If the bot cannot check membership (e.g. user not in chat or bot lacking rights),
+            # treat them as not joined so they are prompted correctly.
             s = str(e).lower()
-            if "chat not found" in s or "user not found" in s or "member list is inaccessible" in s:
-                pass
+            if "chat not found" in s or "user not found" in s or "member list is inaccessible" in s or "not a member" in s:
+                not_joined.append(grp)
             else:
-                # Be permissive on transient api errors rather than blocking users entirely
-                pass
+                # For safety under strict force-join enforcement, prompt join on unknown lookup errors
+                not_joined.append(grp)
     return not_joined
 
 
@@ -15020,6 +15036,10 @@ def render_adm_trial(call: types.CallbackQuery) -> None:
     kb.add(
         Btn(f"{G['clock']} Set Hours", callback_data="adm_trial_sethours", style="primary"),
         Btn("➕ New Campaign", callback_data="adm_trial_newcampaign", style="success"),
+    )
+    kb.add(
+        Btn("🔄 Reset Epoch", callback_data="adm_trial_reset_epoch", style="primary"),
+        Btn("🗑️ Wipe Claims", callback_data="adm_trial_wipe_claims", style="danger"),
     )
     kb.add(Btn(f"{G['back']} Admin", callback_data="menu_admin", style="primary"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
