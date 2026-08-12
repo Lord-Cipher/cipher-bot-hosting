@@ -14523,15 +14523,26 @@ def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
     src_info = ""
     if b.get("source") in ("github", "github_browser"):
         src_info = f"\n{bullet('Source', '🐙 GitHub')}\n{bullet('Repo', esc((b.get('gh_repo','?'))[:40]))}"
+
+    # Visual resource gauges
+    cpu_pct = min(100.0, max(0.0, st['cpuPct']))
+    cpu_filled = int(cpu_pct / 10)
+    cpu_bar = '█' * cpu_filled + '░' * (10 - cpu_filled)
+
+    mem_mb = st['memBytes'] / (1024 * 1024)
+    mem_pct = min(100.0, (mem_mb / 512.0) * 100)  # normalized against 512MB cap
+    mem_filled = int(mem_pct / 10)
+    mem_bar = '█' * mem_filled + '░' * (10 - mem_filled)
+
     cap = (
         f"<b>{G['diamond']} {esc(b['name'])}</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Status', status_lbl)}\n"
         f"{bullet('Kind', st['kind'] or '—')}\n"
         f"{bullet('Uptime', fmt_dur(st['uptimeMs']))}\n"
-        f"{bullet('CPU', '{:.1f}%'.format(st['cpuPct']))}\n"
-        f"{bullet('Memory', fmt_bytes(st['memBytes']))}\n"
-        f"{bullet('Size', fmt_bytes(st['sizeBytes']))}\n"
+        f"{bullet('CPU Usage', '{:.1f}% <code>{}</code>'.format(st['cpuPct'], cpu_bar))}\n"
+        f"{bullet('RAM Usage', '{} <code>{}</code>'.format(fmt_bytes(st['memBytes']), mem_bar))}\n"
+        f"{bullet('Storage', fmt_bytes(st['sizeBytes']))}\n"
         f"{bullet('Created', fmt_ts(b.get('created')))}"
         f"{src_info}"
         f"{err_block}\n"
