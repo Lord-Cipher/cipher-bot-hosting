@@ -4316,11 +4316,14 @@ def cb_group_verify(call: types.CallbackQuery) -> None:
             pass
         _send_join_verification(chat_id, uid, not_joined)
     else:
-        ack(call, "✓ Verified! Welcome.")
+        ack(call, "✓ Channels verified!")
         try:
             bot.delete_message(chat_id, call.message.message_id)
         except Exception:
             pass
+        # Proceed to captcha verification
+        if not require_verified(chat_id, uid):
+            return
         render_main_menu(chat_id, uid)
 
 
@@ -13898,7 +13901,19 @@ def _is_verified(uid: int) -> bool:
     if uid == OWNER_ID and OWNER_ID > 0:
         return True
     u = db_load_ro()["users"].get(str(uid)) or {}
-    return bool(u.get("verified"))
+    if not u.get("verified"):
+        return False
+    v_at = u.get("verified_at")
+    if not v_at:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(v_at).replace("Z", "+00:00"))
+        # Verification expires after 24 hours
+        if (now_utc() - dt).total_seconds() > 24 * 3600:
+            return False
+    except Exception:
+        return False
+    return True
 
 
 def _mark_verified(uid: int) -> None:
