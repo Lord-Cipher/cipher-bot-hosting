@@ -9444,15 +9444,16 @@ def on_text(m: types.Message) -> None:
             bot.reply_to(m, f"⏳ Cloning <code>{esc(repo_url)}</code>…", parse_mode="HTML")
             def _clone_bg():
                 try:
-                    import urllib.request, zipfile, io as _io
-                    # Derive the zip URL from the repo URL
+                    # 1. Prepare ID and directory
+                    bot_id_new = secrets.token_hex(8)
                     clean = repo_url.rstrip("/")
-                    if clean.endswith(".git"):
-                        clean = clean[:-4]
-                    zip_url = clean + "/archive/refs/heads/main.zip"
-                    # Try to get user token for private repos
+                    if clean.endswith(".git"): clean = clean[:-4]
+                    repo_name = clean.split("/")[-1]
+                    bot_dir = DIRS["sandbox"] / f"{uid}_{bot_id_new}"
+                    
+                    # 2. Try to get user token for private repos
+                    raw_tok = None
                     token_key_id = db_load()["users"].get(str(uid), {}).get("gh_token_key_id")
-                    headers = {"User-Agent": "cipher-bot-hosting/1.0"}
                     if token_key_id:
                         try:
                             import base64 as _b64
@@ -9461,58 +9462,61 @@ def on_text(m: types.Message) -> None:
                             if cipher_b64:
                                 key = KEYRING.fetch(token_key_id)
                                 if key:
-                                    raw_tok = decrypt_with(key, _b64.b64decode(cipher_b64))
-                                    headers["Authorization"] = f"token {raw_tok.decode()}"
+                                    raw_tok = decrypt_with(key, _b64.b64decode(cipher_b64)).decode()
+                        except Exception: pass
+
+                    # 3. Clone repo using git (best for all branches/submodules)
+                    res = _clone_gh_repo(repo_url, raw_tok, bot_dir)
+                    if not res.get("ok"):
+                        # Fallback to ZIP download if git fails or not installed
+                        import urllib.request, zipfile, io as _io
+                        zip_url = clean + "/archive/refs/heads/main.zip"
+                        headers = {"User-Agent": "cipher-bot-hosting/1.0"}
+                        if raw_tok: headers["Authorization"] = f"token {raw_tok}"
+                        
+                        try:
+                            req = urllib.request.Request(zip_url, headers=headers)
+                            with urllib.request.urlopen(req, timeout=60) as resp:
+                                raw_zip = resp.read()
                         except Exception:
-                            pass
-                    req = urllib.request.Request(zip_url, headers=headers)
-                    try:
-                        with urllib.request.urlopen(req, timeout=60) as resp:
-                            raw_zip = resp.read()
-                    except Exception:
-                        # Try master branch
-                        zip_url2 = clean + "/archive/refs/heads/master.zip"
-                        req2 = urllib.request.Request(zip_url2, headers=headers)
-                        with urllib.request.urlopen(req2, timeout=60) as resp2:
-                            raw_zip = resp2.read()
-                    if len(raw_zip) > MAX_UPLOAD_BYTES:
-                        bot.send_message(uid, f"{G['no']} Repo zip too large (>{MAX_UPLOAD_BYTES//1024//1024} MB).")
-                        return
-                    # Create bot doc
-                    bot_id_new = secrets.token_hex(8)
-                    repo_name = clean.split("/")[-1]
-                    bot_dir = DIRS["sandbox"] / f"{uid}_{bot_id_new}"
-                    bot_dir.mkdir(parents=True, exist_ok=True)
-                    # Extract zip
+                            zip_url = clean + "/archive/refs/heads/master.zip"
+                            req = urllib.request.Request(zip_url, headers=headers)
+                            with urllib.request.urlopen(req, timeout=60) as resp:
+                                raw_zip = resp.read()
+                        
+                        bot_dir.mkdir(parents=True, exist_ok=True)
+                        with zipfile.ZipFile(_io.BytesIO(raw_zip)) as zf:
+                            for member in zf.infolist():
+                                if member.is_dir(): continue
+                                rel = "/".join(member.filename.split("/")[1:])
+                                if not rel or ".." in rel.split("/"): continue
+                                tgt = safe_path_join(bot_dir, rel)
+                                tgt.parent.mkdir(parents=True, exist_ok=True)
+                                tgt.write_bytes(zf.read(member))
+                    
+                    # 4. Security scan and database entry
                     files_added = []
-                    with zipfile.ZipFile(_io.BytesIO(raw_zip)) as zf:
-                        for member in zf.infolist():
-                            if member.is_dir(): continue
-                            rel = "/".join(member.filename.split("/")[1:])  # strip top-level dir
-                            if not rel or ".." in rel.split("/"): continue
-                            try:
-                                safe_path_join(bot_dir, rel)
-                            except ValueError:
-                                continue
-                            files_added.append((rel, zf.read(member)))
+                    for root, _, files in os.walk(bot_dir):
+                        for f in files:
+                            if f.startswith(".git"): continue
+                            p = Path(root) / f
+                            rel = str(p.relative_to(bot_dir))
+                            files_added.append((rel, p.read_bytes()))
+                    
                     if not files_added:
                         bot.send_message(uid, f"{G['no']} Repo appears empty."); return
-                    # Security scan
+                        
                     scan = _run_security_scan(files_added, uploader_uid=uid)
                     if scan.get("recommendation") == "REJECT":
-                        bot.send_message(uid,
-                            f"{G['no']} Security scan rejected this repo.\n"
-                            f"<code>{esc(scan.get('summary',''))}</code>", parse_mode="HTML")
+                        bot.send_message(uid, f"{G['no']} Security scan rejected this repo.\n<code>{esc(scan.get('summary',''))}</code>", parse_mode="HTML")
                         rmrf(bot_dir); return
-                    # Encrypt and store files
+
+                    # 5. Encrypt and store files
                     enc_files = []
                     for rel, content in files_added:
-                        tgt = safe_path_join(bot_dir, rel)
-                        tgt.parent.mkdir(parents=True, exist_ok=True)
-                        tgt.write_bytes(content)
                         stored = store_uploaded_file(m.from_user, rel, content)
-                        enc_files.append({"key_id": stored["key_id"], "enc_path": stored["path"],
-                                          "filename": rel, "rel_path": rel})
+                        enc_files.append({"key_id": stored["key_id"], "enc_path": stored["path"], "filename": rel, "rel_path": rel})
+                    
                     name = safe_name(repo_name) + "_gh"
                     doc = {
                         "_id": bot_id_new, "owner": uid, "name": name,
@@ -14825,17 +14829,24 @@ def action_bot_clone(call: types.CallbackQuery, bot_id: str) -> None:
     src_dir = Path(b.get("dir", ""))
     try:
         if src_dir.exists():
-            shutil.copytree(str(src_dir), str(new_dir), dirs_exist_ok=True)
+            # Clean copy: exclude node_modules and temporary files
+            def _ignore(d, fs):
+                return [f for f in fs if f in ("node_modules", ".tmp_run", "__pycache__") or f.endswith(".log")]
+            shutil.copytree(str(src_dir), str(new_dir), ignore=_ignore, dirs_exist_ok=True)
         else:
             new_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         new_dir.mkdir(parents=True, exist_ok=True)
-    new_doc = dict(b)
+    
+    import copy as _copy
+    new_doc = _copy.deepcopy(b)
     new_doc.update({
         "_id": new_id, "name": b["name"] + "_copy", "dir": str(new_dir),
         "created": ts_iso(), "status": "stopped",
     })
     new_doc.pop("last_started", None)
+    new_doc.pop("last_exit_code", None)
+    new_doc.pop("last_error", None)
     d = db_load()
     d["bots"][new_id] = new_doc
     db_save(d)
