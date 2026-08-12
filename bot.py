@@ -16838,9 +16838,12 @@ def cron_runner() -> None:
                 if cron.get("backup_hours"):
                     iv = int(cron["backup_hours"]) * 3600
                     if now - last.get("backup", 0) >= iv:
-                        try: gh_backup_now()
+                        try: _gh_sync_bot_files(bdoc)
                         except Exception: pass
                         last["backup"] = now
+                
+                # Small yield to prevent CPU spikes during heavy bot counts
+                time.sleep(0.01)
             # Auto TG channel backup
             tg_interval = int(get_setting("tg_backup_interval_h", 6)) * 3600
             if _tg_channel_backup_enabled() and bool(get_setting("tg_backup_auto", False)):
