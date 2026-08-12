@@ -4445,14 +4445,12 @@ def cmd_start(m: types.Message) -> None:
             f"We will be back shortly. {SUPPORT_USR} for urgent issues.",
         )
         return
-    # Human verification — first /start ever for this user shows a
-    # progress bar (10% → 100%) followed by a captcha photo. Once the
-    # captcha is solved, render_main_menu is called from cb_verify.
-    if not require_verified(m.chat.id, uid):
+    # Group join verification — user must join required groups FIRST
+    if not require_group_membership(m.chat.id, uid):
         return
 
-    # Group join verification — user must join required groups
-    if not require_group_membership(m.chat.id, uid):
+    # Human verification — captcha verification next
+    if not require_verified(m.chat.id, uid):
         return
 
     # Single message: welcome line is folded into the main-menu caption,
@@ -10780,11 +10778,13 @@ def _run_security_scan(files_added: List[Tuple[str, bytes]],
             "summary":    (worst.get("summary", "") or "")[:200],
         }
         d = db_load()
+        if not isinstance(d.get("scan_log"), list):
+            d["scan_log"] = []
         d["scan_log"].append(log_entry)
         d["scan_log"] = d["scan_log"][-500:]   # keep last 500 entries
         db_save(d)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[scan_log] error saving log: {e}", flush=True)
 
     return worst
 
@@ -13866,16 +13866,19 @@ def _check_group_membership(uid: int) -> List[Dict[str, Any]]:
 
 
 def _send_join_verification(chat_id: int, uid: int, not_joined: List[Dict[str, Any]]) -> None:
-    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb = types.InlineKeyboardMarkup(row_width=1)
     for grp in not_joined:
-        kb.add(Btn(f"Join {grp['name']}", url=grp["link"]))
-    kb.add(Btn("Verify Membership", callback_data="group_verify_check"))
+        name = grp.get("name", "Channel")
+        # Primary style (blue) for join links
+        kb.add(Btn(f"📢 Join {name}", url=grp["link"], style="primary"))
+    # Success style (green) for verify
+    kb.add(Btn("✅ Verify Membership", callback_data="group_verify_check", style="success"))
     cap = (
-        f"<b>{G['shield']} {sc('Group Join Required')}</b>\n"
-        f"{G['div_eq']}\n"
-        f"{sc('Join all groups below to use this bot')}:\n{G['div']}\n"
-        + "\n".join(f"- <a href='{g['link']}'>{esc(g['name'])}</a>" for g in not_joined)
-        + f"\n{G['div']}\n{sc('After joining, tap Verify Membership')}.{FOOTER}"
+        f"<b>{G['shield']} {sc('Channel Join Required')}</b>\n"
+        f"{G['div']}\n"
+        f"<b>{sc('Please join our required channels below to continue.')}</b>\n"
+        f"{sc('Once joined, tap Verify Membership.')}\n"
+        f"{G['div']}{FOOTER}"
     )
     try:
         bot.send_message(chat_id, cap, parse_mode="HTML", reply_markup=kb,
