@@ -4569,6 +4569,18 @@ def cb_root(call: types.CallbackQuery) -> None:
         if not _is_verified(uid):
             ack(call, "Please solve the captcha first — send /start.")
             return
+        
+        # Enforce force-join on every callback interaction
+        not_joined = _check_group_membership(uid)
+        if not_joined:
+            ack(call, "Join required channels first!")
+            try:
+                bot.delete_message(call.message.chat.id, call.message.message_id)
+            except Exception:
+                pass
+            _send_join_verification(call.message.chat.id, uid, not_joined)
+            return
+
         data = call.data or ""
         _route_callback(call, data)
     except Exception as e:
@@ -9294,7 +9306,7 @@ def on_text(m: types.Message) -> None:
         maybe_auto_ban(uid, "rate")
         return
         
-    # Security check: verified & joined groups
+    # Security check: verified & joined groups (enforced on every text/command interaction)
     if not require_verified(m.chat.id, uid):
         return
     if not require_group_membership(m.chat.id, uid):
