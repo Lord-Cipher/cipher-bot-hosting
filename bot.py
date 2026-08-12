@@ -16689,8 +16689,71 @@ def cmd_admin(m: types.Message) -> None:
 # actually live at runtime; this removed copy was already dead code).
 # NOTE: `on_text` used to be defined twice in this file (bulk dedup pass — kept the first definition, which was the one
 # actually live at runtime; this removed copy was already dead code).
+def bot_health_monitor() -> None:
+    """Auto-healing health monitor: checks running bots and restarts crashed ones."""
+    if not bool(get_setting("auto_healing_enabled", True)):
+        return
+    d = db_load()
+    for bid, bdoc in d["bots"].items():
+        if bdoc.get("status") != "running":
+            continue
+        if bdoc.get("slot_suspended") or bdoc.get("approval_status") == "pending":
+            continue
+        
+        with _runner_lock:
+            info = RUNNING.get(bid)
+        
+        crashed = False
+        if not info or info["proc"].poll() is not None:
+            crashed = True
+        
+        if crashed:
+            crashes = bdoc.get("consecutive_crashes", 0)
+            last_crash = bdoc.get("last_crash_ts", 0)
+            now_ts = time.time()
+            
+            if now_ts - last_crash > 1800:
+                crashes = 0
+            
+            if crashes >= 5:
+                bdoc["status"] = "crashed_loop"
+                bdoc["slot_suspended"] = True
+                save_bot(bdoc)
+                try:
+                    owner = bdoc.get("owner")
+                    if owner:
+                        bot.send_message(
+                            owner,
+                            f"<b>🚫 {sc('Bot Paused — Repeated Crashes')}</b>\n\n"
+                            f"Your bot <b>{esc(bdoc.get('name'))}</b> crashed repeatedly and has been stopped to protect server resources.\n"
+                            f"Check your live logs and fix any errors before starting again.{FOOTER}",
+                            parse_mode="HTML"
+                        )
+                except Exception:
+                    pass
+                continue
+            
+            res = start_child(bdoc)
+            bdoc["consecutive_crashes"] = crashes + 1
+            bdoc["last_crash_ts"] = now_ts
+            save_bot(bdoc)
+            
+            try:
+                owner = bdoc.get("owner")
+                if owner:
+                    if res.get("ok"):
+                        bot.send_message(
+                            owner,
+                            f"<b>🛡️ {sc('Auto-Healing Monitor')}</b>\n\n"
+                            f"Your bot <b>{esc(bdoc.get('name'))}</b> stopped unexpectedly and was <b>automatically restarted</b>.",
+                            parse_mode="HTML"
+                        )
+            except Exception:
+                pass
+
+
 def cron_runner() -> None:
-    """Every minute: plan expiry, scheduled broadcasts, per-bot cron, TG backup."""
+    """Every minute: plan expiry, scheduled broadcasts, per-bot cron, TG backup, and health check."""
     last_per_bot: Dict[str, Dict[str, float]] = {}
     last_tg_backup: float = 0.0
     while True:
@@ -16698,6 +16761,7 @@ def cron_runner() -> None:
             now = time.time()
             downgrade_expired_users()
             expiry_reminders()
+            bot_health_monitor()
             # Scheduled broadcasts
             d = db_load()
             sb = d.get("scheduled_broadcasts", [])
