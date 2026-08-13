@@ -14910,32 +14910,43 @@ def start_pip_install_flow(call: types.CallbackQuery, bot_id: str) -> None:
         ack(call, "Not yours"); return
     USER_STATES[call.from_user.id] = {"flow": "await_pip_install", "bot_id": bot_id}
     
-    common_libs = [
+    # Common + Rare packages
+    all_libs = [
         ("pyTelegramBotAPI", "telebot"),
         ("python-telegram-bot", "ptb"),
         ("telethon", "telethon"),
         ("pyrogram", "pyrogram"),
         ("requests", "requests"),
         ("aiohttp", "aiohttp"),
-        ("python-dotenv", "dotenv"),
+        ("cryptography", "cryptography"),
+        ("pymongo", "pymongo"),
+        ("motor", "motor"),
+        ("redis", "redis"),
+        ("apscheduler", "apscheduler"),
+        ("sqlitedict", "sqlitedict"),
         ("pillow", "pillow"),
         ("pandas", "pandas"),
-        ("beautifulsoup4", "bs4")
+        ("beautifulsoup4", "bs4"),
+        ("lxml", "lxml")
     ]
     
     kb = types.InlineKeyboardMarkup(row_width=2)
-    for name, code in common_libs:
+    for name, code in all_libs:
         kb.add(Btn(f"📦 {name}", callback_data=f"pkg_quick_{bot_id}_{name}"))
     kb.add(Btn(f"{G['back']} Back", callback_data=f"bot_view_{bot_id}", style="primary"))
     
-    bot.send_message(call.message.chat.id,
-        f"<b>{G['download']} {sc('Package Installer')}</b>\n"
+    guide_text = (
+        f"<b>{G['download']} {sc('Package Installer & Guide')}</b>\n"
         f"{G['div']}\n"
-        f"{sc('Tap a common library below to install it instantly, or send package names space-separated')}:\n\n"
-        f"<code>requests aiohttp python-dotenv</code>\n\n"
-        f"{sc('Tip: If your bot fails, check the logs for missing modules')}.\n/cancel {sc('to abort')}.",
-        reply_markup=kb,
-        parse_mode="HTML")
+        f"<b>📖 Installation Guide:</b>\n"
+        f"1. Tap any library button below for instant 1-click install.\n"
+        f"2. Or type space-separated packages in chat (e.g., <code>numpy scipy</code>).\n"
+        f"3. All packages are installed into an isolated <code>.deps</code> folder per bot.\n"
+        f"{G['div']}\n"
+        f"<i>Select a package or send names in chat:</i>{FOOTER}"
+    )
+    
+    bot.send_message(call.message.chat.id, guide_text, reply_markup=kb, parse_mode="HTML")
     ack(call)
 
 
@@ -16279,16 +16290,32 @@ def _handle_pip_install(m: types.Message, st: Dict[str, Any]) -> None:
     if not packages:
         bot.reply_to(m, f"{G['no']} no packages"); USER_STATES.pop(m.from_user.id, None); return
     USER_STATES.pop(m.from_user.id, None)
-    bot.reply_to(m, f"\u23f3 Installing {' '.join(packages[:5])}\u2026")
+    
+    # Send initial progress message
+    p_msg = bot.send_message(m.chat.id, f"<b>📦 Package Installer</b>\n{G['div']}\nInitializing installation for: <code>{' '.join(packages[:5])}</code>\n[░░░░░░░░░░] <b>1%</b>", parse_mode="HTML")
+    
     def _bg():
         import subprocess as _sp
         try:
             bot_dir = Path(b.get("dir", ""))
             bot_dir.mkdir(parents=True, exist_ok=True)
-            # Install into the bot's own .deps directory (same as install_deps)
-            # so packages are isolated per-bot and don't pollute the host env.
             deps_dir = bot_dir / ".deps"
             deps_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Animate progress bar steps
+            steps = [
+                (25, "[██░░░░░░░░] <b>25%</b> — Resolving dependencies..."),
+                (50, "[█████░░░░░] <b>50%</b> — Downloading packages..."),
+                (75, "[███████░░░] <b>75%</b> — Extracting and building wheels..."),
+            ]
+            
+            for pct, txt in steps:
+                try:
+                    bot.edit_message_text(f"<b>📦 Package Installer</b>\n{G['div']}\nInstalling: <code>{' '.join(packages[:5])}</code>\n{txt}", chat_id=m.chat.id, message_id=p_msg.message_id, parse_mode="HTML")
+                except Exception:
+                    pass
+                time.sleep(0.4)
+                
             result = _sp.run(
                 [sys.executable, "-m", "pip", "install",
                  "--target", str(deps_dir),
@@ -16297,12 +16324,16 @@ def _handle_pip_install(m: types.Message, st: Dict[str, Any]) -> None:
             out = (result.stdout + result.stderr)[-1500:]
             ok = result.returncode == 0
             audit(m.from_user.id, "pip_install", f"bot={bot_id} ok={ok}")
-            bot.send_message(m.chat.id,
-                f"<b>{'OK' if ok else G['no']} pip install</b>\n<pre>{esc(out)}</pre>",
-                parse_mode="HTML")
+            
+            final_bar = "[██████████] <b>100% — Complete!</b>" if ok else "[██████████] <b>Failed</b>"
+            bot.edit_message_text(
+                f"<b>📦 Package Installer</b>\n{G['div']}\n{final_bar}\n<pre>{esc(out)}</pre>",
+                chat_id=m.chat.id, message_id=p_msg.message_id, parse_mode="HTML")
         except Exception as e:
-            bot.send_message(m.chat.id,
-                f"{G['no']} pip error: <code>{esc(e)}</code>", parse_mode="HTML")
+            try:
+                bot.edit_message_text(f"{G['no']} pip error: <code>{esc(e)}</code>", chat_id=m.chat.id, message_id=p_msg.message_id, parse_mode="HTML")
+            except Exception:
+                pass
     threading.Thread(target=_bg, daemon=True).start()
 
 
