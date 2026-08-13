@@ -1,9 +1,21 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
-  "build": { "builder": "NIXPACKS" },
+  "build": {
+    "builder": "NIXPACKS"
+  },
   "deploy": {
-    "startCommand": "python bot.py",
+    "startCommand": "python3 bot.py",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
+  },
+  "variables": {
+    "BOT_TOKEN": {
+      "description": "Your Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "Your Telegram User ID for Admin access",
+      "required": true
+    }
   }
 }
