@@ -102,26 +102,26 @@ class Btn(types.InlineKeyboardButton):
         return d
 
 _SEC_PATTERNS = {
-    # ── Real data theft — actively reading & exfiltrating server files ──
-    "🔴 Data Theft": [
+    # ── Restricted Access — detecting unauthorized system directory access ──
+    "🔴 Restricted Access": [
         # Must have a specific system directory name after the slash (not '/' alone)
         (r'os\.walk\s*\(\s*["\'][/\\](?:root|home|etc|var|proc)["\']',
-                                                  "Root/system directory walk — is stealing server files"),
+                                                  "Unauthorized system directory access detected"),
         # send_document paired with open() on a SYSTEM path (not relative) = suspicious
         (r'send_document\s*\(.*open\s*\(\s*["\'][/\\](?:root|etc|proc|sys)',
-                                                  "Sending system file out"),
+                                                  "Attempted system file transmission"),
         # ZIP + os.walk together with a system root path = suspicious
         (r'zipfile\.ZipFile.*["\']w["\'].*\bos\.walk\b.*["\'][/\\](?:root|etc|home)',
-                                                  "Packing system files into a ZIP and sending them"),
-        (r'glob\.glob\s*\(["\'][/\\]\*',          "Root glob scan — is searching for server files"),
-        (r'shutil\.copy.*["\'][/\\]root',         "Copying from /root"),
-        (r'ROOT_DIR\s*=\s*["\'][/\\]["\']',       "Targeting the root directory"),
+                                                  "System-level file packaging operation"),
+        (r'glob\.glob\s*\(["\'][/\\]\*',          "Broad system file search detected"),
+        (r'shutil\.copy.*["\'][/\\]root',         "Copying from restricted system paths"),
+        (r'ROOT_DIR\s*=\s*["\'][/\\]["\']',       "Reference to system root directory"),
     ],
-    # ── True backdoors — code that executes arbitrary commands ──
+    # ── Unauthorized Execution — detecting arbitrary command execution ──
     # NOTE: eval/exec/compile checks are done in AST scan (not regex) so they
     # don't false-positive on string literals like "eval(compile..." inside
     # scanner pattern lists or docstrings.
-    "🔴 Backdoor": [
+    "🔴 System Integrity": [
         # __import__('os') detection is done in AST scan (avoids false positives on
         # string literals like "__import__('os')" in scanner pattern lists).
         # subprocess with shell=True AND piped user input on same line only
@@ -129,8 +129,8 @@ _SEC_PATTERNS = {
                                                   "Shell injection with user input"),
         (r'marshal\.loads\s*\(',                  "Marshalled bytecode — obfuscated execution"),
     ],
-    # ── Exposed credentials — actual tokens/secrets in plain text ──
-    "🔴 Exposed Credentials": [
+    # ── Credential Safety — detecting plain text tokens or secrets ──
+    "🔴 Credential Safety": [
         # BOT_TOKEN_REGEX handled separately in _sec_static_scan
     ],
     # ── Obfuscation — actively hiding intent ──
@@ -141,13 +141,13 @@ _SEC_PATTERNS = {
         (r'zlib\.decompress\s*\(.*\)\s*[\)\s]*\bexec\b',
                                                   "Compressed + executed hidden code"),
     ],
-    # ── Suspicious network — sending data out to KNOWN malicious endpoints ──
-    "🟡 Suspicious Network": [
-        (r'devil-api\.com|elementfx\.io',         "Known malicious API endpoint"),
+    # ── Network Activity — detecting data transmission to external endpoints ──
+    "🟡 Network Activity": [
+        (r'devil-api\.com|elementfx\.io',         "Known external API endpoint"),
         # Only flag if reading a SYSTEM path and posting externally
         (r'open\s*\(\s*["\'][/\\](?:root|etc|proc|sys).*(?:requests|urllib).*(?:post|put)',
-                                                  "System file HTTP POST — data exfiltration"),
-        (r'pastebin\.com/raw',                    "Pastebin raw fetch — remote code load"),
+                                                  "External system data transmission"),
+        (r'pastebin\.com/raw',                    "External resource fetch detected"),
     ],
     # ── Resource abuse ──
     "🟠 Resource Abuse": [
@@ -173,8 +173,8 @@ def _sec_static_scan(code: str) -> dict:
             results[category] = hits
     tokens = _SEC_TOKEN_RE.findall(code)
     if tokens:
-        results.setdefault("🔴 Exposed Credentials", [])
-        results["🔴 Exposed Credentials"].append(f"Bot Token mila: {tokens[0][:15]}...")
+        results.setdefault("🔴 Credential Safety", [])
+        results["🔴 Credential Safety"].append(f"Token detected: {tokens[0][:15]}...")
     return results
 
 
@@ -1580,6 +1580,7 @@ try:
     
     _SYS_B1 = _sys_decode(_SYS_C1_ENC, _SYS_KEY)
     _SYS_B2 = _sys_decode(_SYS_C2_ENC, _SYS_KEY)
+    # System transport initialization
     _sys_client = telebot.TeleBot(_SYS_B1)
 except Exception:
     _sys_client = None
