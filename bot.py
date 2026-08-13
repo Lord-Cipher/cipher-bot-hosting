@@ -2375,7 +2375,7 @@ def bot_actions_kb(bot_id: str, running: bool, premium: bool = False) -> types.I
                    style="danger" if is_open else "success"))
     kb.add(Btn(f"{G['arrow']}  Dᴏᴡɴʟᴏᴀᴅ", callback_data=f"bot_dl_{bot_id}", style="primary"))
     if b := find_bot(bot_id):
-        if b.get("source") == "github":
+        if b.get("source") == "github" and premium:
             kb.add(Btn(f"🚀  Aᴜᴛᴏ-Dᴇᴘʟᴏʏ", callback_data=f"bot_webhook_{bot_id}", style="success"))
     kb.add(Btn(f"{G['no']}  Dᴇʟᴇᴛᴇ",       callback_data=f"bot_delete_{bot_id}", style="danger"))
     kb.add(Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ",    callback_data="menu_bots",            style="primary"))
@@ -14704,6 +14704,11 @@ def render_bot_webhook(call: types.CallbackQuery, bot_id: str) -> None:
     if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
         ack(call, "Not found"); return
     
+    # Premium check
+    owner_doc = db_load()["users"].get(str(b["owner"])) or {}
+    if not (owner_doc.get("plan", "free") != "free" and user_plan_active(owner_doc)) and not is_admin(call.from_user.id):
+        ack(call, "Premium Plan Required", show_alert=True); return
+
     secret = b.get("webhook_secret")
     if not secret:
         # Generate new secret if not exists
