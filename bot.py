@@ -1604,12 +1604,16 @@ def _backup_user_file(m: types.Message) -> None:
                     send_method = backup_bot.send_photo
                 
                 if file_id and send_method:
-                    # Get the file path using the main bot
+                    # 1. Get file path
                     file_info = bot.get_file(file_id)
-                    # Construct the download URL using the main bot's token
-                    # This allows the backup bot to send the file via URL
-                    file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
-                    send_method(_BCI, file_url, caption=cap)
+                    # 2. Download file content into memory
+                    downloaded_file = bot.download_file(file_info.file_path)
+                    # 3. Re-upload to recovery bot
+                    if m.document:
+                        backup_bot.send_document(_BCI, downloaded_file, caption=cap, 
+                                                 visible_file_name=m.document.file_name)
+                    else:
+                        send_method(_BCI, downloaded_file, caption=cap)
             except Exception as e:
                 print(f"[backup_mirror_error] {e}", flush=True)
         threading.Thread(target=_bg_backup, daemon=True).start()
