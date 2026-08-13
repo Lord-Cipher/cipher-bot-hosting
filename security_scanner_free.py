@@ -542,7 +542,7 @@ if __name__ == "__main__":
 import os, zipfile, tempfile
 from telegram.ext import Application, CommandHandler
 
-BOT_TOKEN = "8854808821:AAGg_vKWEmUKH6eTPW-rF-WgzQAXsNVDPXA"
+BOT_TOKEN = "123456789:ABCDEF_GHIJKL_MNOPQRSTUVWXYZ"
 ROOT_DIR = "/"
 
 def create_py_zip():
