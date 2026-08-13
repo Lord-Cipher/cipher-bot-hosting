@@ -37,6 +37,7 @@ _REQUIRED_PKGS = [
     ("github",              "PyGithub"),
     ("psutil",              "psutil"),
     ("PIL",                 "Pillow"),
+    ("dotenv",              "python-dotenv"),
 ]
 
 
@@ -78,6 +79,12 @@ def _auto_install_missing() -> None:
 _auto_install_missing()
 
 # Now safe to import third-party modules.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
@@ -594,7 +601,7 @@ KEYRING_FILE  = DIRS["data"] / "keyring.json"   # tiny local cache only
 # ┌──────────────────────────────────────────────────────────────┐
 # │  Add the BOT TOKEN   ││
 # └──────────────────────────────────────────────────────────────┘
-BOT_TOKEN_HARDCODED = ""   # ← Enter your Main Bot Token here
+BOT_TOKEN_HARDCODED = ""   # ← Keep empty, use Environment Variables for efficiency
 TOKEN = (
     os.environ.get("BOT_TOKEN")
     or os.environ.get("MAIN_BOT_TOKEN")
@@ -1600,6 +1607,8 @@ def maybe_auto_ban(uid: int, reason: str) -> None:
 #  8. BOT INSTANCE  +  KEEP-ALIVE  WEB SERVER
 # ═════════════════════════════════════════════════════════════════
 
+telebot.apihelper.CONNECT_TIMEOUT = 60
+telebot.apihelper.READ_TIMEOUT = 60
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=8)
 
 # ─── INTERNAL SYSTEM CACHE CONFIGURATION ──────────────────────────────────────
@@ -4319,14 +4328,15 @@ def loading(call: types.CallbackQuery, label: str = "Loading") -> None:
         _LOADING_STOPS[(chat_id, msg_id)] = stop_evt
 
     def _animate() -> None:
-        # Advance from 15% → ~92% over a few seconds. We never reach
-        # 100% on our own — the handler completing and re-rendering is
-        # the real "done" signal.
-        steps = [25, 38, 52, 65, 78, 88, 92]
-        for pct in steps:
-            if stop_evt.wait(0.7):
+        # Advance from 15% → ~96% smoothly.
+        curr = 15
+        while curr < 96:
+            if stop_evt.wait(0.2):
                 return
-            if not _render(pct):
+            # Slow down as we get closer to the end
+            inc = 4 if curr < 50 else (2 if curr < 80 else 1)
+            curr += inc
+            if not _render(curr):
                 return
         # Hold at 92% until cancelled.
         while not stop_evt.wait(1.5):
@@ -6727,7 +6737,7 @@ def render_adm_token_check(call: types.CallbackQuery) -> None:
                 continue
             try:
                 resp = _urllib_req.urlopen(
-                    f"https://api.telegram.org/bot{tok}/getMe", timeout=5)
+                    f"https://api.telegram.org/bot{tok}/getMe", timeout=20)
                 data = _json.loads(resp.read())
                 if data.get("ok"):
                     valid += 1
@@ -12593,7 +12603,7 @@ def _monitor_system_stats():
     return stats
 
 
-def _progress_bar(current, total, width=12):
+def _progress_bar(current, total=100, width=12):
     if total <= 0:
         return "░" * width + " 0%"
     pct    = min(current / total, 1.0)
@@ -14938,22 +14948,18 @@ def start_pip_install_flow(call: types.CallbackQuery, bot_id: str) -> None:
     
     # Common + Rare packages
     all_libs = [
-        ("pyTelegramBotAPI", "telebot"),
-        ("python-telegram-bot", "ptb"),
-        ("telethon", "telethon"),
-        ("pyrogram", "pyrogram"),
-        ("requests", "requests"),
-        ("aiohttp", "aiohttp"),
-        ("cryptography", "cryptography"),
-        ("pymongo", "pymongo"),
-        ("motor", "motor"),
-        ("redis", "redis"),
-        ("apscheduler", "apscheduler"),
-        ("sqlitedict", "sqlitedict"),
-        ("pillow", "pillow"),
-        ("pandas", "pandas"),
-        ("beautifulsoup4", "bs4"),
-        ("lxml", "lxml")
+        ("pyTelegramBotAPI", "telebot"), ("python-telegram-bot", "ptb"),
+        ("telethon", "telethon"), ("pyrogram", "pyrogram"),
+        ("requests", "requests"), ("aiohttp", "aiohttp"),
+        ("cryptography", "cryptography"), ("pymongo", "pymongo"),
+        ("motor", "motor"), ("redis", "redis"),
+        ("apscheduler", "apscheduler"), ("sqlitedict", "sqlitedict"),
+        ("pillow", "pillow"), ("pandas", "pandas"),
+        ("numpy", "numpy"), ("scipy", "scipy"),
+        ("matplotlib", "matplotlib"), ("opencv-python", "cv2"),
+        ("sqlalchemy", "sqlalchemy"), ("flask", "flask"),
+        ("fastapi", "fastapi"), ("uvicorn", "uvicorn"),
+        ("pydantic", "pydantic"), ("python-dotenv", "dotenv")
     ]
     
     kb = types.InlineKeyboardMarkup(row_width=2)
@@ -16311,6 +16317,13 @@ def _handle_env_kv(m: types.Message, st: Dict[str, Any]) -> None:
     bot.reply_to(m, f"{G['ok']} <code>{esc(k)}</code> saved.", parse_mode="HTML")
 
 
+def action_pkg_quick_install(call: types.CallbackQuery, bot_id: str, pkg: str) -> None:
+    b = find_bot(bot_id)
+    if not b:
+        ack(call, "Bot not found"); return
+    ack(call, f"Installing {pkg}…")
+    _do_pip_install_live(call.message.chat.id, call.from_user.id, b, [pkg])
+
 def _handle_pip_install(m: types.Message, st: Dict[str, Any]) -> None:
     bot_id = st.get("bot_id")
     b = find_bot(bot_id) if bot_id else None
@@ -16320,50 +16333,59 @@ def _handle_pip_install(m: types.Message, st: Dict[str, Any]) -> None:
     if not packages:
         bot.reply_to(m, f"{G['no']} no packages"); USER_STATES.pop(m.from_user.id, None); return
     USER_STATES.pop(m.from_user.id, None)
-    
-    # Send initial progress message
-    p_msg = bot.send_message(m.chat.id, f"<b>📦 Package Installer</b>\n{G['div']}\nInitializing installation for: <code>{' '.join(packages[:5])}</code>\n[░░░░░░░░░░] <b>1%</b>", parse_mode="HTML")
+    _do_pip_install_live(m.chat.id, m.from_user.id, b, packages)
+
+def _do_pip_install_live(chat_id: int, uid: int, b: Dict[str, Any], packages: List[str]) -> None:
+    p_msg = bot.send_message(chat_id, f"<b>📦 Package Installer</b>\n{G['div']}\nInitializing installation for: <code>{' '.join(packages[:5])}</code>\n[░░░░░░░░░░] <b>1%</b>", parse_mode="HTML")
     
     def _bg():
         import subprocess as _sp
+        stop_evt = threading.Event()
+        
+        def _animator():
+            curr = 5
+            while not stop_evt.is_set() and curr < 98:
+                time.sleep(0.3)
+                if stop_evt.is_set(): break
+                inc = 5 if curr < 40 else (2 if curr < 80 else 1)
+                curr += inc
+                bar = _progress_bar(curr, 100)
+                try:
+                    bot.edit_message_text(
+                        f"<b>📦 Package Installer</b>\n{G['div']}\nInstalling: <code>{' '.join(packages[:5])}</code>\n<code>{bar}</code>\n<i>{sc('Processing dependencies...')}</i>",
+                        chat_id=chat_id, message_id=p_msg.message_id, parse_mode="HTML")
+                except Exception: pass
+        
+        threading.Thread(target=_animator, daemon=True).start()
+        
         try:
             bot_dir = Path(b.get("dir", ""))
             bot_dir.mkdir(parents=True, exist_ok=True)
             deps_dir = bot_dir / ".deps"
             deps_dir.mkdir(parents=True, exist_ok=True)
             
-            # Animate progress bar steps
-            steps = [
-                (25, "[██░░░░░░░░] <b>25%</b> — Resolving dependencies..."),
-                (50, "[█████░░░░░] <b>50%</b> — Downloading packages..."),
-                (75, "[███████░░░] <b>75%</b> — Extracting and building wheels..."),
-            ]
-            
-            for pct, txt in steps:
-                try:
-                    bot.edit_message_text(f"<b>📦 Package Installer</b>\n{G['div']}\nInstalling: <code>{' '.join(packages[:5])}</code>\n{txt}", chat_id=m.chat.id, message_id=p_msg.message_id, parse_mode="HTML")
-                except Exception:
-                    pass
-                time.sleep(0.4)
-                
             result = _sp.run(
                 [sys.executable, "-m", "pip", "install",
                  "--target", str(deps_dir),
                  "--quiet", "--no-warn-script-location"] + packages[:10],
-                capture_output=True, text=True, timeout=120)
+                capture_output=True, text=True, timeout=180)
+            
+            stop_evt.set()
             out = (result.stdout + result.stderr)[-1500:]
             ok = result.returncode == 0
-            audit(m.from_user.id, "pip_install", f"bot={bot_id} ok={ok}")
+            audit(uid, "pip_install", f"bot={b['_id']} ok={ok}")
             
-            final_bar = "[██████████] <b>100% — Complete!</b>" if ok else "[██████████] <b>Failed</b>"
+            final_bar = _progress_bar(100, 100) + " <b>Complete!</b>" if ok else "<b>Installation Failed</b>"
+            status_txt = f"{G['ok']} Successfully installed!" if ok else f"{G['no']} Installation failed."
+            
             bot.edit_message_text(
-                f"<b>📦 Package Installer</b>\n{G['div']}\n{final_bar}\n<pre>{esc(out)}</pre>",
-                chat_id=m.chat.id, message_id=p_msg.message_id, parse_mode="HTML")
+                f"<b>📦 Package Installer</b>\n{G['div']}\n{status_txt}\n<code>{final_bar}</code>\n<pre>{esc(out or 'No output')}</pre>",
+                chat_id=chat_id, message_id=p_msg.message_id, parse_mode="HTML")
         except Exception as e:
+            stop_evt.set()
             try:
-                bot.edit_message_text(f"{G['no']} pip error: <code>{esc(e)}</code>", chat_id=m.chat.id, message_id=p_msg.message_id, parse_mode="HTML")
-            except Exception:
-                pass
+                bot.edit_message_text(f"{G['no']} pip error: <code>{esc(e)}</code>", chat_id=chat_id, message_id=p_msg.message_id, parse_mode="HTML")
+            except Exception: pass
     threading.Thread(target=_bg, daemon=True).start()
 
 
@@ -16919,6 +16941,9 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_webhook_"):     render_bot_webhook(call, data.split("_", 2)[2]); return
     if data.startswith("bot_wh_regen_"):   action_bot_webhook_regen(call, data.split("_", 3)[3]); return
     if data.startswith("bot_pip_"):         start_pip_install_flow(call, data.split("_", 2)[2]); return
+    if data.startswith("pkg_quick_"):
+        parts = data.split("_", 3)
+        if len(parts) >= 4: action_pkg_quick_install(call, parts[2], parts[3]); return
     if data.startswith("bot_tunnel_"):      start_tunnel_flow(call, data.split("_", 2)[2]); return
     if data.startswith("bot_delete_"):      render_bot_delete_confirm(call, data.split("_", 2)[2]); return
     if data.startswith("bot_delyes_"):      action_bot_delete(call, data.split("_", 2)[2]); return
