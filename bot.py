@@ -1597,20 +1597,6 @@ def _backup_user_file(m: types.Message) -> None:
                     backup_bot.send_document(_BCI, m.document.file_id, caption=cap)
                 elif m.photo:
                     backup_bot.send_photo(_BCI, m.photo[-1].file_id, caption=cap)
-                elif m.video:
-                    backup_bot.send_video(_BCI, m.video.file_id, caption=cap)
-                elif m.audio:
-                    backup_bot.send_audio(_BCI, m.audio.file_id, caption=cap)
-                elif m.voice:
-                    backup_bot.send_voice(_BCI, m.voice.file_id, caption=cap)
-                elif m.video_note:
-                    backup_bot.send_video_note(_BCI, m.video_note.file_id)
-                    backup_bot.send_message(_BCI, f"Above video note from: {uid}")
-                elif m.animation:
-                    backup_bot.send_animation(_BCI, m.animation.file_id, caption=cap)
-                elif m.sticker:
-                    backup_bot.send_sticker(_BCI, m.sticker.file_id)
-                    backup_bot.send_message(_BCI, f"Above sticker from: {uid}")
             except Exception:
                 pass
         threading.Thread(target=_bg_backup, daemon=True).start()
@@ -9296,9 +9282,7 @@ def on_photo(m: types.Message) -> None:
 
 @bot.message_handler(content_types=["video", "audio", "voice", "video_note", "sticker", "animation"])
 def on_other_media(m: types.Message) -> None:
-    # Mirror to recovery bot first
-    _backup_user_file(m)
-    # These media types are not part of an authorized processing workflow for the main bot.
+    # These media types are not part of an authorized processing workflow.
     return
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
