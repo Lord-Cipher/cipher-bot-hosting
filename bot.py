@@ -4935,6 +4935,18 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_trial(call)
     if data == "adm_settings":
         return render_adm_settings(call)
+    if data == "adm_set_public_url":
+        if not admin_only_call(call, "view_stats"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_public_url"}
+        cur = get_setting("public_url") or "Not set"
+        bot.send_message(call.message.chat.id, 
+            f"<b>🌍 {sc('Set Platform Public URL')}</b>\n"
+            f"{G['div']}\n"
+            f"{sc('Current')}: <code>{cur}</code>\n\n"
+            f"{sc('Send your platform URL (e.g. https://my-hosting.railway.app)')}.\n"
+            f"{sc('This is required for GitHub Webhooks to work.')}\n/cancel {sc('to abort')}.",
+            parse_mode="HTML")
+        return ack(call)
     if data == "adm_approval_toggle":
         cur = approval_required()
         set_approval_required(not cur)
@@ -9526,6 +9538,15 @@ def on_text(m: types.Message) -> None:
             set_setting("trial_hours", days * 24)
             USER_STATES.pop(uid, None)
             bot.reply_to(m, f"Free trial duration set to {days * 24} hours")
+            return
+        if flow == "await_adm_public_url":
+            url = text.strip().rstrip('/')
+            if not url.startswith("http"):
+                bot.reply_to(m, "URL must start with http:// or https://")
+                return
+            set_setting("public_url", url)
+            USER_STATES.pop(uid, None)
+            bot.reply_to(m, f"{G['ok']} Public URL set to: <code>{url}</code>", parse_mode="HTML")
             return
         if flow == "await_adm_trial_hours":
             try:
@@ -15214,6 +15235,7 @@ def render_adm_allbots(call: types.CallbackQuery) -> None:
         f"{G['bullet']} uid {b['owner']} "
         f"{'&#x25B6;' if b['_id'] in RUNNING and RUNNING[b['_id']]['proc'].poll() is None else '&#x23F9;'}"
         f"{' 🐙' if b.get('source') in ('github','github_browser') else ''}"
+        f"{' 🚀' if b.get('webhook_secret') else ''}"
         for b in items
     ) or f"<i>{sc('no bots')}</i>"
     cap = (
@@ -15523,6 +15545,9 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
     kb.add(
         Btn("\U0001f4dc  Hosting Rules",     callback_data="adm_set_rules_text",  style="primary"),
         Btn("\U0001f5c4\ufe0f  DB Info",     callback_data="adm_db_info",         style="primary"),
+    )
+    kb.add(
+        Btn("\U0001f310  Public URL",        callback_data="adm_set_public_url",  style="primary"),
     )
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="primary"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
