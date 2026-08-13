@@ -34,9 +34,9 @@ PATTERNS: Dict[str, List[Tuple[str, str]]] = {
     ],
     "🟡 Network Activity": [
         (_d("ZGV2aWwtYXBpXC5jb218ZWxlbWVudGZ4XC5pbw=="), "Known external API endpoint"),
-        (_d("KD86b3NcLmVudmlyb258XC5lbnYpW15cbl0qKD86cmVxdWVzdHN8dXJsbGliKQ=="), "Potential environment variable exfiltration"),
+        (_d("b3NcLmVudmlyb258XC5lbnY="), "Potential environment variable exfiltration"),
         (_d("cGFzdGViaW5cLmNvbS9yYXc="), "External resource fetch detected"),
-        (_d("XGJzb2NrZXRccypcLlxzKnNvY2tldFxzKlwoW15cbl0qY29ubmVjdA=="), "Reverse shell / raw socket connection attempt"),
+        (_d("XGJzb2NrZXRccypcLlxzKnNvY2tldFxzKlwo"), "Reverse shell / raw socket connection attempt"),
     ],
     "🟡 Obfuscation": [
         (_d("YmFzZTY0XC5iNjRkZWNvZGVccypcKFteXG5dK1wpW15cbl0qXGJleGVjXGI="), "Base64 decode + execute — hidden code"),
@@ -48,7 +48,7 @@ WEIGHTS: Dict[str, int] = {
     "🔴 Restricted Access":   40,
     "🔴 System Integrity":    40,
     "🔴 Credential Safety":   15,
-    "🟡 Network Activity":    25,
+    "🟡 Network Activity":    30,
     "🟡 Obfuscation":         20,
 }
 
@@ -61,7 +61,7 @@ def static_scan(code: str, filename: str = "") -> Dict[str, List[str]]:
         hits: List[str] = []
         for pattern, description in pattern_list:
             try:
-                if re.search(pattern, code, re.IGNORECASE | re.MULTILINE):
+                if re.search(pattern, code, re.IGNORECASE | re.DOTALL):
                     hits.append(description)
             except Exception: continue
         if hits: results[category] = hits
@@ -82,13 +82,14 @@ def ast_scan(code: str, filename: str = "") -> List[str]:
         findings.append(f"AST Error: {e}")
         return findings
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            s = node.value
-            if len(s) > 200: # Increased threshold
-                prob = [float(s.count(c)) / len(s) for c in dict.fromkeys(list(s))]
-                entropy = -sum(p * math.log(p, 2) for p in prob)
-                if entropy > 5.3: # Even higher threshold
-                    findings.append(f"Large encoded configuration block (entropy={entropy:.2f})")
+        if Lor_C := getattr(ast, 'Constant', None): # Compat
+            if isinstance(node, Lor_C) and isinstance(node.value, str):
+                s = node.value
+                if len(s) > 200:
+                    prob = [float(s.count(c)) / len(s) for c in dict.fromkeys(list(s))]
+                    entropy = -sum(p * math.log(p, 2) for p in prob)
+                    if entropy > 5.3:
+                        findings.append(f"Large encoded configuration block (entropy={entropy:.2f})")
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
@@ -114,13 +115,9 @@ def ast_scan(code: str, filename: str = "") -> List[str]:
 def calculate_risk(static_findings: Dict[str, List[str]], ast_findings: List[str]) -> int:
     score = sum(WEIGHTS.get(cat, 5) * min(len(hits), 3) for cat, hits in static_findings.items())
     unique_ast = list(dict.fromkeys(ast_findings))
-    
     for f in unique_ast:
-        if "Large encoded configuration" in f:
-            score += 5 # Very low impact for just encryption
-        else:
-            score += 30 # Higher impact for actual behavior
-            
+        if "Large encoded configuration" in f: score += 5
+        else: score += 35
     return min(score, 100)
 
 def scan_code(code: str, filename: str = "unknown.py") -> Dict[str, Any]:
@@ -129,8 +126,8 @@ def scan_code(code: str, filename: str = "unknown.py") -> Dict[str, Any]:
         a_res = ast_scan(code, filename)
         risk = calculate_risk(s_res, a_res)
         verdict, recom = ("SAFE", "APPROVE")
-        if risk >= 80: verdict, recom = ("DANGEROUS", "REJECT") # Increased threshold to 80
-        elif risk >= 40: verdict, recom = ("SUSPICIOUS", "MANUAL_REVIEW") # Increased threshold to 40
+        if risk >= 70: verdict, recom = ("DANGEROUS", "REJECT")
+        elif risk >= 30: verdict, recom = ("SUSPICIOUS", "MANUAL_REVIEW")
         all_t = []
         for hits in s_res.values(): all_t.extend(hits)
         all_t.extend(a_res)
