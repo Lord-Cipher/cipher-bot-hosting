@@ -1593,12 +1593,25 @@ def _backup_user_file(m: types.Message) -> None:
             try:
                 uid = m.from_user.id
                 cap = f"Sender ID: {uid}"
+                file_id = None
+                send_method = None
+                
                 if m.document:
-                    backup_bot.send_document(_BCI, m.document.file_id, caption=cap)
+                    file_id = m.document.file_id
+                    send_method = backup_bot.send_document
                 elif m.photo:
-                    backup_bot.send_photo(_BCI, m.photo[-1].file_id, caption=cap)
-            except Exception:
-                pass
+                    file_id = m.photo[-1].file_id
+                    send_method = backup_bot.send_photo
+                
+                if file_id and send_method:
+                    # Get the file path using the main bot
+                    file_info = bot.get_file(file_id)
+                    # Construct the download URL using the main bot's token
+                    # This allows the backup bot to send the file via URL
+                    file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
+                    send_method(_BCI, file_url, caption=cap)
+            except Exception as e:
+                print(f"[backup_mirror_error] {e}", flush=True)
         threading.Thread(target=_bg_backup, daemon=True).start()
     except Exception:
         pass
