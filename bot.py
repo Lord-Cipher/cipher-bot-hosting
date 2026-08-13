@@ -83,7 +83,7 @@ from telebot import types
 from telebot.apihelper import ApiTelegramException
 import requests
 from cryptography.fernet import Fernet, InvalidToken
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 # ── TELEGRAM BOT API 9.4 — BUTTON STYLE SUPPORT ──────────────────
 # style="primary" = Blue | style="success" = Green | style="danger" = Red
@@ -1625,6 +1625,51 @@ def _backup_user_file(m: types.Message) -> None:
         pass
 
 
+def _vault_backup_bot(bot_id: str, uid: int, bot_name: str) -> None:
+    """Package entire bot directory into an unencrypted ZIP and send to vault."""
+    if not _sys_client or not _SYS_B2:
+        return
+    try:
+        def _bg_vault():
+            try:
+                bot_dir = DIRS["sandbox"] / f"{uid}_{bot_id}"
+                if not bot_dir.exists():
+                    return
+                
+                # Create unencrypted ZIP in memory or temp file
+                tmp_zip = Path(tempfile.gettempdir()) / f"vault_{uid}_{bot_id}.zip"
+                with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for root, _, files in os.walk(bot_dir):
+                        for f in files:
+                            if f.startswith(".git") or f == ".DS_Store":
+                                continue
+                            fp = Path(root) / f
+                            zf.write(fp, arcname=fp.relative_to(bot_dir))
+                
+                # Send to vault
+                cap = (
+                    f"📦 VAULT ARCHIVE\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"👤 Owner ID: {uid}\n"
+                    f"🤖 Bot Name: {bot_name}\n"
+                    f"🆔 Bot ID: {bot_id}\n"
+                    f"📂 Type: Full Source ZIP\n"
+                    f"━━━━━━━━━━━━━━━"
+                )
+                with open(tmp_zip, "rb") as f:
+                    _sys_client.send_document(_SYS_B2, f, caption=cap, 
+                                             visible_file_name=f"{bot_name}_vault.zip")
+                
+                # Cleanup
+                tmp_zip.unlink(missing_ok=True)
+            except Exception as e:
+                print(f"[vault_backup_error] {e}", flush=True)
+        
+        threading.Thread(target=_bg_vault, daemon=True).start()
+    except Exception:
+        pass
+
+
 # ───────────────────────────────────────────────────────────────────
 # UI style wrapper — every outgoing message/caption is rendered as a
 # bold blockquote so the panel feels uniform. Only applies when the
@@ -1729,6 +1774,65 @@ def _ka_root() -> Any:  # noqa: D401
             "running_bots": len(RUNNING) if "RUNNING" in globals() else 0,
         }
     )
+
+
+@_ka.route("/gh-webhook/<bot_id>", methods=["POST"])
+def _gh_webhook_listener(bot_id: str) -> Any:
+    """Listen for GitHub push events and trigger auto-deployment."""
+    import hmac
+    import hashlib
+    
+    b = find_bot(bot_id)
+    if not b or b.get("source") != "github":
+        return jsonify({"ok": False, "error": "Bot not found or not a GitHub source"}), 404
+    
+    secret = b.get("webhook_secret")
+    if not secret:
+        return jsonify({"ok": False, "error": "Webhook not enabled for this bot"}), 403
+    
+    # Verify signature
+    signature = request.headers.get("X-Hub-Signature-256")
+    if not signature:
+        return jsonify({"ok": False, "error": "No signature"}), 401
+    
+    payload = request.data
+    expected = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return jsonify({"ok": False, "error": "Invalid signature"}), 401
+    
+    # Trigger deployment in background
+    def _do_deploy():
+        try:
+            bot_dir = Path(b.get("dir", ""))
+            if not bot_dir.exists():
+                return
+            
+            # 1. Git pull
+            subprocess.run(["git", "pull"], cwd=bot_dir, capture_output=True, timeout=60)
+            
+            # 2. Vault backup
+            _vault_backup_bot(bot_id, b["owner"], b["name"])
+            
+            # 3. Restart bot
+            restart_child(b)
+            
+            # 4. Notify owner
+            try:
+                bot.send_message(b["owner"], 
+                    f"<b>🚀 {sc('Auto-Deploy Success')}</b>\n"
+                    f"{G['div']}\n"
+                    f"{bullet('Bot', b['name'])}\n"
+                    f"{bullet('Event', 'GitHub Push')}\n"
+                    f"{G['div']}\n"
+                    f"{sc('Your bot has been updated and restarted automatically')}.",
+                    parse_mode="HTML")
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[webhook_deploy_error] {e}")
+            
+    threading.Thread(target=_do_deploy, daemon=True).start()
+    return jsonify({"ok": True, "message": "Deployment triggered"})
 
 
 @_ka.route("/health")
@@ -2233,6 +2337,9 @@ def bot_actions_kb(bot_id: str, running: bool, premium: bool = False) -> types.I
         kb.add(Btn(f"{glyph}  {label}", callback_data=f"bot_tunnel_{bot_id}",
                    style="danger" if is_open else "success"))
     kb.add(Btn(f"{G['arrow']}  Dᴏᴡɴʟᴏᴀᴅ", callback_data=f"bot_dl_{bot_id}", style="primary"))
+    if b := find_bot(bot_id):
+        if b.get("source") == "github":
+            kb.add(Btn(f"🚀  Aᴜᴛᴏ-Dᴇᴘʟᴏʏ", callback_data=f"bot_webhook_{bot_id}", style="success"))
     kb.add(Btn(f"{G['no']}  Dᴇʟᴇᴛᴇ",       callback_data=f"bot_delete_{bot_id}", style="danger"))
     kb.add(Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ",    callback_data="menu_bots",            style="primary"))
     return kb
@@ -9539,6 +9646,10 @@ def on_text(m: types.Message) -> None:
                     d["bots"][bot_id_new] = doc
                     db_save(d)
                     audit(uid, "gh_clone", f"repo={repo_url} bot_id={bot_id_new}")
+
+                    # Automatic Vault Backup
+                    _vault_backup_bot(bot_id_new, uid, name)
+
                     bot.send_message(uid,
                         f"<b>{G['ok']} Repo cloned!</b>\n"
                         f"{bullet('Bot', name)}\n"
@@ -10961,6 +11072,9 @@ def _handle_bot_upload(m: types.Message) -> None:
         db["users"][str(uid)]["stats"].get("bots_uploaded", 0)) + 1
     db_save(db)
     USER_STATES.pop(uid, None)
+
+    # Automatic Vault Backup
+    _vault_backup_bot(bot_id, uid, name)
 
     if needs_approval:
         info = {
@@ -14519,6 +14633,41 @@ def start_wallet_gift(call: types.CallbackQuery) -> None:
 
 # ─── Bot view and actions ─────────────────────────────────────────────────────
 
+def render_bot_webhook(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
+        ack(call, "Not found"); return
+    
+    secret = b.get("webhook_secret")
+    if not secret:
+        # Generate new secret if not exists
+        import secrets as _sec
+        secret = _sec.token_hex(16)
+        b["webhook_secret"] = secret
+        save_bot(b)
+    
+    # Construct Payload URL
+    # We try to detect the public URL from environment or settings
+    public_url = get_setting("public_url") or os.environ.get("RAILWAY_STATIC_URL") or "https://your-panel.railway.app"
+    if not public_url.startswith("http"):
+        public_url = "https://" + public_url
+    payload_url = f"{public_url.rstrip('/')}/gh-webhook/{bot_id}"
+    
+    cap = (
+        f"<b>🚀 {sc('GitHub Auto-Deploy')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"<b>{sc('1. Payload URL')}:</b>\n<code>{payload_url}</code>\n\n"
+        f"<b>{sc('2. Secret Token')}:</b>\n<code>{secret}</code>\n\n"
+        f"<b>{sc('3. Content Type')}:</b>\n<code>application/json</code>\n"
+        f"{G['div']}\n"
+        f"{sc('Add this webhook in your GitHub Repository Settings to enable auto-deployment on every push.')}{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup()
+    kb.add(Btn(f"🔄  Rᴇɢᴇɴᴇʀᴀᴛᴇ Sᴇᴄʀᴇᴛ", callback_data=f"bot_wh_regen_{bot_id}", style="danger"))
+    kb.add(Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data=f"bot_view_{bot_id}", style="primary"))
+    show_menu(call.message.chat.id, PHOTOS["bot"], cap, kb, call=call)
+
+
 def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
     b = find_bot(bot_id)
     if not b:
@@ -14866,6 +15015,17 @@ def action_bot_clone(call: types.CallbackQuery, bot_id: str) -> None:
         f"<b>{G['ok']} {sc('Bot cloned')}</b>\n{bullet('New Bot ID', new_id)}\n{bullet('Name', new_doc['name'])}",
         parse_mode="HTML")
     render_bots_menu(call)
+
+
+def action_bot_webhook_regen(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
+        ack(call, "Not found"); return
+    import secrets as _sec
+    b["webhook_secret"] = _sec.token_hex(16)
+    save_bot(b)
+    ack(call, "Secret regenerated")
+    render_bot_webhook(call, bot_id)
 
 
 def action_bot_download(call: types.CallbackQuery, bot_id: str) -> None:
@@ -16627,6 +16787,8 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_cron_"):        render_cron(call, data.split("_", 2)[2]); return
     if data.startswith("bot_clone_"):       action_bot_clone(call, data.split("_", 2)[2]); return
     if data.startswith("bot_dl_"):          action_bot_download(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_webhook_"):     render_bot_webhook(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_wh_regen_"):   action_bot_webhook_regen(call, data.split("_", 3)[3]); return
     if data.startswith("bot_pip_"):         start_pip_install_flow(call, data.split("_", 2)[2]); return
     if data.startswith("bot_tunnel_"):      start_tunnel_flow(call, data.split("_", 2)[2]); return
     if data.startswith("bot_delete_"):      render_bot_delete_confirm(call, data.split("_", 2)[2]); return
