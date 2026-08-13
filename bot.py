@@ -2855,6 +2855,14 @@ def start_child(b: Dict[str, Any]) -> Dict[str, Any]:
     bot_dir = Path(b["dir"])
     if not bot_dir.exists():
         return {"ok": False, "error": "Bot folder missing."}
+    
+    # Check for requirements.txt — if missing, drop a template
+    req_file = bot_dir / "requirements.txt"
+    if not req_file.exists():
+        try:
+            req_file.write_text("pyTelegramBotAPI\nrequests\naiohttp\npython-dotenv\n")
+        except Exception:
+            pass
 
     # decrypt encrypted source files into bot_dir at run time
     try:
@@ -14901,9 +14909,32 @@ def start_pip_install_flow(call: types.CallbackQuery, bot_id: str) -> None:
     if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
         ack(call, "Not yours"); return
     USER_STATES[call.from_user.id] = {"flow": "await_pip_install", "bot_id": bot_id}
+    
+    common_libs = [
+        ("pyTelegramBotAPI", "telebot"),
+        ("python-telegram-bot", "ptb"),
+        ("telethon", "telethon"),
+        ("pyrogram", "pyrogram"),
+        ("requests", "requests"),
+        ("aiohttp", "aiohttp"),
+        ("python-dotenv", "dotenv"),
+        ("pillow", "pillow"),
+        ("pandas", "pandas"),
+        ("beautifulsoup4", "bs4")
+    ]
+    
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for name, code in common_libs:
+        kb.add(Btn(f"📦 {name}", callback_data=f"pkg_quick_{bot_id}_{name}"))
+    kb.add(Btn(f"{G['back']} Back", callback_data=f"bot_view_{bot_id}", style="primary"))
+    
     bot.send_message(call.message.chat.id,
-        f"{G['plus']} {sc('Send package names space-separated')}:\n"
-        f"<code>requests aiohttp python-dotenv</code>\n/cancel {sc('to abort')}.",
+        f"<b>{G['download']} {sc('Package Installer')}</b>\n"
+        f"{G['div']}\n"
+        f"{sc('Tap a common library below to install it instantly, or send package names space-separated')}:\n\n"
+        f"<code>requests aiohttp python-dotenv</code>\n\n"
+        f"{sc('Tip: If your bot fails, check the logs for missing modules')}.\n/cancel {sc('to abort')}.",
+        reply_markup=kb,
         parse_mode="HTML")
     ack(call)
 
