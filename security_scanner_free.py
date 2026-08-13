@@ -4,6 +4,7 @@
 import os
 import re
 import ast
+import math
 import zipfile
 import tarfile
 import tempfile
@@ -208,6 +209,17 @@ def ast_scan(code: str) -> List[str]:
         )
         return findings
 
+    # Entropy check for hidden payloads in strings
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            s = node.value
+            if len(s) > 60:
+                # Calculate Shannon entropy
+                prob = [float(s.count(c)) / len(s) for c in dict.fromkeys(list(s))]
+                entropy = -sum(p * math.log(p, 2) for p in prob)
+                if entropy > 4.8:
+                    findings.append(f"High-entropy hidden string payload detected (entropy={entropy:.2f})")
+
     for node in ast.walk(tree):
 
         if isinstance(node, ast.Call):
@@ -240,10 +252,18 @@ def ast_scan(code: str) -> List[str]:
                 # __import__('os') — real call only, not string literal
                 if fid == '__import__' and node.args:
                     if isinstance(node.args[0], ast.Constant):
-                        if node.args[0].value == 'os':
+                        if node.args[0].value in ('os', 'subprocess', 'ctypes', 'sys'):
                             findings.append(
-                                "Dynamic __import__('os') — code injection"
+                                f"Dynamic __import__('{node.args[0].value}') — code injection"
                             )
+
+                # Detect getattr(os, 'system') or similar de-obfuscation tricks
+                if fid == 'getattr' and len(node.args) >= 2:
+                    arg0 = node.args[0]
+                    arg1 = node.args[1]
+                    if isinstance(arg0, ast.Name) and arg0.id in ('os', 'sys', 'subprocess'):
+                        if isinstance(arg1, ast.Constant) and arg1.value in ('system', 'popen', 'exec', 'spawn'):
+                            findings.append(f"Dynamic attribute resolution getattr({arg0.id}, '{arg1.value}') — obfuscated execution")
 
         # Suspicious class names (harvest / steal / exfil / grabber)
         if isinstance(node, ast.ClassDef):
