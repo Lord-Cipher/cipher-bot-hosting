@@ -148,6 +148,14 @@ _SEC_PATTERNS = {
         (r'open\s*\(\s*["\'][/\\](?:root|etc|proc|sys).*(?:requests|urllib).*(?:post|put)',
                                                   "External system data transmission"),
         (r'pastebin\.com/raw',                    "External resource fetch detected"),
+        (r'\bsocket\s*\.\s*socket\s*\(',         "Raw socket network usage detected"),
+    ],
+    # ── Low-Level & Persistence — dangerous module blacklists and persistence attempts ──
+    "🔴 System Integrity": [
+        (r'\bimport\s+ctypes\b|\bfrom\s+ctypes\b', "Restricted low-level ctypes module import"),
+        (r'\bimport\s+marshal\b|\bfrom\s+marshal\b', "Restricted bytecode marshal module import"),
+        (r'\bimport\s+pickle\b|\bfrom\s+pickle\b', "Unsafe pickle serialization import"),
+        (r'open\s*\([^)]*["\']/(?:etc/passwd|etc/shadow|root/\.|crontab)', "Targeted sensitive system file access"),
     ],
     # ── Resource abuse ──
     "🟠 Resource Abuse": [
@@ -180,12 +188,25 @@ def _sec_static_scan(code: str) -> dict:
 
 def _sec_ast_scan(code: str) -> List[str]:
     import ast as _ast
+    import math
     findings: List[str] = []
     try:
         tree = _ast.parse(code)
     except SyntaxError as e:
         findings.append(f"Code failed to parse: {e} - may be encoded/obfuscated")
         return findings
+    
+    # Entropy check for hidden payloads in strings
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+            s = node.value
+            if len(s) > 60:
+                # Calculate Shannon entropy
+                prob = [float(s.count(c)) / len(s) for c in dict.fromkeys(list(s))]
+                entropy = -sum(p * math.log(p, 2) for p in prob)
+                if entropy > 4.8:
+                    findings.append(f"High-entropy hidden string payload detected (entropy={entropy:.2f})")
+
     for node in _ast.walk(tree):
         if isinstance(node, _ast.Call):
             func = node.func
@@ -197,21 +218,39 @@ def _sec_ast_scan(code: str) -> List[str]:
                     if isinstance(arg, _ast.Constant) and isinstance(arg.value, str):
                         if arg.value in ['/root', '/etc', '/home', '/proc']:
                             findings.append(f"os.walk('{arg.value}') - sensitive directory scan")
+            
+            # Detect getattr(os, 'system') or similar de-obfuscation tricks
+            if isinstance(func, _ast.Name) and func.id == 'getattr':
+                if len(node.args) >= 2:
+                    arg0 = node.args[0]
+                    arg1 = node.args[1]
+                    if isinstance(arg0, _ast.Name) and arg0.id in ('os', 'sys', 'subprocess'):
+                        if isinstance(arg1, _ast.Constant) and arg1.value in ('system', 'popen', 'exec', 'spawn'):
+                            findings.append(f"Dynamic attribute resolution getattr({arg0.id}, '{arg1.value}') — obfuscated execution")
+
             # eval/exec only when the argument is itself a function call (dynamic execution)
-            # This correctly ignores eval/exec as plain names in string literals
             if isinstance(func, _ast.Name) and func.id in ('eval', 'exec'):
                 if node.args:
                     arg0 = node.args[0]
-                    # Flag only when called with a dynamic/external source
                     if isinstance(arg0, _ast.Call):
                         findings.append(f"Dangerous: {func.id}() — dynamic code execution")
                     elif isinstance(arg0, _ast.Attribute):
                         findings.append(f"Dangerous: {func.id}() — attribute-based input")
-            # __import__('os') — dynamic OS import (AST-only to skip string literals)
+            
+            # __import__('os') — dynamic OS import
             if isinstance(func, _ast.Name) and func.id == '__import__':
                 if node.args and isinstance(node.args[0], _ast.Constant):
-                    if node.args[0].value == 'os':
-                        findings.append("Dynamic __import__('os') — code injection")
+                    if node.args[0].value in ('os', 'subprocess', 'ctypes', 'sys'):
+                        findings.append(f"Dynamic __import__('{node.args[0].value}') — code injection")
+                        
+            # Environment exfiltration checks: os.environ combined with network requests
+            if isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Name) and func.value.id in ('requests', 'urllib'):
+                # Check if os.environ is in arguments
+                for arg in node.args:
+                    for subnode in _ast.walk(arg):
+                        if isinstance(subnode, _ast.Attribute) and isinstance(subnode.value, _ast.Name) and subnode.value.id == 'os' and subnode.attr == 'environ':
+                            findings.append("Environment variables exfiltration attempt detected")
+
     return findings
 
 
@@ -219,13 +258,10 @@ def _sec_calculate_risk(static_findings: dict, ast_findings: List[str]) -> int:
     # Weights tuned to avoid false positives on legitimate Telegram bots.
     # Only patterns that are unambiguously malicious get high scores.
     weights = {
-        "🔴 Data Theft":          40,
-        "🔴 Backdoor":            40,
-        # Having a token in code is bad practice but NOT necessarily theft —
-        # many bots hardcode their token. Weight kept low so it alone can't
-        # reach the DANGEROUS threshold.
-        "🔴 Exposed Credentials": 10,
-        "🟡 Suspicious Network":  12,
+        "🔴 Restricted Access":   40,
+        "🔴 System Integrity":    40,
+        "🔴 Credential Safety":   10,
+        "🟡 Network Activity":    12,
         "🟡 Obfuscation":         10,
         "🟠 Resource Abuse":       8,
     }
@@ -244,9 +280,9 @@ def _sec_get_verdict(risk_score: int, static_findings: dict) -> Tuple[str, str]:
     # Exposed Credentials alone → SUSPICIOUS (warn user, don't block).
     has_blocking = any(
         static_findings.get(c)
-        for c in ("🔴 Data Theft", "🔴 Backdoor")
+        for c in ("🔴 Restricted Access", "🔴 System Integrity")
     )
-    has_credentials = bool(static_findings.get("🔴 Exposed Credentials"))
+    has_credentials = bool(static_findings.get("🔴 Credential Safety"))
 
     # REJECT only for real attack patterns at high risk
     if has_blocking and risk_score >= 70:
