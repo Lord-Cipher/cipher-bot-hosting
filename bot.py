@@ -17304,26 +17304,29 @@ def main() -> int:
         if b.get("status") == "running":
             try: start_child(b)
             except Exception: pass
-    # Clear old webhook
-    try:
-        bot.remove_webhook()
-        try: bot.delete_webhook(drop_pending_updates=True)
-        except Exception: pass
-        print("[bot] webhook cleared", flush=True)
-    except Exception as e:
-        print(f"[bot] webhook clear warning: {e}", flush=True)
-    print("[bot] polling\u2026", flush=True)
-    while True:
+    # --- POLLING FALLBACK ---
+    if not wh_enabled:
+        # Clear old webhook to allow polling
         try:
-            bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=25)
-        except KeyboardInterrupt:
-            print("\n[bot] stopping\u2026", flush=True)
-            for bid in list(RUNNING.keys()):
-                stop_child(bid, manual=False)
-            return 0
+            bot.remove_webhook()
+            try: bot.delete_webhook(drop_pending_updates=True)
+            except Exception: pass
+            print("[bot] webhook cleared, starting polling", flush=True)
         except Exception as e:
-            print(f"[bot] poll error: {e}", flush=True)
-            time.sleep(5)
+            print(f"[bot] webhook clear warning: {e}", flush=True)
+            
+        print("[bot] polling\u2026", flush=True)
+        while True:
+            try:
+                bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=25)
+            except KeyboardInterrupt:
+                print("\n[bot] stopping\u2026", flush=True)
+                for bid in list(RUNNING.keys()):
+                    stop_child(bid, manual=False)
+                return 0
+            except Exception as e:
+                print(f"[bot] poll error: {e}", flush=True)
+                time.sleep(5)
 
 
 
