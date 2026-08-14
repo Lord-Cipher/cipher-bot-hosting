@@ -1819,8 +1819,22 @@ def _ka_root() -> Any:  # noqa: D401
             "brand": BRAND_TAG,
             "uptime_ms": int(time.time() * 1000) - START_TS,
             "running_bots": len(RUNNING) if "RUNNING" in globals() else 0,
+            "mode": "webhook" if get_setting("webhook_enabled", False) else "polling"
         }
     )
+
+@_ka.route("/tg-webhook/<token>", methods=["POST"])
+def _tg_webhook_listener(token: str) -> Any:
+    """Listen for Telegram updates via webhook."""
+    if token != TOKEN:
+        return "Unauthorized", 403
+    
+    if request.headers.get("content-type") == "application/json":
+        json_string = request.get_data().decode("utf-8")
+        update = types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return "", 200
+    return "Invalid Content-Type", 400
 
 
 @_ka.route("/gh-webhook/<bot_id>", methods=["POST"])
@@ -17253,6 +17267,28 @@ def main() -> int:
         ])
     except Exception:
         pass
+
+    # --- WEBHOOK HYBRID LOGIC ---
+    wh_enabled = get_setting("webhook_enabled", False)
+    pub_url = get_setting("public_url", "").strip().rstrip("/")
+    
+    if wh_enabled and pub_url:
+        webhook_url = f"{pub_url}/tg-webhook/{TOKEN}"
+        try:
+            bot.remove_webhook()
+            # Set the new webhook
+            if bot.set_webhook(url=webhook_url, drop_pending_updates=True):
+                print(f"[bot] webhook enabled: {webhook_url}", flush=True)
+                # In Webhook mode, the Flask server (running in background) handles updates.
+                # We just need the main thread to stay alive.
+                while True:
+                    time.sleep(3600)
+            else:
+                print("[bot] failed to set webhook, falling back to polling", flush=True)
+                wh_enabled = False
+        except Exception as e:
+            print(f"[bot] webhook error: {e}, falling back to polling", flush=True)
+            wh_enabled = False
     # Notify owner on start
     notify_owner(
         f"<b>{G['ok']} Panel Online</b>\n"
