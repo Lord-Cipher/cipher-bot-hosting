@@ -15572,8 +15572,10 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
         Btn("\U0001f4dc  Hosting Rules",     callback_data="adm_set_rules_text",  style="primary"),
         Btn("\U0001f5c4\ufe0f  DB Info",     callback_data="adm_db_info",         style="primary"),
     )
+    wh_on = bool(get_setting("webhook_enabled", False))
     kb.add(
         Btn("\U0001f310  Public URL",        callback_data="adm_set_public_url",  style="primary"),
+        Btn(f"{'🟢' if wh_on else '⚪'} Webhook Mode", callback_data="adm_webhook_toggle", style="success" if wh_on else "primary"),
     )
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="primary"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
@@ -15989,6 +15991,14 @@ def _render_admin_subroute_extras(call: types.CallbackQuery, data: str) -> None:
         audit(uid, "maintenance_toggle", f"now={'on' if not cur else 'off'}")
         ack(call, f"Maintenance: {'ON' if not cur else 'OFF'}")
         return render_adm_maintenance(call)
+
+    if data == "adm_webhook_toggle":
+        if not is_owner(uid): ack(call, "Owner only"); return
+        cur = bool(get_setting("webhook_enabled", False))
+        set_setting("webhook_enabled", not cur)
+        audit(uid, "webhook_toggle", f"now={'on' if not cur else 'off'}")
+        bot.answer_callback_query(call.id, f"Webhook Mode: {'ENABLED' if not cur else 'DISABLED'}\nRestart bot to apply changes.", show_alert=True)
+        return render_adm_settings(call)
 
     # Settings sub-routes
     if data == "adm_set_sysinfo":        return render_adm_sysinfo(call)
@@ -17304,29 +17314,26 @@ def main() -> int:
         if b.get("status") == "running":
             try: start_child(b)
             except Exception: pass
-    # --- POLLING FALLBACK ---
-    if not wh_enabled:
-        # Clear old webhook to allow polling
+    # Clear old webhook
+    try:
+        bot.remove_webhook()
+        try: bot.delete_webhook(drop_pending_updates=True)
+        except Exception: pass
+        print("[bot] webhook cleared", flush=True)
+    except Exception as e:
+        print(f"[bot] webhook clear warning: {e}", flush=True)
+    print("[bot] polling\u2026", flush=True)
+    while True:
         try:
-            bot.remove_webhook()
-            try: bot.delete_webhook(drop_pending_updates=True)
-            except Exception: pass
-            print("[bot] webhook cleared, starting polling", flush=True)
+            bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=25)
+        except KeyboardInterrupt:
+            print("\n[bot] stopping\u2026", flush=True)
+            for bid in list(RUNNING.keys()):
+                stop_child(bid, manual=False)
+            return 0
         except Exception as e:
-            print(f"[bot] webhook clear warning: {e}", flush=True)
-            
-        print("[bot] polling\u2026", flush=True)
-        while True:
-            try:
-                bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=25)
-            except KeyboardInterrupt:
-                print("\n[bot] stopping\u2026", flush=True)
-                for bid in list(RUNNING.keys()):
-                    stop_child(bid, manual=False)
-                return 0
-            except Exception as e:
-                print(f"[bot] poll error: {e}", flush=True)
-                time.sleep(5)
+            print(f"[bot] poll error: {e}", flush=True)
+            time.sleep(5)
 
 
 
