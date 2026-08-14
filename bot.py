@@ -602,6 +602,7 @@ KEYRING_FILE  = DIRS["data"] / "keyring.json"   # tiny local cache only
 # │  Add the BOT TOKEN   ││
 # └──────────────────────────────────────────────────────────────┘
 BOT_TOKEN_HARDCODED = ""   # ← Keep empty, use Environment Variables for efficiency
+print(f"[debug] BOT_TOKEN from env: {'set' if os.environ.get('BOT_TOKEN') else 'NOT SET'}")
 TOKEN = (
     os.environ.get("BOT_TOKEN")
     or os.environ.get("MAIN_BOT_TOKEN")
