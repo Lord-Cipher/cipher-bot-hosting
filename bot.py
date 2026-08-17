@@ -1582,6 +1582,7 @@ class RateLimiter:
 
 RATE = RateLimiter(max_actions=40, window_s=60)
 UPLOAD_RATE = RateLimiter(max_actions=8, window_s=300)
+SCAN_RATE = RateLimiter(max_actions=5, window_s=600)  # 5 scans per 10 mins
 
 
 def maybe_auto_ban(uid: int, reason: str) -> None:
@@ -9443,6 +9444,9 @@ def on_document(m: types.Message) -> None:
         bot.reply_to(m, f"{G['warn']} {sc('Too many uploads, slow down')}.")
         maybe_auto_ban(uid, "upload spam")
         return
+    if not SCAN_RATE.allow(uid):
+        bot.reply_to(m, f"{G['warn']} {sc('Security scanner is busy, try again in 10 minutes')}.")
+        return
     if maintenance_block(uid):
         return
     get_or_create_user(m.from_user)
@@ -9690,6 +9694,9 @@ def on_text(m: types.Message) -> None:
             return
         if flow == "await_gh_repo_url":
             # Clone the given GitHub repo URL and register it as a bot.
+            if not SCAN_RATE.allow(uid):
+                bot.reply_to(m, f"{G['warn']} {sc('Security scanner is busy, try again in 10 minutes')}.")
+                return
             USER_STATES.pop(uid, None)
             repo_url = text.strip()
             if not (repo_url.startswith("https://github.com/") or repo_url.startswith("http://github.com/")):
