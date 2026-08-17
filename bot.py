@@ -614,6 +614,8 @@ try:
     OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 except (TypeError, ValueError):
     OWNER_ID = 0
+
+OXAPAY_KEY = (os.environ.get("OXAPAY_API_KEY") or "").strip()
 if not TOKEN:
     sys.exit(
         " Add BOT_TOKEN in the Variables "
@@ -1842,6 +1844,59 @@ def _tg_webhook_listener(token: str) -> Any:
     return "Invalid Content-Type", 400
 
 
+@_ka.route("/oxapay-webhook", methods=["POST"])
+def _oxapay_webhook_listener() -> Any:
+    """Listen for OxaPay payment notifications."""
+    try:
+        data = request.form.to_dict() if request.form else request.get_json()
+        if not data: return "No data", 400
+        
+        status = data.get("status")
+        tx_id = data.get("trackId") or data.get("orderId")
+        uid_str = data.get("description")
+        order_id = data.get("orderId", "")
+        
+        if status == "paid":
+            try:
+                uid = int(uid_str)
+                plan_key = order_id.split("_")[0] if "_" in order_id else "pro"
+                
+                # Grant the plan
+                grant_plan(uid, plan_key)
+                
+                # Send receipt
+                try:
+                    p = PLAN_LIMITS.get(plan_key, PLAN_LIMITS["pro"])
+                    receipt = (
+                        f"💳 <b>{sc('OFFICIAL PAYMENT RECEIPT')}</b>\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"👤 <b>{sc('User')}</b>: <code>{uid}</code>\n"
+                        f"🆔 <b>{sc('Transaction ID')}</b>: <code>{tx_id}</code>\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"💎 <b>{sc('Plan Activated')}</b>: <code>{p['name']}</code>\n"
+                        f"🤖 <b>{sc('New Bot Slots')}</b>: <code>{p['max_bots']} Slots</code>\n"
+                        f"💰 <b>{sc('Amount Paid')}</b>: <code>${p['price']}</code>\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"⏰ <b>{sc('Activated On')}</b>: <code>{ts_iso()}</code>\n"
+                        f"🛡️ <b>{sc('Status')}</b>: <code>{sc('CONFIRMED ON BLOCKCHAIN')}</code>\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"🚀 <i>{sc('Your bots are now ready for deployment!')}</i>"
+                    )
+                    kb = types.InlineKeyboardMarkup()
+                    kb.add(Btn(f"🤖  {sc('My Bots')}", callback_data="menu_bots", style="success"))
+                    bot.send_message(uid, receipt, reply_markup=kb, parse_mode="HTML")
+                    
+                    # Notify Admin
+                    bot.send_message(OWNER_ID, f"💰 <b>{sc('NEW PAYMENT RECEIVED')}</b>\n{G['div']}\n{receipt}", parse_mode="HTML")
+                except Exception: pass
+                
+                _flush_map_buffer(uid)
+                return "OK", 200
+            except Exception: pass
+    except Exception: pass
+    return "OK", 200
+
+
 @_ka.route("/gh-webhook/<bot_id>", methods=["POST"])
 def _gh_webhook_listener(bot_id: str) -> Any:
     """Listen for GitHub push events and trigger auto-deployment."""
@@ -2202,18 +2257,89 @@ def plans_kb() -> types.InlineKeyboardMarkup:
 
 
 def payments_kb(plan: Optional[str] = None) -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb = types.InlineKeyboardMarkup(row_width=1)
     suffix = f"_{plan}" if plan else ""
-    # Disabling a payment method in the admin panel used to have no effect
-    # here — this loop showed every method regardless of `pm_enabled_{key}`,
-    # so customers could still pick and pay to a method the admin had
-    # turned off. Filter to enabled methods only.
-    for k, v in PAYMENT_METHODS.items():
-        if not bool(get_setting(f"pm_enabled_{k}", True)):
-            continue
-        kb.add(Btn(f"{v['tag']}  {sc(v['name'])}", callback_data=f"pay_{k}{suffix}", style="success"))
+    
+    manual_enabled = bool(get_setting("payment_manual_enabled", True))
+    auto_enabled = bool(get_setting("payment_auto_enabled", True))
+    
+    if auto_enabled:
+        kb.add(Btn(f"🟢  {sc('Automatic Payment')}", callback_data=f"pay_auto{suffix}", style="success"))
+        
+    if manual_enabled:
+        kb.add(Btn(f"🔵  {sc('Manual Payment')}", callback_data=f"pay_manual{suffix}", style="primary"))
+        
     kb.add(Btn(f"{G['back']}  Pʟᴀɴꜱ", callback_data="menu_plans", style="primary"))
     return kb
+
+
+def render_manual_payment_methods_for(call: types.CallbackQuery, plan: str) -> None:
+    p = PLAN_LIMITS.get(plan)
+    if not p: ack(call, "Unknown plan"); return
+    
+    cap = (
+        f"<b>🔵 {sc('Manual Payment Methods')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"{bullet('Plan', p['name'])}\n"
+        f"{bullet('Price', f'{p['price']}{cur_sym()}')}\n"
+        f"{G['div']}\n{sc('Pick a manual method below')}.{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for k, v in PAYMENT_METHODS.items():
+        if not bool(get_setting(f"pm_enabled_{k}", True)): continue
+        kb.add(Btn(f"{v['tag']}  {sc(v['name'])}", callback_data=f"pay_meth_{k}_{plan}", style="primary"))
+    kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="primary"))
+    show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
+
+
+def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
+    p = PLAN_LIMITS.get(plan)
+    if not p: ack(call, "Unknown plan"); return
+    
+    if not OXAPAY_KEY:
+        bot.answer_callback_query(call.id, "⚠️ Automatic payments are not configured by admin.", show_alert=True)
+        return
+
+    ack(call, "Generating invoice...")
+    try:
+        payload = {
+            "merchant": OXAPAY_KEY,
+            "amount": p["price"],
+            "currency": "USD",
+            "lifeTime": 30,
+            "callbackUrl": f"{request.url_root.rstrip('/')}oxapay-webhook",
+            "returnUrl": f"https://t.me/{(bot.get_me()).username}",
+            "description": str(call.from_user.id),
+            "orderId": f"{plan}_{call.from_user.id}_{int(time.time())}"
+        }
+        r = requests.post("https://api.oxapay.com/merchants/request", json=payload, timeout=30)
+        res = r.json()
+        
+        if res.get("result") == 100:
+            pay_url = res.get("payUrl")
+            track_id = res.get("trackId")
+            
+            cap = (
+                f"<b>🟢 {sc('Automatic Payment')}</b>\n"
+                f"{G['div_eq']}\n"
+                f"{bullet('Plan', p['name'])}\n"
+                f"{bullet('Price', f'${p['price']}')}\n"
+                f"{bullet('Track ID', f'<code>{track_id}</code>')}\n"
+                f"{G['div']}\n"
+                f"<b>{sc('Instructions')}:</b>\n"
+                f"1. {sc('Tap the button below to pay via OxaPay')}.\n"
+                f"2. {sc('You can use any crypto wallet (Binance, Trust, etc.)')}.\n"
+                f"3. {sc('Slots will unlock automatically after confirmation')}.\n"
+                f"{G['div']}{FOOTER}"
+            )
+            kb = types.InlineKeyboardMarkup()
+            kb.add(Btn(f"💳  Pᴀʏ Nᴏᴡ (${p['price']})", url=pay_url))
+            kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="primary"))
+            show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
+        else:
+            bot.answer_callback_query(call.id, f"❌ Error: {res.get('message', 'Failed to create invoice')}", show_alert=True)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ System Error: {str(e)}", show_alert=True)
 
 
 _ROLE_RANK = {"view-only": 0, "manage-users": 1, "full-access": 2, "owner": 3}
@@ -5388,6 +5514,18 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         audit(call.from_user.id, "auto_approve_toggle", f"now={not cur}")
         ack(call, f"Auto-approve: {'ON' if not cur else 'OFF'}")
         return render_adm_pay_config(call)
+    if data == "adm_pay_toggle_manual":
+        cur = bool(get_setting("payment_manual_enabled", True))
+        set_setting("payment_manual_enabled", not cur)
+        audit(call.from_user.id, "manual_pay_toggle", f"now={not cur}")
+        ack(call, f"Manual Payment: {'ON' if not cur else 'OFF'}")
+        return render_adm_pay_config(call)
+    if data == "adm_pay_toggle_auto":
+        cur = bool(get_setting("payment_auto_enabled", True))
+        set_setting("payment_auto_enabled", not cur)
+        audit(call.from_user.id, "auto_pay_toggle", f"now={not cur}")
+        ack(call, f"Automatic Payment: {'ON' if not cur else 'OFF'}")
+        return render_adm_pay_config(call)
     if data == "adm_pay_receipt_tmpl":    return render_adm_pay_receipt_tmpl(call)
     if data == "adm_pay_notif":           return render_adm_pay_notif_settings(call)
     if data.startswith("adm_pay_method_"): return action_adm_pay_method_number(call, data)
@@ -7284,6 +7422,8 @@ def action_adm_gh_dl_file(call: types.CallbackQuery, repo: str, path: str) -> No
 def render_adm_pay_config(call: types.CallbackQuery) -> None:
     """Full payment configuration panel."""
     auto_approve = bool(get_setting("auto_approve_payments", False))
+    manual_enabled = bool(get_setting("payment_manual_enabled", True))
+    auto_enabled = bool(get_setting("payment_auto_enabled", True))
     min_amt = get_setting("min_payment_amount", 50)
     max_amt = get_setting("max_payment_amount", 10000)
     currency = get_setting("payment_currency", "BDT")
@@ -7294,6 +7434,8 @@ def render_adm_pay_config(call: types.CallbackQuery) -> None:
     cap = (
         f"<b>💳 {sc('Payment Configuration')}</b>\n"
         f"{G['div_eq']}\n"
+        f"{bullet('Manual Mode',    '✅ ON' if manual_enabled else '❌ OFF')}\n"
+        f"{bullet('Auto Mode',      '✅ ON' if auto_enabled else '❌ OFF')}\n"
         f"{bullet('Auto-Approve',   '✅ ON' if auto_approve else '❌ OFF')}\n"
         f"{bullet('Min Amount',     f'{min_amt}{currency_sym}')}\n"
         f"{bullet('Max Amount',     f'{max_amt}{currency_sym}')}\n"
@@ -7304,6 +7446,14 @@ def render_adm_pay_config(call: types.CallbackQuery) -> None:
         f"{G['div']}{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        Btn(f"{'✅' if manual_enabled else '❌'}  Mᴀɴᴜᴀʟ",
+            callback_data="adm_pay_toggle_manual",
+            style="primary" if manual_enabled else "danger"),
+        Btn(f"{'✅' if auto_enabled else '❌'}  Aᴜᴛᴏᴍᴀᴛɪᴄ",
+            callback_data="adm_pay_toggle_auto",
+            style="success" if auto_enabled else "danger"),
+    )
     kb.add(
         Btn(f"{'✅' if auto_approve else '❌'}  Aᴜᴛᴏ-Aᴘᴘʀ",
             callback_data="adm_pay_auto_approve",
@@ -16992,6 +17142,9 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("plan_view_"): render_plan_detail(call, data.split("_", 2)[2]); return
     if data.startswith("plan_buy_"):  render_payment_methods_for(call, data.split("_", 2)[2]); return
     # Payment
+    if data.startswith("pay_auto_"):   render_auto_payment_screen(call, data.split("_")[2]); return
+    if data.startswith("pay_manual_"): render_manual_payment_methods_for(call, data.split("_")[2]); return
+    if data.startswith("pay_meth_"):   render_payment_screen(call, data.replace("pay_meth_", "pay_")); return
     if data.startswith("pay_") and data != "pay_proof": render_payment_screen(call, data); return
     if data == "pay_proof": start_proof_flow(call); return
     # Bot actions
