@@ -2300,14 +2300,29 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
         bot.answer_callback_query(call.id, "⚠️ Automatic payments are not configured by admin.", show_alert=True)
         return
 
+    # Apply Coupon Logic
+    u_doc = db_load_ro()["users"].get(str(call.from_user.id)) or {}
+    active_coupon = u_doc.get("active_coupon")
+    final_price = float(p.get("price", 0))
+    discount_txt = ""
+    
+    if active_coupon:
+        c_doc = db_load_ro().get("coupons", {}).get(active_coupon.upper())
+        if c_doc:
+            pct = float(c_doc.get("discount_pct", c_doc.get("percent", 0)))
+            flat = float(c_doc.get("discount_flat", 0))
+            if pct: final_price = round(final_price * (1 - pct / 100), 2)
+            if flat: final_price = max(0, round(final_price - flat, 2))
+            discount_txt = f" (Promo: {active_coupon} applied)"
+
     ack(call, "Generating invoice...")
     try:
         payload = {
             "merchant": OXAPAY_KEY,
-            "amount": p["price"],
+            "amount": final_price,
             "currency": "USD",
             "lifeTime": 30,
-            "callbackUrl": f"{request.url_root.rstrip('/')}oxapay-webhook",
+            "callbackUrl": f"{request.url_root.rstrip('/')}/oxapay-webhook",
             "returnUrl": f"https://t.me/{(bot.get_me()).username}",
             "description": str(call.from_user.id),
             "orderId": f"{plan}_{call.from_user.id}_{int(time.time())}"
@@ -2323,7 +2338,7 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
                 f"<b>🟢 {sc('Automatic Payment')}</b>\n"
                 f"{G['div_eq']}\n"
                 f"{bullet('Plan', p['name'])}\n"
-                f"{bullet('Price', f'${p['price']}')}\n"
+                f"{bullet('Price', f'${final_price}{discount_txt}')}\n"
                 f"{bullet('Track ID', f'<code>{track_id}</code>')}\n"
                 f"{G['div']}\n"
                 f"<b>{sc('Instructions')}:</b>\n"
@@ -2333,7 +2348,7 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
                 f"{G['div']}{FOOTER}"
             )
             kb = types.InlineKeyboardMarkup()
-            kb.add(Btn(f"💳  Pᴀʏ Nᴏᴡ (${p['price']})", url=pay_url))
+            kb.add(Btn(f"💳  Pᴀʏ Nᴏᴡ (${final_price})", url=pay_url))
             kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="primary"))
             show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
         else:
