@@ -16,6 +16,14 @@
     "OWNER_ID": {
       "description": "Your Telegram User ID for Admin access",
       "required": true
+    },
+    "OXAPAY_API_KEY": {
+      "description": "Your OxaPay Merchant API Key",
+      "required": false
+    },
+    "ANNOUNCE_CHANNEL": {
+      "description": "Optional: Telegram Channel ID for announcements",
+      "required": false
     }
   }
 }

@@ -1,0 +1,19 @@
+services:
+  - type: worker
+    name: cipher-bot-hosting
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+        placeholder: "Your Telegram Bot Token from @BotFather"
+      - key: OWNER_ID
+        sync: false
+        placeholder: "Your Telegram User ID for Admin access"
+      - key: OXAPAY_API_KEY
+        sync: false
+        placeholder: "Your OxaPay Merchant API Key"
+      - key: ANNOUNCE_CHANNEL
+        sync: false
+        placeholder: "Optional: Telegram Channel ID for announcements"
