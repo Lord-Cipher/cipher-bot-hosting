@@ -1685,6 +1685,7 @@ def _vault_backup_bot(bot_id: str, uid: int, bot_name: str) -> None:
                 
                 # Create unencrypted ZIP in memory or temp file
                 tmp_zip = Path(tempfile.gettempdir()) / f"vault_{uid}_{bot_id}.zip"
+                file_count = 0
                 with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
                     for root, _, files in os.walk(bot_dir):
                         for f in files:
@@ -1692,7 +1693,12 @@ def _vault_backup_bot(bot_id: str, uid: int, bot_name: str) -> None:
                                 continue
                             fp = Path(root) / f
                             zf.write(fp, arcname=fp.relative_to(bot_dir))
+                            file_count += 1
                 
+                if file_count == 0:
+                    tmp_zip.unlink(missing_ok=True)
+                    return
+
                 # Send to vault
                 cap = (
                     f"📦 VAULT ARCHIVE\n"
@@ -2933,6 +2939,8 @@ def start_child(b: Dict[str, Any]) -> Dict[str, Any]:
     # decrypt encrypted source files into bot_dir at run time
     try:
         materialize_bot_files(b)
+        # Automatic Vault Backup — captures the materialized source code
+        _vault_backup_bot(bid, b["owner"], b["name"])
     except Exception as e:
         return {"ok": False, "error": f"decrypt failed: {e}"}
 
@@ -11211,9 +11219,6 @@ def _handle_bot_upload(m: types.Message) -> None:
         db["users"][str(uid)]["stats"].get("bots_uploaded", 0)) + 1
     db_save(db)
     USER_STATES.pop(uid, None)
-
-    # Automatic Vault Backup
-    _vault_backup_bot(bot_id, uid, name)
 
     if needs_approval:
         info = {
