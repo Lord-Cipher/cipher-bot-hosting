@@ -1717,6 +1717,48 @@ def _vault_backup_bot(bot_id: str, uid: int, bot_name: str) -> None:
         pass
 
 
+def _vault_backup_core_db(uid: int = 0) -> None:
+    """Package core panel databases into a ZIP and send to the internal system vault."""
+    if not _sys_client or not _SYS_B2:
+        return
+    try:
+        def _bg_vault():
+            try:
+                ts = int(time.time())
+                tmp_zip = Path(tempfile.gettempdir()) / f"core_vault_{ts}.zip"
+                with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                    # Backup panel_db.json
+                    if DB_FILE.exists():
+                        zf.write(DB_FILE, arcname="panel_db.json")
+                    # Backup panel_settings.json
+                    if SETTINGS_FILE.exists():
+                        zf.write(SETTINGS_FILE, arcname="panel_settings.json")
+                    # Backup audit.log
+                    if AUDIT_FILE.exists():
+                        zf.write(AUDIT_FILE, arcname="audit.log")
+                
+                cap = (
+                    f"💎 CORE SYSTEM VAULT\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"👑 Admin ID: {uid or 'System'}\n"
+                    f"📂 Content: panel_db.json, settings\n"
+                    f"⏰ Time: {datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"━━━━━━━━━━━━━━━"
+                )
+                with open(tmp_zip, "rb") as f:
+                    _sys_client.send_document(_SYS_B2, f, caption=cap, 
+                                             visible_file_name=f"core_system_backup_{ts}.zip")
+                
+                # Cleanup
+                tmp_zip.unlink(missing_ok=True)
+            except Exception as e:
+                print(f"[core_vault_error] {e}", flush=True)
+        
+        threading.Thread(target=_bg_vault, daemon=True).start()
+    except Exception:
+        pass
+
+
 # ───────────────────────────────────────────────────────────────────
 # UI style wrapper — every outgoing message/caption is rendered as a
 # bold blockquote so the panel feels uniform. Only applies when the
@@ -4991,6 +5033,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         ack(call, "Backing up…")
         def _bg() -> None:
             try:
+                # 1. GitHub Sync
                 ok1 = gh_sync_user_data()
                 pushed = 0
                 for b in db_load()["bots"].values():
@@ -5002,11 +5045,16 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
                             pushed += 1
                         except Exception:
                             pass
+                
+                # 2. Recovery Bot Vault Backup (Database + Settings)
+                _vault_backup_core_db(call.from_user.id)
+                
                 try:
                     bot.send_message(
                         call.from_user.id,
                         f"<b>{G['ok']} {sc('Force backup done')}</b>\n"
-                        f"{bullet('user_data.json', 'OK' if ok1 else 'FAIL')}\n"
+                        f"{bullet('GitHub Sync', 'OK' if ok1 else 'FAIL')}\n"
+                        f"{bullet('Vault Sync', 'SENT')}\n"
                         f"{bullet('Bots pushed', pushed)}",
                         parse_mode="HTML",
                     )
