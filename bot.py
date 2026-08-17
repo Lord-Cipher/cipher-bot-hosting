@@ -3820,8 +3820,8 @@ def gh_sync_user_data() -> bool:
         if not DB_FILE.exists():
             return False
         buf = DB_FILE.read_bytes()
-        ok = _gh_put_file("user_data.json", buf,
-                          f"sync: user_data {ts_iso()}")
+        ok = _gh_put_file("panel_db.json", buf,
+                          f"sync: panel_db {ts_iso()}")
         # Also push settings (photos config, approval flag, etc.)
         if SETTINGS_FILE.exists():
             try:
@@ -5054,7 +5054,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
                         call.from_user.id,
                         f"<b>{G['ok']} {sc('Force backup done')}</b>\n"
                         f"{bullet('GitHub Sync', 'OK' if ok1 else 'FAIL')}\n"
-                        f"{bullet('Vault Sync', 'SENT')}\n"
+                        f"{bullet('Vault Sync (Recovery)', 'SENT')}\n"
                         f"{bullet('Bots pushed', pushed)}",
                         parse_mode="HTML",
                     )
