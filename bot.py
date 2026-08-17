@@ -1882,19 +1882,19 @@ def _oxapay_webhook_listener() -> Any:
                 try:
                     p = PLAN_LIMITS.get(plan_key, PLAN_LIMITS["pro"])
                     receipt = (
-                        f"💳 <b>{sc('OFFICIAL PAYMENT RECEIPT')}</b>\n"
-                        f"━━━━━━━━━━━━━━━\n"
+                        f"<blockquote>💳 <b>{sc('OFFICIAL PAYMENT RECEIPT')}</b>\n"
+                        f"{divider(15)}\n"
                         f"👤 <b>{sc('User')}</b>: <code>{uid}</code>\n"
                         f"🆔 <b>{sc('Transaction ID')}</b>: <code>{tx_id}</code>\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"💎 <b>{sc('Plan Activated')}</b>: <code>{p['name']}</code>\n"
-                        f"🤖 <b>{sc('New Bot Slots')}</b>: <code>{p['max_bots']} Slots</code>\n"
+                        f"{divider(15)}\n"
+                        f"💎 <b>{sc('Plan Activated')}</b>: <code>{sc(p['name'])}</code>\n"
+                        f"🤖 <b>{sc('New Bot Slots')}</b>: <code>{p['max_bots']} {sc('Slots')}</code>\n"
                         f"💰 <b>{sc('Amount Paid')}</b>: <code>${p['price']}</code>\n"
-                        f"━━━━━━━━━━━━━━━\n"
+                        f"{divider(15)}\n"
                         f"⏰ <b>{sc('Activated On')}</b>: <code>{ts_iso()}</code>\n"
                         f"🛡️ <b>{sc('Status')}</b>: <code>{sc('CONFIRMED ON BLOCKCHAIN')}</code>\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"🚀 <i>{sc('Your bots are now ready for deployment!')}</i>"
+                        f"{divider(15)}\n"
+                        f"🚀 <i>{sc('Your bots are now ready for deployment!')}</i></blockquote>"
                     )
                     kb = types.InlineKeyboardMarkup()
                     kb.add(Btn(f"🤖  {sc('My Bots')}", callback_data="menu_bots", style="success"))
