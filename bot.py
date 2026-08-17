@@ -599,28 +599,42 @@ AUDIT_FILE    = DIRS["data"] / "audit.log"
 KEYRING_FILE  = DIRS["data"] / "keyring.json"   # tiny local cache only
 
 # ┌──────────────────────────────────────────────────────────────┐
-# │  Add the BOT TOKEN   ││
+# │  SYSTEM ENVIRONMENT DIAGNOSTICS   ││
 # └──────────────────────────────────────────────────────────────┘
-BOT_TOKEN_HARDCODED = ""   # ← Keep empty, use Environment Variables for efficiency
-print(f"[debug] BOT_TOKEN from env: {'set' if os.environ.get('BOT_TOKEN') else 'NOT SET'}")
+def _mask_val(v):
+    if not v: return "❌ NOT SET"
+    v = str(v).strip()
+    if len(v) < 8: return "✅ LOADED (Short)"
+    return f"✅ LOADED ({v[:4]}...{v[-4:]})"
+
+print("\n" + "═"*50)
+print(" 🛠️  CIPHER SYSTEM BOOT: ENVIRONMENT CHECK")
+print("═"*50)
+print(f" 🤖 BOT_TOKEN:      {_mask_val(os.getenv('BOT_TOKEN') or os.getenv('MAIN_BOT_TOKEN'))}")
+print(f" 👤 OWNER_ID:      {_mask_val(os.getenv('OWNER_ID'))}")
+print(f" 💳 OXAPAY_KEY:    {_mask_val(os.getenv('OXAPAY_API_KEY'))}")
+print(f" 📢 ANNOUNCE_CH:   {_mask_val(os.getenv('ANNOUNCE_CHANNEL'))}")
+print(f" 🌐 PORT:          {os.getenv('PORT', '10460 (Default)')}")
+print("═"*50 + "\n")
+
 TOKEN = (
-    os.environ.get("BOT_TOKEN")
-    or os.environ.get("MAIN_BOT_TOKEN")
-    or os.environ.get("TELEGRAM_BOT_TOKEN")
-    or BOT_TOKEN_HARDCODED
+    os.getenv("BOT_TOKEN")
+    or os.getenv("MAIN_BOT_TOKEN")
+    or os.getenv("TELEGRAM_BOT_TOKEN")
     or ""
 ).strip()
+
 try:
-    OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+    OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 except (TypeError, ValueError):
     OWNER_ID = 0
 
-OXAPAY_KEY = (os.environ.get("OXAPAY_API_KEY") or "").strip()
+OXAPAY_KEY = (os.getenv("OXAPAY_API_KEY") or "").strip()
+
 if not TOKEN:
-    sys.exit(
-        " Add BOT_TOKEN in the Variables "
-        "((value = the main bot token from BotFather), then redeploy."
-    )
+    print("[!] FATAL ERROR: BOT_TOKEN is missing from environment variables.")
+    print("[!] Please add BOT_TOKEN in your hosting panel (Render/Railway/VPS).")
+    sys.exit(1)
 # OWNER_ID is optional. If not set, the very first user to send /start
 # automatically becomes the panel owner and is persisted to settings.
 # This lets you deploy with ONLY BOT_TOKEN and claim ownership in one tap.
