@@ -120,18 +120,66 @@ def calculate_risk(static_findings: Dict[str, List[str]], ast_findings: List[str
         else: score += 35
     return min(score, 100)
 
-def scan_code(code: str, filename: str = "unknown.py") -> Dict[str, Any]:
+def _try_decode(code: str) -> Optional[str]:
+    """Attempts to find and decode base64/hex payloads in the code."""
+    # 1. Base64 patterns
+    b64_matches = re.findall(r'base64\.b64decode\s*\(\s*["\']([A-Za-z0-9+/=]{20,})["\']\s*\)', code)
+    for m in b64_matches:
+        try:
+            return base64.b64decode(m).decode(errors='ignore')
+        except Exception: continue
+    
+    # 2. Hex patterns
+    hex_matches = re.findall(r'["\']((?:\\x[0-9a-fA-F]{2}){10,})["\']', code)
+    for m in hex_matches:
+        try:
+            h = m.replace("\\x", "")
+            return bytes.fromhex(h).decode(errors='ignore')
+        except Exception: continue
+    
+    return None
+
+def scan_code(code: str, filename: str = "unknown.py", depth: int = 0) -> Dict[str, Any]:
+    if depth > 2: return {"verdict": "SAFE", "risk_score": 0, "all_threats": [], "recommendation": "APPROVE"}
     try:
         s_res = static_scan(code, filename)
         a_res = ast_scan(code, filename)
+        
+        # Check for obfuscation and try to decode
+        decoded_content = None
+        if "🟡 Obfuscation" in s_res or any("entropy" in f.lower() for f in a_res):
+            decoded_content = _try_decode(code)
+            if decoded_content:
+                # Recursively scan decoded content
+                sub_res = scan_code(decoded_content, f"decoded_{filename}", depth + 1)
+                # Merge threats
+                for cat, hits in sub_res.get("findings", {}).items():
+                    s_res.setdefault(cat, []).extend(hits)
+                a_res.extend(sub_res.get("ast_findings", []))
+        
         risk = calculate_risk(s_res, a_res)
         verdict, recom = ("SAFE", "APPROVE")
         if risk >= 70: verdict, recom = ("DANGEROUS", "REJECT")
         elif risk >= 30: verdict, recom = ("SUSPICIOUS", "MANUAL_REVIEW")
+        
         all_t = []
-        for hits in s_res.values(): all_t.extend(hits)
-        all_t.extend(a_res)
-        return {"verdict": verdict, "risk_score": risk, "all_threats": all_t, "recommendation": recom, "summary": "Scan OK", "filename": filename}
+        for hits in s_res.values(): 
+            for h in hits:
+                if h not in all_t: all_t.append(h)
+        for h in a_res:
+            if h not in all_t: all_t.append(h)
+            
+        return {
+            "verdict": verdict, 
+            "risk_score": risk, 
+            "findings": s_res,
+            "ast_findings": a_res,
+            "all_threats": all_t, 
+            "recommendation": recom, 
+            "summary": "Scan OK", 
+            "filename": filename,
+            "decoded_content": decoded_content if depth == 0 else None
+        }
     except Exception as e:
         return {"verdict": "ERROR", "risk_score": 0, "all_threats": [str(e)], "summary": str(e), "filename": filename}
 

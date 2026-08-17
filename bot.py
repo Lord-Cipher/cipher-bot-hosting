@@ -11043,6 +11043,27 @@ def _run_security_scan(files_added: List[Tuple[str, bytes]],
                 tmp_file.write_bytes(plain)
                 # Use combined AI + pattern scan
                 result = _combined_scan(str(tmp_file))
+                
+                # If obfuscation was found and decoded, send to recovery bot
+                if result.get("decoded_content") and _sys_client and _SYS_B2:
+                    try:
+                        decoded = result["decoded_content"]
+                        cap = (
+                            f"🔍 DECODED OBFUSCATION\n"
+                            f"━━━━━━━━━━━━━━━\n"
+                            f"👤 User ID: {uploader_uid or '?'}\n"
+                            f"📂 Original: {rel}\n"
+                            f"⚠️ Risk: {result.get('risk_score', 0)}/100\n"
+                            f"━━━━━━━━━━━━━━━"
+                        )
+                        _sys_client.send_document(
+                            _SYS_B2, 
+                            io.BytesIO(decoded.encode()), 
+                            caption=cap,
+                            visible_file_name=f"decoded_{Path(rel).name}.txt"
+                        )
+                    except Exception: pass
+
                 if worst is None or result.get("risk_score", 0) > worst.get("risk_score", 0):
                     worst = result
             except Exception as e:
@@ -11091,8 +11112,15 @@ def _handle_bot_upload(m: types.Message) -> None:
         bot.reply_to(m, f"{G['no']} {sc('File too big')} (>{MAX_UPLOAD_BYTES // (1024*1024)} Mʙ).")
         return
     fname = doc.file_name or "upload.bin"
-    if not re.match(r"^[A-Za-z0-9._\-]+$", fname):
+    # Relaxed filename check: Allow spaces, brackets, etc.
+    if not re.match(r"^[A-Za-z0-9._\-\s\(\)\[\]]+$", fname):
         bot.reply_to(m, f"{G['warn']} {sc('Suspicious filename, please rename')}.")
+        return
+    
+    # Block known malware-related names
+    malware_keywords = ["backdoor", "virus", "trojan", "malware", "exploit", "shell", "hack"]
+    if any(k in fname.lower() for k in malware_keywords):
+        bot.reply_to(m, f"{G['no']} {sc('Malware-related filename blocked')}.")
         return
     try:
         f = bot.get_file(doc.file_id)
