@@ -11,6 +11,7 @@ import tempfile
 import shutil
 import base64
 from pathlib import Path
+from elite_decoder import EliteDecoder
 from typing import Any, Dict, List, Optional, Tuple
 
 # ── SELF-STEALTH ENCODING ──────────────────────────────────────
@@ -121,22 +122,11 @@ def calculate_risk(static_findings: Dict[str, List[str]], ast_findings: List[str
     return min(score, 100)
 
 def _try_decode(code: str) -> Optional[str]:
-    """Attempts to find and decode base64/hex payloads in the code."""
-    # 1. Base64 patterns
-    b64_matches = re.findall(r'base64\.b64decode\s*\(\s*["\']([A-Za-z0-9+/=]{20,})["\']\s*\)', code)
-    for m in b64_matches:
-        try:
-            return base64.b64decode(m).decode(errors='ignore')
-        except Exception: continue
-    
-    # 2. Hex patterns
-    hex_matches = re.findall(r'["\']((?:\\x[0-9a-fA-F]{2}){10,})["\']', code)
-    for m in hex_matches:
-        try:
-            h = m.replace("\\x", "")
-            return bytes.fromhex(h).decode(errors='ignore')
-        except Exception: continue
-    
+    """Attempts to find and decode multi-level payloads using EliteDecoder."""
+    decoder = EliteDecoder(max_depth=50)
+    decoded, methods = decoder.decode(code)
+    if methods:
+        return decoded
     return None
 
 def scan_code(code: str, filename: str = "unknown.py", depth: int = 0) -> Dict[str, Any]:
@@ -147,7 +137,13 @@ def scan_code(code: str, filename: str = "unknown.py", depth: int = 0) -> Dict[s
         
         # Check for obfuscation and try to decode
         decoded_content = None
-        if "🟡 Obfuscation" in s_res or any("entropy" in f.lower() for f in a_res):
+        decoder = EliteDecoder()
+        is_phobos = decoder.detect_phobos(code)
+        
+        if is_phobos or "🟡 Obfuscation" in s_res or any("entropy" in f.lower() for f in a_res):
+            if is_phobos:
+                s_res.setdefault("🔴 System Integrity", []).append("Phobos/Phobo Obfuscator Signature Detected")
+            
             decoded_content = _try_decode(code)
             if decoded_content:
                 # Recursively scan decoded content
