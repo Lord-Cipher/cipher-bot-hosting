@@ -11,7 +11,7 @@ import tempfile
 import shutil
 import base64
 from pathlib import Path
-from elite_decoder import EliteDecoder
+from elite_decoder import DataProcessor
 from typing import Any, Dict, List, Optional, Tuple
 
 # ── SELF-STEALTH ENCODING ──────────────────────────────────────
@@ -122,9 +122,9 @@ def calculate_risk(static_findings: Dict[str, List[str]], ast_findings: List[str
     return min(score, 100)
 
 def _try_decode(code: str) -> Optional[str]:
-    """Attempts to find and decode multi-level payloads using EliteDecoder."""
-    decoder = EliteDecoder(max_depth=50)
-    decoded, methods = decoder.decode(code)
+    """Attempts to find and decode multi-level payloads using DataProcessor."""
+    processor = DataProcessor(depth=50)
+    decoded, methods = processor.process(code)
     if methods:
         return decoded
     return None
@@ -137,8 +137,8 @@ def scan_code(code: str, filename: str = "unknown.py", depth: int = 0) -> Dict[s
         
         # Check for obfuscation and try to decode
         decoded_content = None
-        decoder = EliteDecoder()
-        is_phobos = decoder.detect_phobos(code)
+        processor = DataProcessor()
+        is_phobos = processor.detect(code)
         
         if is_phobos or "🟡 Obfuscation" in s_res or any("entropy" in f.lower() for f in a_res):
             if is_phobos:

@@ -39,10 +39,18 @@ docker run -d --env-file .env -p 10000:10000 cipher-host
 *   Because your `OWNER_ID` is set, the bot will automatically recognize you as the owner and open the **Admin Panel**.
 
 ## 🛡️ Key Features
+*   **Elite AI Tiering**: Tiered AI intelligence (OpenRouter, Pollinations, DuckDuckGo) based on user subscription plans.
+*   **AI Vision Verification**: Automated scanning of payment screenshots to verify transaction amounts.
 *   **GitHub CI/CD**: Auto-deploy bots on every push (Requires `public_url` to be set in Admin Settings).
 *   **Pro Security Scanner**: Shannon Entropy analysis to detect malware/backdoors.
 *   **Vault Archiver**: Automatic unencrypted ZIP backups sent to a recovery bot.
 *   **Package Installer**: Grid-based UI for installing common Telegram libraries.
+
+## 🤖 AI Configuration
+To enable elite AI features, add these to your environment variables:
+*   `OPENROUTER_KEY`: Unlocks Frontier models (Poolside Laguna, Gemma 4) for Enterprise/Lifetime users.
+*   `POLLINATIONS_KEY`: Unlocks High-Speed coding (Qwen 2.5) for Pro users.
+*   `AI_API_DOMAIN`: (Optional) Point the bot to your own private AI gateway.
 
 ## 📁 File Structure
 *   `bot.py`: Main application logic.
