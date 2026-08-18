@@ -4,14 +4,36 @@ This platform is a professional Telegram bot hosting solution with automated CI/
 
 ## 🛠️ Installation Steps
 
-### 1. Deploy to Railway
-*   Connect this repository to your **Railway.app** account.
-*   The platform uses the provided `Procfile` and `railway.json` for automatic configuration.
+### Option A: One-Click VPS Setup (Recommended)
+This method works on any Linux VPS (Ubuntu, Debian, CentOS, Arch).
+1.  **Clone the Repo**:
+    ```bash
+    git clone https://github.com/Lord-Cipher/cipher-bot-hosting.git
+    cd cipher-bot-hosting
+    ```
+2.  **Run the Setup Script**:
+    ```bash
+    chmod +x setup.sh
+    ./setup.sh
+    ```
+3.  **Configure Environment**:
+    *   Edit the generated `.env` file with your `BOT_TOKEN` and `OWNER_ID`.
+4.  **Start the Bot**:
+    ```bash
+    source venv/bin/activate
+    python3 bot.py
+    ```
 
-### 2. Configure Environment Variables
-Add the following variables in the **Variables** tab of your Railway project:
-*   `BOT_TOKEN`: Your main bot token from [@BotFather](https://t.me/BotFather).
-*   `OWNER_ID`: Your Telegram User ID (to grant you Admin access).
+### Option B: Docker Deployment
+For users who prefer containerization:
+```bash
+docker build -t cipher-host .
+docker run -d --env-file .env -p 10000:10000 cipher-host
+```
+
+### Option C: PaaS (Railway / Render)
+*   **Railway**: Connect this repo and add `BOT_TOKEN` and `OWNER_ID` to the **Variables** tab.
+*   **Render**: Connect this repo, add variables, and set the build command to `pip install -r requirements.txt`.
 
 ### 3. Claim Admin Access
 *   Once deployed, send `/start` to your bot on Telegram.
