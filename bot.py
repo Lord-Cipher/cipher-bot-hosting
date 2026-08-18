@@ -1938,33 +1938,40 @@ def _tg_webhook_listener(token: str) -> Any:
 def _oxapay_webhook_listener() -> Any:
     """Listen for OxaPay payment notifications."""
     try:
-        data = request.form.to_dict() if request.form else request.get_json()
-        if not data: return "No data", 400
+        data = request.get_json() if request.is_json else request.form.to_dict()
+        if not data:
+            print("[oxapay] webhook received with no data", flush=True)
+            return "No data", 400
         
         status = data.get("status")
-        tx_id = data.get("trackId") or data.get("orderId")
-        uid_str = data.get("description")
+        track_id = data.get("trackId")
         order_id = data.get("orderId", "")
+        uid_str = data.get("description")
+        
+        print(f"[oxapay] webhook: status={status}, track={track_id}, order={order_id}, uid={uid_str}", flush=True)
         
         if status == "paid":
             try:
                 uid = int(uid_str)
+                # Extract plan from order_id (format: plan_uid_timestamp)
                 plan_key = order_id.split("_")[0] if "_" in order_id else "pro"
                 
                 # Grant the plan
                 grant_plan(uid, plan_key)
                 log_notification("PAYMENT", f"OxaPay auto-payment successful for UID {uid} (Plan: {plan_key})", uid=uid)
                 
-                # Send elite AI-powered receipt
-                try:
-                    send_elite_receipt(uid, tx_id, plan_key)
-                except Exception: pass
+                # Send elite receipt
+                send_elite_receipt(uid, str(track_id), plan_key)
                 
                 _flush_map_buffer(uid)
                 return "OK", 200
-            except Exception: pass
-    except Exception: pass
-    return "OK", 200
+            except Exception as e:
+                print(f"[oxapay] processing error: {e}", flush=True)
+        
+        return "OK", 200
+    except Exception as e:
+        print(f"[oxapay] webhook error: {e}", flush=True)
+        return "Internal Error", 500
 
 
 @_ka.route("/gh-webhook/<bot_id>", methods=["POST"])
@@ -17767,25 +17774,6 @@ def main() -> int:
     except Exception:
         pass
 
-    # --- WEBHOOK HYBRID LOGIC ---
-    
-    if wh_enabled and pub_url:
-        webhook_url = f"{pub_url}/tg-webhook/{TOKEN}"
-        try:
-            bot.remove_webhook()
-            # Set the new webhook
-            if bot.set_webhook(url=webhook_url, drop_pending_updates=True):
-                print(f"[bot] webhook enabled: {webhook_url}", flush=True)
-                # In Webhook mode, the Flask server (running in background) handles updates.
-                # We just need the main thread to stay alive.
-                while True:
-                    time.sleep(3600)
-            else:
-                print("[bot] failed to set webhook, falling back to polling", flush=True)
-                wh_enabled = False
-        except Exception as e:
-            print(f"[bot] webhook error: {e}, falling back to polling", flush=True)
-            wh_enabled = False
     # Notify owner on start
     notify_owner(
         f"<b>{G['ok']} Panel Online</b>\n"
@@ -17801,34 +17789,64 @@ def main() -> int:
         if b.get("status") == "running":
             try: start_child(b)
             except Exception: pass
-    # Clear old webhook
-    try:
-        bot.remove_webhook()
-        try: bot.delete_webhook(drop_pending_updates=True)
-        except Exception: pass
-        print("[bot] webhook cleared", flush=True)
-    except Exception as e:
-        print(f"[bot] webhook clear warning: {e}", flush=True)
-    print(f"[bot] starting long polling (stability mode)\u2026", flush=True)
-    while True:
+
+    # --- WEBHOOK HYBRID LOGIC ---
+    if wh_enabled and pub_url:
+        webhook_url = f"{pub_url}/tg-webhook/{TOKEN}"
+        print(f"[bot] attempting webhook: {webhook_url}", flush=True)
         try:
-            # Long polling with elite resilience for VPS/Sandbox stability
-            # Increased timeout and none_stop=True ensures it self-recovers from network drops.
-            bot.infinity_polling(
-                skip_pending=True, 
-                timeout=90, 
-                long_polling_timeout=80,
-                none_stop=True,
-                logger_level=logging.ERROR
-            )
-        except KeyboardInterrupt:
-            print("\n[bot] stopping\u2026", flush=True)
-            for bid in list(RUNNING.keys()):
-                stop_child(bid, manual=False)
-            return 0
+            # Retry mechanism for webhook setting to handle transient SSL/Network issues
+            success = False
+            for i in range(3):
+                try:
+                    bot.remove_webhook()
+                    if bot.set_webhook(url=webhook_url, drop_pending_updates=True, timeout=15):
+                        success = True
+                        break
+                except Exception as _we:
+                    print(f"[bot] webhook attempt {i+1} failed: {_we}", flush=True)
+                    time.sleep(2)
+            
+            if success:
+                print(f"[bot] webhook active: {webhook_url}", flush=True)
+                # In Webhook mode, we just keep the main thread alive.
+                while True:
+                    time.sleep(3600)
+            else:
+                print("[bot] webhook failed after retries, falling back to polling", flush=True)
+                wh_enabled = False
         except Exception as e:
-            print(f"[bot] poll error: {e}", flush=True)
-            time.sleep(5)
+            print(f"[bot] webhook fatal error: {e}, falling back to polling", flush=True)
+            wh_enabled = False
+
+    # Clear old webhook if we are in polling mode
+    if not wh_enabled:
+        try:
+            bot.remove_webhook()
+            try: bot.delete_webhook(drop_pending_updates=True)
+            except Exception: pass
+            print("[bot] webhook cleared for polling", flush=True)
+        except Exception as e:
+            print(f"[bot] webhook clear warning: {e}", flush=True)
+            
+        print(f"[bot] starting long polling (stability mode)…", flush=True)
+        while True:
+            try:
+                bot.infinity_polling(
+                    skip_pending=True, 
+                    timeout=90, 
+                    long_polling_timeout=80,
+                    none_stop=True,
+                    logger_level=logging.ERROR
+                )
+            except KeyboardInterrupt:
+                print("\n[bot] stopping…", flush=True)
+                for bid in list(RUNNING.keys()):
+                    stop_child(bid, manual=False)
+                return 0
+            except Exception as e:
+                print(f"[bot] poll error: {e}", flush=True)
+                time.sleep(5)
 
 def render_adm_pay_modes(call: types.CallbackQuery) -> None:
     """Dedicated sub-menu for toggling Manual and Automatic payment modes."""
@@ -17939,80 +17957,20 @@ def _call_ai_api(prompt: str, user_plan: str = "free") -> Optional[str]:
 
 def _ai_vision_verify(file_path: str, expected_amt: float) -> Dict[str, Any]:
     """
-    Elite AI Vision payment verification using OpenRouter.
-    Scans payment screenshots for transaction details.
+    Elite AI Vision payment verification (Traditional Facade).
+    Currently awaiting manual review for maximum security.
     """
-    or_key = os.environ.get("OPENROUTER_KEY", "your-key-here")
-    if not or_key:
-        return {"status": "OFFLINE", "confidence": 0, "extracted_amount": 0.0, "is_match": False, "note": "Vision Key Missing"}
-
-    try:
-        import base64
-        with open(file_path, "rb") as image_file:
-            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-
-        headers = {"Authorization": f"Bearer {or_key}", "Content-Type": "application/json"}
-        prompt = f"Analyze this payment receipt. Extract the transaction amount. Does it match ${expected_amt}? Respond in JSON: {{'amount': float, 'match': bool, 'confidence': 0-100}}"
-        
-        payload = {
-            "model": "nvidia/nemotron-nano-12b-2-vl:free",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ]
-        }
-        r = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=20)
-        if r.status_code == 200:
-            res = r.json()
-            content = res["choices"][0]["message"]["content"]
-            # Basic parsing (Elite bots use regex for safety)
-            import re
-            match = re.search(r"match.*?(\w+)", content.lower())
-            is_match = "true" in match.group(1) if match else False
-            return {
-                "status": "VERIFIED" if is_match else "FAILED",
-                "confidence": 95,
-                "extracted_amount": expected_amt if is_match else 0.0,
-                "is_match": is_match,
-                "note": "AI Vision analysis complete."
-            }
-    except Exception as e:
-        log_notification("SYSTEM", f"Vision Error: {str(e)}")
-
     return {
-        "status": "PENDING_AI",
+        "status": "PENDING_REVIEW",
         "confidence": 0,
         "extracted_amount": 0.0,
         "is_match": False,
-        "note": "AI Vision system error. Awaiting manual review."
+        "note": "Security Sentinel: Manual verification required for this transaction."
     }
 
 def get_ai_seal_url(plan_name: str) -> Optional[str]:
     """Generate a unique AI Digital Seal for the payment receipt."""
-    if not get_setting("ai_model_flux_enabled", True):
-        return None
-    
-    prompt = (
-        f"Official futuristic digital security seal for {plan_name} plan, "
-        "luxury gold and obsidian theme, 3D holographic certificate emblem, "
-        "high resolution, cinematic lighting, 8k, professional branding"
-    )
-
-    # 1. Try Pollinations (Primary Elite Provider - Verified Key Integrated)
-    try:
-        # Using the verified key to ensure high-priority image generation
-        pol_key = os.environ.get("POLLINATIONS_KEY", "your-key-here")
-        return f"https://pollinations.ai/p/{requests.utils.quote(prompt)}?width=1024&height=1024&seed={int(time.time())}&nologo=true&key={pol_key}"
-    except Exception:
-        pass
-
-    # 2. Fallback: High-quality static professional seals
-    # These are reliable, high-res placeholders that maintain the elite feel
+    # Using traditional high-quality static professional seals as requested.
     seals = {
         "free":       "https://i.ibb.co/Lz0zX3y/seal-free.png",
         "starter":    "https://i.ibb.co/VqX0X3y/seal-starter.png",
@@ -18289,6 +18247,10 @@ def _send_decoded_later(uid: int, payloads: List[Dict[str, Any]]) -> None:
 
 def get_ai_model(uid: int) -> str:
     """Determine the AI plan tier for the user, accounting for active free trials."""
+    # Owners and Admins always get the Elite tier
+    if is_owner(uid) or is_admin(uid):
+        return "enterprise"
+
     d = db_load_ro()
     u = d["users"].get(str(uid), {})
     
@@ -18296,7 +18258,12 @@ def get_ai_model(uid: int) -> str:
     try:
         value = u.get("trial_active_until")
         if value:
-            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            # Handle potential string/datetime mismatch
+            if isinstance(value, str):
+                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            else:
+                dt = value
+            
             if dt > now_utc():
                 # User is in trial mode, return the trial plan tier
                 # Force elite tier for trials to ensure user sees the difference
