@@ -1878,28 +1878,9 @@ def _oxapay_webhook_listener() -> Any:
                 # Grant the plan
                 grant_plan(uid, plan_key)
                 
-                # Send receipt
+                # Send elite AI-powered receipt
                 try:
-                    p = PLAN_LIMITS.get(plan_key, PLAN_LIMITS["pro"])
-                    receipt = (
-                        f"<blockquote>💳 <b>{sc('OFFICIAL PAYMENT RECEIPT')}</b>\n"
-                        f"{divider(15)}\n"
-                        f"👤 <b>{sc('User')}</b>: <code>{uid}</code>\n"
-                        f"🆔 <b>{sc('Transaction ID')}</b>: <code>{tx_id}</code>\n"
-                        f"{divider(15)}\n"
-                        f"💎 <b>{sc('Plan Activated')}</b>: <code>{sc(p['name'])}</code>\n"
-                        f"🤖 <b>{sc('New Bot Slots')}</b>: <code>{p['max_bots']} {sc('Slots')}</code>\n"
-                        f"💰 <b>{sc('Amount Paid')}</b>: <code>${p['price']}</code>\n"
-                        f"{divider(15)}\n"
-                        f"⏰ <b>{sc('Activated On')}</b>: <code>{ts_iso()}</code>\n"
-                        f"🛡️ <b>{sc('Status')}</b>: <code>{sc('CONFIRMED ON BLOCKCHAIN')}</code>\n"
-                        f"{divider(15)}\n"
-                        f"🚀 <i>{sc('Your bots are now ready for deployment!')}</i></blockquote>"
-                    )
-                    bot.send_message(uid, receipt, parse_mode="HTML")
-                    
-                    # Notify Admin
-                    bot.send_message(OWNER_ID, f"💰 <b>{sc('NEW PAYMENT RECEIVED')}</b>\n{G['div']}\n{receipt}", parse_mode="HTML")
+                    send_elite_receipt(uid, tx_id, plan_key)
                 except Exception: pass
                 
                 _flush_map_buffer(uid)
@@ -2233,6 +2214,7 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f"Sᴜᴘᴘᴏʀᴛ", callback_data="menu_support",  style="primary"),
     )
     kb.add(
+        Btn(f"🤖  AI Assɪsᴛᴀɴᴛ", callback_data="menu_ai_chat",  style="success"),
         Btn(f" Mʏ Sᴛᴀᴛꜱ",    callback_data="menu_stats",    style="primary"),
     )
     if admin:
@@ -2553,7 +2535,10 @@ def bot_actions_kb(bot_id: str, running: bool, premium: bool = False) -> types.I
         Btn(f"{G['download']}  Iɴꜱᴛᴀʟʟ Pᴋɢ", callback_data=f"bot_pip_{bot_id}",   style="primary"),
     )
     kb.add(
+        Btn(f"🧠  AI Dɪᴀɢɴᴏsᴇ",      callback_data=f"bot_ai_fix_{bot_id}", style="success"),
         Btn(f"{G['plus']}  Cʟᴏɴᴇ",           callback_data=f"bot_clone_{bot_id}", style="primary"),
+    )
+    kb.add(
         Btn(f"{G['arrow']}  Dᴏᴡɴʟᴏᴀᴅ", callback_data=f"bot_dl_{bot_id}", style="primary"),
     )
     if premium:
@@ -13131,9 +13116,8 @@ def _payment_approve(req_id, admin_uid, note=""):
                 f"<b>{G['ok']} {sc('Wallet credited')}</b>\n"
                 f"{bullet('Amount', _amt_txt)}", parse_mode="HTML")
         else:
-            bot.send_message(uid,
-                f"<b>{G['ok']} Payment Approved!</b>\n"
-                f"{bullet('Plan', plan)}\nEnjoy your upgraded features!", parse_mode="HTML")
+            # Send elite AI-powered receipt for manual approvals too
+            send_elite_receipt(uid, req_id, plan)
     except Exception:
         pass
     return True, f"Approved. {old_plan} \u2192 {plan or 'wallet top-up'}."
@@ -17179,6 +17163,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_trial":    render_trial(call); return
     if data == "menu_coupon":   render_coupon(call); return
     if data == "menu_stats":    render_user_stats(call); return
+    if data == "menu_ai_chat":  render_ai_chat(call); return
     if data == "menu_admin":    render_admin(call); return
     if data == "menu_gh_host":  render_gh_repo_host_menu(call); return
     # Plans
@@ -17207,6 +17192,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_dl_"):          action_bot_download(call, data.split("_", 2)[2]); return
     if data.startswith("bot_webhook_"):     render_bot_webhook(call, data.split("_", 2)[2]); return
     if data.startswith("bot_wh_regen_"):   action_bot_webhook_regen(call, data.split("_", 3)[3]); return
+    if data.startswith("bot_ai_fix_"):     action_bot_ai_fix(call, data.split("_", 3)[3]); return
     if data.startswith("bot_pip_"):         start_pip_install_flow(call, data.split("_", 2)[2]); return
     if data.startswith("pkg_quick_"):
         parts = data.split("_", 3)
@@ -17652,6 +17638,180 @@ def _telemetry_loop():
             print(f"[telemetry] error: {e}", flush=True)
         
         time.sleep(8)
+
+# ─── AI SERVICES ───────────────────────────────────────────────────────────
+
+def get_ai_seal_url(plan_name: str) -> Optional[str]:
+    """Generate a unique AI Digital Seal for the payment receipt."""
+    try:
+        # Prompt for an elite, futuristic security seal
+        prompt = (
+            f"Official futuristic digital security seal for {plan_name} plan, "
+            "luxury gold and obsidian theme, 3D holographic certificate emblem, "
+            "high resolution, cinematic lighting, 8k, professional branding"
+        )
+        params = {
+            "action": "txt2img",
+            "message": prompt,
+            "model": "Flux1schnell"
+        }
+        # Use a short timeout to ensure fallback if API is slow
+        r = requests.get("https://api.omegatech.app/api/ai/Aicli", params=params, timeout=8)
+        res = r.json()
+        if res.get("result"):
+            return res["result"] # Returns the image URL
+    except Exception as e:
+        print(f"[ai_seal] error: {e}", flush=True)
+    return None
+
+def send_elite_receipt(uid: int, tx_id: str, plan_key: str) -> None:
+    """Sends a high-end receipt with an AI Digital Seal and smart fallback."""
+    p = PLAN_LIMITS.get(plan_key, PLAN_LIMITS["pro"])
+    receipt_text = (
+        f"<blockquote>💳 <b>{sc('OFFICIAL PAYMENT RECEIPT')}</b>\n"
+        f"{divider(15)}\n"
+        f"👤 <b>{sc('User')}</b>: <code>{uid}</code>\n"
+        f"🆔 <b>{sc('Transaction ID')}</b>: <code>{tx_id}</code>\n"
+        f"{divider(15)}\n"
+        f"💎 <b>{sc('Plan Activated')}</b>: <code>{sc(p['name'])}</code>\n"
+        f"🤖 <b>{sc('New Bot Slots')}</b>: <code>{p['max_bots']} {sc('Slots')}</code>\n"
+        f"💰 <b>{sc('Amount Paid')}</b>: <code>${p['price']}</code>\n"
+        f"{divider(15)}\n"
+        f"⏰ <b>{sc('Activated On')}</b>: <code>{ts_iso()}</code>\n"
+        f"🛡️ <b>{sc('Status')}</b>: <code>{sc('CONFIRMED ON BLOCKCHAIN')}</code>\n"
+        f"{divider(15)}\n"
+        f"🚀 <i>{sc('Your bots are now ready for deployment!')}</i></blockquote>"
+    )
+    
+    # Attempt AI Seal
+    seal_url = get_ai_seal_url(p['name'])
+    
+    try:
+        if seal_url:
+            # Send with AI Image
+            bot.send_photo(uid, seal_url, caption=receipt_text, parse_mode="HTML")
+            # Also notify admin with the same elite style
+            bot.send_photo(OWNER_ID, seal_url, 
+                           caption=f"💰 <b>{sc('NEW PAYMENT RECEIVED')}</b>\n{G['div']}\n{receipt_text}", 
+                           parse_mode="HTML")
+        else:
+            # Fallback to normal text receipt
+            bot.send_message(uid, receipt_text, parse_mode="HTML")
+            bot.send_message(OWNER_ID, f"💰 <b>{sc('NEW PAYMENT RECEIVED')}</b>\n{G['div']}\n{receipt_text}", parse_mode="HTML")
+    except Exception as e:
+        # Final safety fallback
+        print(f"[receipt_fail] {e}", flush=True)
+        try: bot.send_message(uid, receipt_text, parse_mode="HTML")
+        except Exception: pass
+
+def render_ai_chat(call: types.CallbackQuery) -> None:
+    """Entry screen for the AI Assistant."""
+    cap = (
+        f"<b>🤖 {sc('AI Assistant')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"<i>{sc('Welcome, Commander. I am your elite AI operative')}.</i>\n\n"
+        f"<b>{sc('Capabilities')}:</b>\n"
+        f"{G['bullet']} {sc('Write Python/Node.js code')}\n"
+        f"{G['bullet']} {sc('Debug hosting errors')}\n"
+        f"{G['bullet']} {sc('Explain complex logic')}\n"
+        f"{G['bullet']} {sc('General chat & support')}\n\n"
+        f"<b>{sc('Instructions')}:</b>\n"
+        f"{sc('Just send your message or code below and I will analyze it instantly')}.\n"
+        f"{G['div']}{FOOTER}"
+    )
+    USER_STATES[call.from_user.id] = {"flow": "ai_chat"}
+    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, back_main_kb(), call=call)
+
+@bot.message_handler(func=lambda m: USER_STATES.get(m.from_user.id, {}).get("flow") == "ai_chat")
+def handle_ai_chat_message(m: types.Message) -> None:
+    """Processes user messages and routes them to the OmegaTech AI API."""
+    if not m.text: return
+    
+    if m.text.startswith("/"):
+        # Let standard commands through
+        return
+    
+    loading_msg = bot.reply_to(m, f"🔍 <b>{sc('AI is thinking...')}</b>", parse_mode="HTML")
+    
+    try:
+        # Route to GPT-4o via OmegaTech
+        params = {
+            "action": "chat",
+            "message": m.text,
+            "model": "gpt-4o"
+        }
+        r = requests.get("https://api.omegatech.app/api/ai/Aicli", params=params, timeout=30)
+        res = r.json()
+        
+        if res.get("result"):
+            ai_response = res["result"]
+            # Ensure code blocks are properly formatted if AI didn't do it
+            # This is a simple heuristic: if it looks like code, wrap it.
+            # But GPT-4o usually handles markdown well.
+            
+            final_text = (
+                f"🤖 <b>{sc('AI Operative')}</b>\n"
+                f"{G['div']}\n"
+                f"<blockquote>{ai_response}</blockquote>\n"
+                f"{G['div']}{FOOTER}"
+            )
+            bot.edit_message_text(final_text, m.chat.id, loading_msg.message_id, parse_mode="HTML")
+        else:
+            bot.edit_message_text(f"⚠️ {sc('AI is currently recalibrating. Please try again in a moment')}.", 
+                                  m.chat.id, loading_msg.message_id, parse_mode="HTML")
+            
+    except Exception as e:
+        print(f"[ai_chat] error: {e}", flush=True)
+        bot.edit_message_text(f"❌ {sc('Connection to AI uplink lost. Falling back to manual support')}.", 
+                              m.chat.id, loading_msg.message_id, parse_mode="HTML")
+
+def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
+    """Uses AI to analyze crash logs and provide a solution."""
+    b = find_bot(bot_id)
+    if not b: ack(call, "Bot not found"); return
+    
+    # Get last logs
+    st = child_status(bot_id, b)
+    logs = st.get("logs", [])
+    last_error = (b.get("last_error") or "").strip()
+    
+    log_snippet = "\n".join(logs[-30:]) if logs else "No logs available."
+    error_context = f"Last Error: {last_error}\n\nLog Snippet:\n{log_snippet}"
+    
+    loading(call, "AI is diagnosing...")
+    
+    try:
+        # Ask AI for a fix
+        prompt = (
+            "Analyze the following Telegram bot crash logs and provide a concise, professional solution. "
+            "Tell the user exactly what is wrong and how to fix it (e.g., missing library, syntax error). "
+            "Use small-caps for headers and wrap code in blocks.\n\n"
+            f"{error_context}"
+        )
+        params = {
+            "action": "chat",
+            "message": prompt,
+            "model": "gpt-4o"
+        }
+        r = requests.get("https://api.omegatech.app/api/ai/Aicli", params=params, timeout=30)
+        res = r.json()
+        
+        if res.get("result"):
+            ai_fix = res["result"]
+            final_text = (
+                f"🩺 <b>{sc('AI Bot Doctor Report')}</b>\n"
+                f"{G['div_eq']}\n"
+                f"🤖 <b>{sc('Diagnosis')}</b>:\n"
+                f"<blockquote>{ai_fix}</blockquote>\n"
+                f"{G['div']}{FOOTER}"
+            )
+            show_text(call.message.chat.id, final_text, back_kb(f"bot_view_{bot_id}", "Bot"), call=call)
+        else:
+            ack(call, "AI Doctor is currently unavailable.")
+            
+    except Exception as e:
+        print(f"[ai_fix] error: {e}", flush=True)
+        ack(call, "Uplink to AI Doctor failed.")
 
 if __name__ == "__main__":
     sys.exit(main())
