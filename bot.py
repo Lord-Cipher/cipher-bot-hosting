@@ -4664,6 +4664,35 @@ _ADMIN_ROUTE_ACTION: Dict[str, str] = {
     "adm_trial": "manage_plans",
     "adm_github": "github_backup",
     "adm_force_backup": "github_backup",
+    "adm_settings": "view_stats",
+    "adm_set_public_url": "view_stats",
+    "adm_notifications": "view_stats",
+    "adm_webhook_toggle": "view_stats",
+    "adm_bot_manager": "view_stats",
+    "adm_sec_center": "view_stats",
+    "adm_notify_center": "broadcast_view",
+    "adm_sys_tools": "view_stats",
+    "adm_gh_browser": "github_backup",
+    "adm_pay_config": "view_stats",
+    "adm_bot_cfg": "view_stats",
+    "adm_appearance": "view_stats",
+    "adm_coupon_plus": "manage_coupons",
+    "adm_templates": "view_stats",
+    "adm_referral_sys": "view_stats",
+    "adm_janitor": "full_access",
+    "adm_webhooks": "view_stats",
+    "adm_feature_flags": "full_access",
+    "adm_ai_config": "view_stats",
+    "adm_live_monitor": "view_stats",
+    "adm_rate_config": "full_access",
+    "adm_rev_goals": "view_stats",
+    "adm_scheduler": "full_access",
+    "adm_import_export": "full_access",
+    "adm_leaderboard": "view_stats",
+    "adm_languages": "view_stats",
+    "adm_bot_controls": "view_stats",
+    "adm_subscriptions": "view_users",
+    "adm_admin_2fa": "full_access",
 }
 
 
@@ -5682,6 +5711,11 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         db_save(d)
         ack(call, "Notifications cleared.")
         return render_adm_notifications(call)
+    if data == "adm_webhook_toggle":
+        cur = bool(get_setting("webhook_enabled", False))
+        set_setting("webhook_enabled", not cur)
+        ack(call, f"Webhook Mode: {'ON' if not cur else 'OFF'}")
+        return render_adm_settings(call)
     if data == "adm_pay_modes":           return render_adm_pay_modes(call)
     if data == "adm_pay_methods":         return render_adm_pay_methods(call)
     if data.startswith("adm_pay_edit_"):  return render_adm_pay_method_edit(call, data[len("adm_pay_edit_"):])
@@ -6844,10 +6878,8 @@ def render_adm_notifications(call: types.CallbackQuery, n_filter: str = "ALL") -
     kb.add(Btn("🧹  Cʟᴇᴀʀ Aʟʟ", callback_data="adm_note_clear", style="danger"))
     kb.add(Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data="menu_admin", style="danger"))
     
-    try:
-        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="HTML")
-    except Exception:
-        pass
+    # Use show_menu to handle photo/text transitions correctly
+    show_menu(call.message.chat.id, PHOTOS.get("logs", PHOTOS["admin"]), txt, kb, call=call)
 
 def render_adm_notify_center(call: types.CallbackQuery) -> None:
     users_n  = len(db_load()["users"])
@@ -7685,7 +7717,7 @@ def render_adm_pay_config(call: types.CallbackQuery) -> None:
     )
     kb.add(
         Btn("📋  Pᴀʏ Hɪꜱᴛᴏʀʏ",    callback_data="adm_payments",         style="primary"),
-        Btn(f"{G['back']}  Bᴀᴄᴋ",  callback_data="adm_main",             style="danger"),
+        Btn(f"{G['back']}  Bᴀᴄᴋ",  callback_data="menu_admin",           style="danger"),
     )
     kb.add(
         Btn("✅  Aᴘᴘʀᴏᴠᴇ Pᴀʏ",     callback_data="adm_approve",          style="success"),
@@ -10742,8 +10774,11 @@ def on_text(m: types.Message) -> None:
             try:
                 bot.set_webhook(url)
                 set_setting("webhook_url", url)
+                # Sync public_url if it looks like a base URL
+                base_url = url.split("/tg-webhook/")[0]
+                set_setting("public_url", base_url)
                 audit(uid, "wh_set", url[:80])
-                bot.reply_to(m, f"{G['ok']} {sc('Webhook set')}: <code>{esc(url)}</code>", parse_mode="HTML")
+                bot.reply_to(m, f"{G['ok']} {sc('Webhook set')}: <code>{esc(url)}</code>\n{sc('Public URL synced to')}: <code>{esc(base_url)}</code>", parse_mode="HTML")
             except Exception as _whe:
                 bot.reply_to(m, f"{G['no']} {sc('Failed')}: <code>{esc(_whe)}</code>", parse_mode="HTML")
             return

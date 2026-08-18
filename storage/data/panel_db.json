@@ -7,7 +7,7 @@
       "plan": "free",
       "plan_expires": null,
       "joined": "2026-08-18T22:46:45.542122+00:00",
-      "last_seen": "2026-08-18T23:15:53.557036+00:00",
+      "last_seen": "2026-08-18T23:30:45.727199+00:00",
       "banned": false,
       "ban_reason": "",
       "wallet": 0,
@@ -22,14 +22,27 @@
       "stats": {
         "commands": 0,
         "bots_uploaded": 0,
-        "logins": 32
+        "logins": 45
       }
     }
   },
   "bots": {},
   "payments": [],
   "admins": {},
-  "audit": [],
+  "audit": [
+    {
+      "ts": "2026-08-18T23:30:04.178121+00:00",
+      "uid": 8065173971,
+      "action": "webhook_toggle",
+      "detail": "now=off"
+    },
+    {
+      "ts": "2026-08-18T23:30:18.834876+00:00",
+      "uid": 8065173971,
+      "action": "webhook_toggle",
+      "detail": "now=on"
+    }
+  ],
   "coupons": {},
   "tickets": {},
   "scheduled_broadcasts": [],
