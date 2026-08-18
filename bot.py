@@ -1896,9 +1896,7 @@ def _oxapay_webhook_listener() -> Any:
                         f"{divider(15)}\n"
                         f"🚀 <i>{sc('Your bots are now ready for deployment!')}</i></blockquote>"
                     )
-                    kb = types.InlineKeyboardMarkup()
-                    kb.add(Btn(f"🤖  {sc('My Bots')}", callback_data="menu_bots", style="success"))
-                    bot.send_message(uid, receipt, reply_markup=kb, parse_mode="HTML")
+                    bot.send_message(uid, receipt, parse_mode="HTML")
                     
                     # Notify Admin
                     bot.send_message(OWNER_ID, f"💰 <b>{sc('NEW PAYMENT RECEIVED')}</b>\n{G['div']}\n{receipt}", parse_mode="HTML")
