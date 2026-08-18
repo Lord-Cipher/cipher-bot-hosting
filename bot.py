@@ -2375,7 +2375,7 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
         res = r.json()
         
         if res.get("result") == 100:
-            pay_url = res.get("payUrl")
+            pay_url = res.get("payLink") or res.get("payUrl")
             track_id = res.get("trackId")
             
             cap = (

@@ -28,3 +28,12 @@ nohup: ignoring input
 [33mPress CTRL+C to quit[0m
 [bot] webhook cleared
 [bot] starting long polling (stability mode)…
+[ai_chat] message from 8065173971: Hi
+[ai_chat] message from 8065173971: Who is your mentor
+[kaalix] calling qwen...
+[show_menu:edit_message_media] ApiTelegramException: A request to the Telegram API was unsuccessful. Error code: 400. Description: Bad Request: can't parse InlineKeyboardButton: Text buttons are unallowed in the inline keyboard
+[show_menu:edit_message_caption] ApiTelegramException: A request to the Telegram API was unsuccessful. Error code: 400. Description: Bad Request: can't parse InlineKeyboardButton: Text buttons are unallowed in the inline keyboard
+[show_menu:edit_message_caption(plain)] ApiTelegramException: A request to the Telegram API was unsuccessful. Error code: 400. Description: Bad Request: can't parse InlineKeyboardButton: Text buttons are unallowed in the inline keyboard
+[show_menu:send_photo] ApiTelegramException: A request to the Telegram API was unsuccessful. Error code: 400. Description: Bad Request: can't parse InlineKeyboardButton: Text buttons are unallowed in the inline keyboard
+[show_menu:send_message(html)] ApiTelegramException: A request to the Telegram API was unsuccessful. Error code: 400. Description: Bad Request: can't parse InlineKeyboardButton: Text buttons are unallowed in the inline keyboard
+[show_menu:send_message(plain)] ApiTelegramException: A request to the Telegram API was unsuccessful. Error code: 400. Description: Bad Request: can't parse InlineKeyboardButton: Text buttons are unallowed in the inline keyboard
