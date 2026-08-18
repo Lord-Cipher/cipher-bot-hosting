@@ -27,3 +27,4 @@
 [33mPress CTRL+C to quit[0m
 [bot] webhook cleared
 [bot] starting long polling (stability mode)…
+[bot] poll error: name 'logging' is not defined

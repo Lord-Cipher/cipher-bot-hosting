@@ -17748,8 +17748,15 @@ def main() -> int:
     print(f"[bot] starting long polling (stability mode)\u2026", flush=True)
     while True:
         try:
-            # Long polling with extended timeouts for VPS stability
-            bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=50)
+            # Long polling with elite resilience for VPS/Sandbox stability
+            # Increased timeout and none_stop=True ensures it self-recovers from network drops.
+            bot.infinity_polling(
+                skip_pending=True, 
+                timeout=90, 
+                long_polling_timeout=80,
+                none_stop=True,
+                logger_level=logging.ERROR
+            )
         except KeyboardInterrupt:
             print("\n[bot] stopping\u2026", flush=True)
             for bid in list(RUNNING.keys()):

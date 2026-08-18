@@ -7,7 +7,7 @@
       "plan": "pro",
       "plan_expires": "2026-08-20T21:48:56.738924+00:00",
       "joined": "2026-08-18T21:26:26.882369+00:00",
-      "last_seen": "2026-08-18T22:16:54.835367+00:00",
+      "last_seen": "2026-08-18T22:34:26.436708+00:00",
       "banned": false,
       "ban_reason": "",
       "wallet": 0,
@@ -22,7 +22,7 @@
       "stats": {
         "commands": 0,
         "bots_uploaded": 0,
-        "logins": 66
+        "logins": 76
       },
       "trial_epoch": 1,
       "trial_active_until": "2026-08-20T21:48:56.738367+00:00",
