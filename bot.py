@@ -2248,7 +2248,7 @@ def back_main_kb() -> types.InlineKeyboardMarkup:
 
 def back_admin_kb() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup().add(
-        Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+        Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
 
 
 def back_kb(target: str, label: str = "Back") -> types.InlineKeyboardMarkup:
@@ -2284,7 +2284,7 @@ def payments_kb(plan: Optional[str] = None) -> types.InlineKeyboardMarkup:
     if manual_enabled:
         kb.add(Btn(f"🔵  {sc('Manual Payment')}", callback_data=f"pay_manual{suffix}", style="primary"))
         
-    kb.add(Btn(f"{G['back']}  Pʟᴀɴꜱ", callback_data="menu_plans", style="primary"))
+    kb.add(Btn(f"{G['back']}  Pʟᴀɴꜱ", callback_data="menu_plans", style="danger"))
     return kb
 
 
@@ -2303,7 +2303,7 @@ def render_manual_payment_methods_for(call: types.CallbackQuery, plan: str) -> N
     for k, v in PAYMENT_METHODS.items():
         if not bool(get_setting(f"pm_enabled_{k}", True)): continue
         kb.add(Btn(f"{v['tag']}  {sc(v['name'])}", callback_data=f"pay_meth_{k}_{plan}", style="primary"))
-    kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="primary"))
+    kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
 
 
@@ -2364,7 +2364,7 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
             )
             kb = types.InlineKeyboardMarkup()
             kb.add(Btn(f"💳  Pᴀʏ Nᴏᴡ (${final_price})", url=pay_url, style="success"))
-            kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="primary"))
+            kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="danger"))
             show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
         else:
             bot.answer_callback_query(call.id, f"❌ Error: {res.get('message', 'Failed to create invoice')}", show_alert=True)
@@ -2499,7 +2499,7 @@ def admin_kb(uid: int = 0) -> types.InlineKeyboardMarkup:
             Btn("👤  Sᴜʙꜱᴄʀɪᴘᴛɪᴏɴꜱ",    callback_data="adm_subscriptions",  style="primary"),
             Btn("🔐  Adᴍɪɴ 2FA",         callback_data="adm_admin_2fa",      style="danger"),
         )
-    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="primary"))
+    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
     return kb
 
 
@@ -2511,7 +2511,7 @@ def github_kb(status: Dict[str, Any]) -> types.InlineKeyboardMarkup:
         f"{G['rec'] if status['autoEnabled'] else G['rec_off']}  "
         f"Auto Backup: {'ON' if status['autoEnabled'] else 'OFF'}",
         callback_data="gh_toggle_auto",
-        style="success" if status["autoEnabled"] else "danger"))
+        style="danger" if status["autoEnabled"] else "danger"))
     kb.add(
         Btn(f"{G['key']}  {sc('Change Token' if status['tokenSet'] else 'Set Token')}",
             callback_data="gh_set_token", style="primary"),
@@ -2524,7 +2524,7 @@ def github_kb(status: Dict[str, Any]) -> types.InlineKeyboardMarkup:
     )
     kb.add(Btn(f"{G['no']}  Cʟᴇᴀʀ Cᴏɴꜰɪɢ", callback_data="gh_clear",     style="danger"))
     kb.add(Btn(f"{G['refresh']}  Rᴇꜰʀᴇꜱʜ",   callback_data="adm_github",  style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ",       callback_data="menu_admin",  style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ",       callback_data="menu_admin",  style="danger"))
     return kb
 
 
@@ -2563,7 +2563,7 @@ def bot_actions_kb(bot_id: str, running: bool, premium: bool = False) -> types.I
         if b.get("source") == "github" and premium:
             kb.add(Btn(f"🚀  Aᴜᴛᴏ-Dᴇᴘʟᴏʏ", callback_data=f"bot_webhook_{bot_id}", style="success"))
     kb.add(Btn(f"{G['no']}  Dᴇʟᴇᴛᴇ",       callback_data=f"bot_delete_{bot_id}", style="danger"))
-    kb.add(Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ",    callback_data="menu_bots",            style="primary"))
+    kb.add(Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ",    callback_data="menu_bots",            style="danger"))
     return kb
 
 
@@ -5583,7 +5583,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             kb.add(Btn(
                 f"{G['ok']}  {req['id'][:10]} uid={req['uid']} {req['plan']} {req['amount']}",
                 callback_data=f"adm_pay_do_approve_{req['id']}"))
-        kb.add(Btn(f"{G['back']}  Payments", callback_data="adm_payment_requests"))
+        kb.add(Btn(f"{G['back']}  Payments", callback_data="adm_payment_requests", style="danger"))
         show_text(call.message.chat.id,
                   f"<b>{G['ok']} {sc('Select a request to approve')}</b>",
                   kb, call=call)
@@ -5599,7 +5599,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             kb.add(Btn(
                 f"{G['no']}  {req['id'][:10]} uid={req['uid']} {req['plan']} {req['amount']}",
                 callback_data=f"adm_pay_do_reject_{req['id']}"))
-        kb.add(Btn(f"{G['back']}  Payments", callback_data="adm_payment_requests"))
+        kb.add(Btn(f"{G['back']}  Payments", callback_data="adm_payment_requests", style="danger"))
         show_text(call.message.chat.id,
                   f"<b>{G['no']} {sc('Select a request to reject')}</b>",
                   kb, call=call)
@@ -6037,7 +6037,7 @@ def _gh_restore_thread(call: types.CallbackQuery) -> None:
 def _set_back_kb() -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup()
     kb.add(Btn(
-        f"{G['back']}  {sc('Settings')}", callback_data="adm_settings"))
+        f"{G['back']}  {sc('Settings')}", callback_data="adm_settings"), style="danger")
     return kb
 
 
@@ -6051,7 +6051,7 @@ def _set_back_kb() -> types.InlineKeyboardMarkup:
 # actually live at runtime; this removed copy was already dead code).
 def _adm_back(dest: str = "menu_admin") -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup()
-    kb.add(Btn(f"{G['back']}  {sc('Back')}", callback_data=dest, style="primary"))
+    kb.add(Btn(f"{G['back']}  {sc('Back')}", callback_data=dest, style="danger"))
     return kb
 
 
@@ -6083,7 +6083,7 @@ def render_adm_analytics(call: types.CallbackQuery) -> None:
         Btn("🤖  Bᴏᴛ Aᴄᴛɪᴠɪᴛʏ",   callback_data="adm_bot_activity",   style="primary"),
         Btn("📊  Sᴛᴀᴛꜱ Oᴠᴇʀᴠɪᴇᴡ",  callback_data="adm_stats",          style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -6228,7 +6228,7 @@ def render_adm_user_tools(call: types.CallbackQuery) -> None:
         Btn("🎁  Gɪᴠᴇ Pʟᴀɴ",      callback_data="adm_giveplan",        style="success"),
         Btn("🚫  Bᴀɴ/Uɴʙᴀɴ",      callback_data="adm_ban",             style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -6364,7 +6364,7 @@ def render_adm_bot_manager(call: types.CallbackQuery) -> None:
         Btn("🔴  Kɪʟʟ Aʟʟ Nᴏᴡ",     callback_data="adm_kill_all_now",        style="danger"),
         Btn("🗑️  Cʟᴇᴀɴ Oʀᴘʜᴀɴꜱ",    callback_data="adm_set_clean_orphans",   style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -6401,7 +6401,7 @@ def render_adm_mass_restart_stopped(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         Btn(f"{G['ok']}  {sc('Yes, Start All')}", callback_data="adm_mass_restart_stopped_yes", style="success"),
-        Btn(f"{G['no']}  {sc('Cancel')}",          callback_data="adm_bot_manager",              style="primary"),
+        Btn(f"{G['no']}  {sc('Cancel')}",          callback_data="adm_bot_manager",              style="danger"),
     )
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
@@ -6570,7 +6570,7 @@ def render_adm_sec_center(call: types.CallbackQuery) -> None:
         Btn("🛡️  Sᴇᴄᴜʀɪᴛʏ Iɴꜰᴏ",   callback_data="adm_security",       style="primary"),
         Btn("📋  Aᴜᴅɪᴛ Lᴏɢ",        callback_data="adm_audit",          style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["security"], cap, kb, call=call)
 
 
@@ -6688,7 +6688,7 @@ def render_adm_notify_center(call: types.CallbackQuery) -> None:
         Btn("📡  Bʀᴏᴀᴅᴄᴀꜱᴛ",        callback_data="adm_broadcast",          style="success"),
         Btn("📊  Bʀᴏᴀᴅᴄᴀꜱᴛ Sᴛᴀᴛᴜꜱ", callback_data="adm_broadcast_status",   style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["broadcast"], cap, kb, call=call)
 
 
@@ -6728,7 +6728,7 @@ def render_adm_notify_plan_select(call: types.CallbackQuery) -> None:
     for k, v in PLAN_LIMITS.items():
         cnt = sum(1 for u in db_load()["users"].values() if u.get("plan") == k)
         kb.add(Btn(f"{esc(v['name'])} ({cnt})", callback_data=f"adm_notify_plan_{k}"))
-    kb.add(Btn(f"{G['back']}  {sc('Back')}", callback_data="adm_notify_center"))
+    kb.add(Btn(f"{G['back']}  {sc('Back')}", callback_data="adm_notify_center", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["broadcast"], cap, kb, call=call)
 
 
@@ -6819,7 +6819,7 @@ def render_adm_sys_tools(call: types.CallbackQuery) -> None:
         Btn("📜  Rᴜʟᴇꜱ Tᴇxᴛ",    callback_data="adm_set_rules_text",  style="primary"),
         Btn("📦  Gɪᴛʜᴜʙ",         callback_data="adm_github",          style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -7167,7 +7167,7 @@ def render_adm_gh_browser(call: types.CallbackQuery) -> None:
     )
     kb.add(
         Btn("📊  Gɪᴛʜᴜʙ Bᴀᴄᴋᴜᴘ",   callback_data="adm_github",     style="primary"),
-        Btn(f"{G['back']}  Aᴅᴍɪɴ",  callback_data="menu_admin",     style="primary"),
+        Btn(f"{G['back']}  Aᴅᴍɪɴ",  callback_data="menu_admin",     style="danger"),
     )
     show_menu(call.message.chat.id, PHOTOS.get("gh_browser", PHOTOS["admin"]), cap, kb, call=call)
 
@@ -7213,7 +7213,7 @@ def render_adm_gh_repos(call: types.CallbackQuery, force: bool = False) -> None:
             icon = "🔒" if r.get("private") else "🌐"
             # Store repo in state, use index-based callback
             kb.add(Btn(f"{icon} {short}", callback_data=f"adm_ghrepo_{name[:40]}", style="primary"))
-        kb.add(Btn(f"{G['back']}  Gʜ Bʀᴏᴡꜱᴇʀ", callback_data="adm_gh_browser", style="primary"))
+        kb.add(Btn(f"{G['back']}  Gʜ Bʀᴏᴡꜱᴇʀ", callback_data="adm_gh_browser", style="danger"))
         try:
             bot.send_message(call.from_user.id, cap, reply_markup=kb, parse_mode="HTML")
         except Exception:
@@ -7265,7 +7265,7 @@ def render_adm_gh_files(call: types.CallbackQuery, repo: str, path: str = "") ->
             icon = "📁" if it.get("type") == "dir" else _file_icon(it.get("name",""))
             kb.add(Btn(f"{icon} {esc(it.get('name','?'))[:28]}", callback_data=f"adm_ghfile_{i}", style="primary"))
         kb.add(Btn("⭐  Sᴇᴛ ᴀꜱ Dᴇꜰᴀᴜʟᴛ Rᴇᴘᴏ", callback_data="adm_gh_set_default_repo", style="success"))
-        kb.add(Btn(f"{G['back']}  Rᴇᴘᴏꜱ", callback_data="adm_gh_repos", style="primary"))
+        kb.add(Btn(f"{G['back']}  Rᴇᴘᴏꜱ", callback_data="adm_gh_repos", style="danger"))
         try:
             bot.send_message(call.from_user.id, cap, reply_markup=kb, parse_mode="HTML")
         except Exception:
@@ -7329,7 +7329,7 @@ def render_adm_gh_file_view(call: types.CallbackQuery, repo: str, path: str) -> 
             Btn("📥  Dᴏᴡɴʟᴏᴀᴅ",        callback_data="adm_gh_dl_file",   style="primary"),
             Btn("📁  Bᴀᴄᴋ ᴛᴏ Fᴏʟᴅᴇʀ",  callback_data="adm_gh_browse_repo",style="primary"),
         )
-        kb.add(Btn(f"{G['back']}  Gʜ Bʀᴏᴡꜱᴇʀ", callback_data="adm_gh_browser", style="primary"))
+        kb.add(Btn(f"{G['back']}  Gʜ Bʀᴏᴡꜱᴇʀ", callback_data="adm_gh_browser", style="danger"))
         try:
             bot.send_message(call.from_user.id, cap, reply_markup=kb, parse_mode="HTML")
         except Exception:
@@ -7497,14 +7497,14 @@ def render_adm_pay_config(call: types.CallbackQuery) -> None:
     )
     kb.add(
         Btn("📋  Pᴀʏ Hɪꜱᴛᴏʀʏ",    callback_data="adm_payments",         style="primary"),
-        Btn(f"{G['back']}  Bᴀᴄᴋ",  callback_data="adm_main",             style="primary"),
+        Btn(f"{G['back']}  Bᴀᴄᴋ",  callback_data="adm_main",             style="danger"),
     )
     kb.add(
         Btn("✅  Aᴘᴘʀᴏᴠᴇ Pᴀʏ",     callback_data="adm_approve",          style="success"),
         Btn("📤  Exᴘᴏʀᴛ CSV",       callback_data="adm_user_export_csv",  style="primary"),
     )
     kb.add(Btn("💳  Pᴀʏᴍᴇɴᴛ Rᴇqᴜᴇꜱᴛꜱ", callback_data="adm_payment_requests", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7529,7 +7529,7 @@ def render_adm_pay_methods(call: types.CallbackQuery) -> None:
                 callback_data=f"adm_pay_edit_{key}", style="primary"),
         )
     kb.add(Btn("➕  Aᴅᴅ Pᴀʏᴍᴇɴᴛ Mᴇᴛʜᴏᴅ", callback_data="adm_pay_add_new", style="success"))
-    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="primary"))
+    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7560,7 +7560,7 @@ def render_adm_pay_method_edit(call: types.CallbackQuery, key: str) -> None:
         Btn("📝  Rᴇɴᴀᴍᴇ", callback_data=f"adm_pay_method_rename_{key}", style="primary"),
         Btn("🗑️  Dᴇʟᴇᴛᴇ",  callback_data=f"adm_pay_method_delconfirm_{key}", style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  Pᴀʏ Mᴇᴛʜᴏᴅꜱ", callback_data="adm_pay_methods", style="primary"))
+    kb.add(Btn(f"{G['back']}  Pᴀʏ Mᴇᴛʜᴏᴅꜱ", callback_data="adm_pay_methods", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7588,7 +7588,7 @@ def render_adm_pay_limits(call: types.CallbackQuery) -> None:
         Btn("🎯  Dɪꜱᴄ Tʜʀᴇꜱʜᴏʟᴅ", callback_data="adm_bc_set_discount_threshold",  style="primary"),
         Btn("💸  Dɪꜱᴄ %",           callback_data="adm_bc_set_discount_pct",        style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="primary"))
+    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7610,7 +7610,7 @@ def render_adm_pay_currency(call: types.CallbackQuery) -> None:
     )
     for code, sym_str in [("BDT","৳"),("USD","$"),("EUR","€"),("INR","₹"),("PKR","₨")]:
         kb.add(Btn(f"{code} {sym_str}", callback_data=f"adm_bc_set_currency_{code}_{sym_str}", style="primary"))
-    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="primary"))
+    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7627,7 +7627,7 @@ def render_adm_pay_receipt_tmpl(call: types.CallbackQuery) -> None:
         Btn("✏️  Eᴅɪᴛ",      callback_data="adm_tmpl_edit_payment_received", style="primary"),
         Btn("🔄  Rᴇꜱᴇᴛ",     callback_data="adm_tmpl_reset_payment_received", style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="primary"))
+    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7652,7 +7652,7 @@ def render_adm_pay_notif_settings(call: types.CallbackQuery) -> None:
         Btn(f"{'✅' if on_appr else '❌'}  Aᴘᴘʀᴏᴠᴇᴅ",callback_data="adm_bc_toggle_notif_on_approved",    style="primary"),
     )
     kb.add(Btn(f"{'✅' if on_rej else '❌'}  Rᴇᴊᴇᴄᴛᴇᴅ", callback_data="adm_bc_toggle_notif_on_rejected", style="primary"))
-    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="primary"))
+    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7747,7 +7747,7 @@ def render_adm_bot_cfg(call: types.CallbackQuery) -> None:
         Btn("🔄  Rᴇꜱᴛᴀʀᴛ Pᴏʟɪᴄʏ",  callback_data="adm_bc_policy",    style="primary"),
         Btn("🧱  Sᴀɴᴅʙᴏx",           callback_data="adm_bc_sandbox",   style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7776,7 +7776,7 @@ def render_adm_bc_timeouts(call: types.CallbackQuery) -> None:
         ("resource_check_secs", "Res Check"),
     ]:
         kb.add(Btn(f"✏️  {label}", callback_data=f"adm_bc_set_{k}", style="primary"))
-    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="primary"))
+    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7798,7 +7798,7 @@ def render_adm_bc_limits(call: types.CallbackQuery) -> None:
         ("zip_max_files",     "Zip Max Files"),
     ]:
         kb.add(Btn(f"✏️  {label}", callback_data=f"adm_bc_set_{k}", style="primary"))
-    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="primary"))
+    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7821,7 +7821,7 @@ def render_adm_bc_upload(call: types.CallbackQuery) -> None:
     kb.add(
         Btn("✏️  Zip Max Files",    callback_data="adm_bc_set_zip_max_files",       style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="primary"))
+    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7845,7 +7845,7 @@ def render_adm_bc_env(call: types.CallbackQuery) -> None:
             style="success" if strip else "danger"),
         Btn("➕  Aᴅᴅ Sᴇᴄʀᴇᴛ Nᴀᴍᴇ",  callback_data="adm_bc_set_add_secret_name",   style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="primary"))
+    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7874,7 +7874,7 @@ def render_adm_bc_sandbox(call: types.CallbackQuery) -> None:
             callback_data="adm_bc_toggle_sandbox_network",
             style="success" if net else "danger"),
     )
-    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="primary"))
+    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7905,7 +7905,7 @@ def render_adm_bc_policy(call: types.CallbackQuery) -> None:
             callback_data="adm_sub_auto_downgrade",
             style="success" if auto_dg else "danger"),
     )
-    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="primary"))
+    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7947,7 +7947,7 @@ def render_adm_appearance(call: types.CallbackQuery) -> None:
         Btn("📣  Aɴɴ Cʜᴀɴɴᴇʟ",       callback_data="adm_set_announce",       style="primary"),
     )
     kb.add(Btn("🎞️  Aᴘᴘ Bᴀɴɴᴇʀ",     callback_data="adm_app_banner",         style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("appearance", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7969,7 +7969,7 @@ def render_adm_app_theme(call: types.CallbackQuery) -> None:
     for k, v in _APPEARANCE_THEMES.items():
         kb.add(Btn(f"{'✅' if k == cur else '  '} {v['name']}",
                    callback_data=f"adm_app_theme_{k}", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴘᴘᴇᴀʀᴀɴᴄᴇ", callback_data="adm_appearance", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴘᴘᴇᴀʀᴀɴᴄᴇ", callback_data="adm_appearance", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("appearance", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -7993,7 +7993,7 @@ def render_adm_app_emojis(call: types.CallbackQuery) -> None:
         kb.add(Btn(f"✏️ {k}: {custom_emojis.get(k, G.get(k,'?'))}",
                    callback_data=f"adm_app_emoji_set_{k}", style="primary"))
     kb.add(Btn("🔄  Rᴇꜱᴇᴛ Aʟʟ", callback_data="adm_app_emoji_reset", style="danger"))
-    kb.add(Btn(f"{G['back']}  Aᴘᴘᴇᴀʀᴀɴᴄᴇ", callback_data="adm_appearance", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴘᴘᴇᴀʀᴀɴᴄᴇ", callback_data="adm_appearance", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("appearance", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8011,7 +8011,7 @@ def render_adm_app_banner(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn("🖼️  Mᴇɴᴜ Pʜᴏᴛᴏꜱ", callback_data="adm_photos",     style="primary"))
     kb.add(Btn("🔄  Rᴇʙᴜɪʟᴅ Bᴀɴɴᴇʀꜱ", callback_data="adm_rebuild_banners", style="danger"))
-    kb.add(Btn(f"{G['back']}  Aᴘᴘᴇᴀʀᴀɴᴄᴇ", callback_data="adm_appearance", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴘᴘᴇᴀʀᴀɴᴄᴇ", callback_data="adm_appearance", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("appearance", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8052,7 +8052,7 @@ def render_adm_coupon_plus(call: types.CallbackQuery) -> None:
         Btn("🗑️  Cʟᴇᴀʀ Exᴘɪʀᴇᴅ",   callback_data="adm_coupon_clearexp",  style="danger"),
         Btn("📋  Aʟʟ Cᴏᴜᴘᴏɴꜱ",      callback_data="adm_coupons",          style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("coupon_plus", PHOTOS["coupon"]), cap, kb, call=call)
 
 
@@ -8080,7 +8080,7 @@ def render_adm_coupon_create(call: types.CallbackQuery) -> None:
     USER_STATES[call.from_user.id] = {"flow": "await_coupon_admin"}
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(Btn("📋  All Coupons", callback_data="adm_coupons"))
-    kb.add(Btn(f"{G['back']}  Coupon Mgr", callback_data="adm_coupon_plus"))
+    kb.add(Btn(f"{G['back']}  Coupon Mgr", callback_data="adm_coupon_plus", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("coupon", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8151,7 +8151,7 @@ def render_adm_coupon_expiry(call: types.CallbackQuery) -> None:
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn("🗑️  Cʟᴇᴀʀ Exᴘɪʀᴇᴅ", callback_data="adm_coupon_clearexp", style="danger"))
-    kb.add(Btn(f"{G['back']}  Cᴏᴜᴘᴏɴ Mɢʀ", callback_data="adm_coupon_plus", style="primary"))
+    kb.add(Btn(f"{G['back']}  Cᴏᴜᴘᴏɴ Mɢʀ", callback_data="adm_coupon_plus", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("coupon_plus", PHOTOS["coupon"]), cap, kb, call=call)
 
 
@@ -8178,7 +8178,7 @@ def render_adm_templates(call: types.CallbackQuery) -> None:
         has_custom = bool(get_setting(f"tmpl_{k}"))
         kb.add(Btn(f"{'✅' if has_custom else '📄'} {v['label'][:25]}",
                    callback_data=f"adm_tmpl_edit_{k}", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("templates", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8219,7 +8219,7 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
         Btn("✏️  Sᴇᴛ Mɪɴ Pʟᴀɴ", callback_data="adm_ref_set_min_plan", style="primary"),
     )
     kb.add(Btn("📈  Rᴇꜰᴇʀʀᴀʟ Aɴᴀʟʏᴛɪᴄꜱ", callback_data="adm_referral_detail", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("referral_adm", PHOTOS["referral"]), cap, kb, call=call)
 
 
@@ -8269,7 +8269,7 @@ def render_adm_ref_rewards(call: types.CallbackQuery) -> None:
         Btn("💰  Sᴇᴛ Bᴀꜱᴇ Rᴇᴡᴀʀᴅ",   callback_data="adm_ref_set_reward",      style="primary"),
         Btn("✏️  Sᴇᴛ Bᴏɴᴜꜱ Tʜʀ",     callback_data="adm_bc_set_referral_bonus_threshold", style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Rᴇꜰᴇʀʀᴀʟ Sʏꜱ", callback_data="adm_referral_sys", style="primary"))
+    kb.add(Btn(f"{G['back']}  Rᴇꜰᴇʀʀᴀʟ Sʏꜱ", callback_data="adm_referral_sys", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("referral_adm", PHOTOS["referral"]), cap, kb, call=call)
 
 
@@ -8323,7 +8323,7 @@ def render_adm_janitor(call: types.CallbackQuery) -> None:
         Btn("📋  Jᴀɴ Rᴜʟᴇꜱ",       callback_data="adm_jan_rules",     style="primary"),
     )
     kb.add(Btn("⏰  Sᴄʜᴇᴅᴜʟᴇ",       callback_data="adm_jan_schedule",  style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("janitor", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8441,7 +8441,7 @@ def render_adm_webhooks(call: types.CallbackQuery) -> None:
         Btn("ℹ️  Wᴇʙʜᴏᴏᴋ Iɴꜰᴏ",   callback_data="adm_wh_info",  style="primary"),
     )
     kb.add(Btn("📜  Wᴇʙʜᴏᴏᴋ Lᴏɢ", callback_data="adm_webhook_log", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("webhooks", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8518,7 +8518,7 @@ def render_adm_feature_flags(call: types.CallbackQuery) -> None:
         kb.add(Btn(f"{'✅' if val else '❌'} {label}",
                    callback_data=f"adm_ff_toggle_{k}", style="primary"))
     kb.add(Btn("🔄  Rᴇꜱᴇᴛ Aʟʟ Fʟᴀɢꜱ", callback_data="adm_ff_reset_all", style="danger"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("features", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8552,7 +8552,7 @@ def render_adm_rate_config(call: types.CallbackQuery) -> None:
         name = PLAN_LIMITS.get(plan, {}).get("name", plan)[:10]
         kb.add(Btn(f"✏️  {name}", callback_data=f"adm_rate_plan_{plan}", style="primary"))
     kb.add(Btn("📊  Rᴀᴛᴇ Sᴛᴀᴛꜱ", callback_data="adm_rate_stats", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("rate_limits", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8571,7 +8571,7 @@ def render_adm_rate_plan(call: types.CallbackQuery, plan: str) -> None:
     for metric in ("uploads_per_day", "starts_per_hour", "msgs_per_min"):
         kb.add(Btn(f"✏️  {metric.replace('_',' ').title()}",
                    callback_data=f"adm_rate_set_{plan}_{metric}", style="primary"))
-    kb.add(Btn(f"{G['back']}  Rᴀᴛᴇ Cᴏɴꜰɪɢ", callback_data="adm_rate_config", style="primary"))
+    kb.add(Btn(f"{G['back']}  Rᴀᴛᴇ Cᴏɴꜰɪɢ", callback_data="adm_rate_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("rate_limits", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8632,7 +8632,7 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
         Btn("💥  Cʀᴀꜱʜᴇᴅ",          callback_data="adm_crashed_bots",     style="danger"),
     )
     kb.add(Btn("🔬  Pʀᴏᴄᴇꜱꜱ Mᴏɴɪᴛᴏʀ", callback_data="adm_process_monitor", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("monitor", PHOTOS["stats"]), cap, kb, call=call)
 
 
@@ -8749,7 +8749,7 @@ def render_adm_rev_goals(call: types.CallbackQuery) -> None:
         Btn("📈  Hɪꜱᴛᴏʀʏ",           callback_data="adm_goal_history",     style="primary"),
         Btn("📊  Rᴇᴠᴇɴᴜᴇ Rᴇᴘᴏʀᴛ",   callback_data="adm_revenue_report",   style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("rev_goals", PHOTOS["stats"]), cap, kb, call=call)
 
 
@@ -8803,7 +8803,7 @@ def render_adm_scheduler(call: types.CallbackQuery) -> None:
         Btn("📋  Aʟʟ Tᴀꜱᴋꜱ",     callback_data="adm_sched_list", style="primary"),
     )
     kb.add(Btn("📜  Hɪꜱᴛᴏʀʏ", callback_data="adm_sched_history", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("scheduler", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8832,7 +8832,7 @@ def render_adm_sched_list(call: types.CallbackQuery) -> None:
                 callback_data=f"adm_sched_del_{tid}",    style="danger"),
         )
     kb.add(Btn("➕  Aᴅᴅ Tᴀꜱᴋ",     callback_data="adm_sched_add",   style="success"))
-    kb.add(Btn(f"{G['back']}  Sᴄʜᴇᴅᴜʟᴇʀ", callback_data="adm_scheduler", style="primary"))
+    kb.add(Btn(f"{G['back']}  Sᴄʜᴇᴅᴜʟᴇʀ", callback_data="adm_scheduler", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("scheduler", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8895,7 +8895,7 @@ def render_adm_import_export(call: types.CallbackQuery) -> None:
     kb.add(
         Btn("♻️  Fᴀᴄᴛᴏʀʏ Rᴇꜱᴇᴛ",  callback_data="adm_import_reset",    style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("import_export", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -8969,7 +8969,7 @@ def render_adm_admin_2fa(call: types.CallbackQuery) -> None:
                 style="success" if enabled else "danger"),
             Btn("🗑️  Dɪꜱᴀʙʟᴇ+Rᴇꜱᴇᴛ", callback_data="adm_2fa_disable", style="danger"),
         )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("admin_2fa", PHOTOS["security"]), cap, kb, call=call)
 
 
@@ -9021,7 +9021,7 @@ def render_adm_leaderboard(call: types.CallbackQuery) -> None:
         Btn("⏱️  Lᴏɴɢᴇꜱᴛ Uᴘᴛɪᴍᴇ", callback_data="adm_lb_uptime",     style="primary"),
         Btn("🏆  Aʟʟ Lʙꜱ",         callback_data="adm_top_users",     style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("leaderboard", PHOTOS["stats"]), cap, kb, call=call)
 
 
@@ -9127,7 +9127,7 @@ def render_adm_languages(call: types.CallbackQuery) -> None:
         kb.add(Btn(f"{'✅' if code == cur else '  '} {name}",
                    callback_data=f"adm_lang_set_{code}", style="primary"))
     kb.add(Btn("📊  Lᴀɴɢᴜᴀɢᴇ Sᴛᴀᴛꜱ", callback_data="adm_lang_stats", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("lang_panel", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -9160,7 +9160,7 @@ def render_adm_bot_controls_panel(call: types.CallbackQuery) -> None:
         Btn("🔴  Kɪʟʟ Aʟʟ",         callback_data="adm_kill_all_now", style="danger"),
         Btn("🔄  Rᴇꜱᴛᴀʀᴛ Sᴛᴏᴘᴘᴇᴅ",  callback_data="adm_mass_restart_stopped", style="success"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_controls", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -9187,7 +9187,7 @@ def render_adm_bc_list_all(call: types.CallbackQuery) -> None:
         icon = "▶" if is_running else "⏹"
         kb.add(Btn(f"{icon} {esc(b.get('name','?')[:22])}",
                    callback_data=f"adm_bcbot_{bid[:20]}", style="primary"))
-    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴᴛʀᴏʟꜱ", callback_data="adm_bot_controls", style="primary"))
+    kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴᴛʀᴏʟꜱ", callback_data="adm_bot_controls", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_controls", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -9234,7 +9234,7 @@ def render_adm_bc_single(call: types.CallbackQuery, bid: str) -> None:
         Btn("📊  Rᴇꜱᴏᴜʀᴄᴇꜱ",     callback_data=f"adm_bc_res_{bid[:20]}",     style="primary"),
         Btn("🗑️  Dᴇʟᴇᴛᴇ",        callback_data=f"adm_bc_del_{bid[:20]}",     style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  Aʟʟ Bᴏᴛꜱ", callback_data="adm_bc_list_all", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aʟʟ Bᴏᴛꜱ", callback_data="adm_bc_list_all", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_controls", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -9369,7 +9369,7 @@ def render_adm_subscriptions(call: types.CallbackQuery) -> None:
         Btn("💰  Pᴀʏᴍᴇɴᴛꜱ",         callback_data="adm_payments",           style="primary"),
     )
     kb.add(Btn("📊  Exᴘɪʀʏ Rᴇᴘᴏʀᴛ", callback_data="adm_sub_expiry_report", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("subscriptions", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -11501,7 +11501,7 @@ def _handle_bot_upload(m: types.Message) -> None:
                         callback_data=f"bot_view_{b['_id']}"))
                 kb.add(
                     Btn(f"{G['plus']}  {sc('Upload')}",   callback_data="menu_upload", style="success"),
-                    Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="primary"),
+                    Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"),
                 )
                 bot.send_message(cid, cap + FOOTER, parse_mode="HTML", reply_markup=kb)
             else:
@@ -11689,7 +11689,7 @@ def render_help_page(chat_id, page, call=None):
         sd = _HELP_PAGES.get(sub, {})
         if sd:
             kb.add(Btn(sd["title"], callback_data=f"help_{sub}", style="primary"))
-    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Hᴇʟᴘ", callback_data="help_main", style="primary"))
+    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Hᴇʟᴘ", callback_data="help_main", style="danger"))
     photo = PHOTOS.get("main", PHOTOS.get("admin"))
     if call:
         show_menu(call.message.chat.id, photo, cap, kb, call=call)
@@ -13244,7 +13244,7 @@ def render_adm_payment_requests(call):
         Btn("✅  Aᴘᴘʀᴏᴠᴇ", callback_data="adm_pay_approve_select", style="success"),
         Btn("❌  Rᴇᴊᴇᴄᴛ",   callback_data="adm_pay_reject_select",  style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -13301,7 +13301,7 @@ def render_adm_api_keys(call):
     lines.append(G["div"] + FOOTER)
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(Btn("🗑️  Rᴇᴠᴏᴋᴇ Aʟʟ", callback_data="adm_apikey_revoke_all", style="danger"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], "\n".join(lines), kb, call=call)
 
 
@@ -13417,7 +13417,7 @@ def render_adm_sub_expiry_report(call):
     lines.append(G["div"] + FOOTER)
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(Btn("📨  Sᴇɴᴅ Rᴇᴍɪɴᴅᴇʀꜱ", callback_data="adm_sub_send_reminders", style="primary"))
-    kb.add(Btn(f"{G['back']}  Sᴜʙꜱ", callback_data="adm_subscriptions", style="primary"))
+    kb.add(Btn(f"{G['back']}  Sᴜʙꜱ", callback_data="adm_subscriptions", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("subscriptions", PHOTOS["admin"]),
               "\n".join(lines), kb, call=call)
 
@@ -13476,7 +13476,7 @@ def render_adm_export_menu(call):
         Btn("🔐  Aᴜᴅɪᴛ CSV",  callback_data="adm_export_audit_csv", style="primary"),
         Btn("📥  Iᴍᴘᴏʀᴛ DB",  callback_data="adm_import_db",        style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("import_export", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -13682,7 +13682,7 @@ def render_adm_tg_channel_backup(call: types.CallbackQuery) -> None:
             style="success" if auto_on else "danger"),
         Btn("\U0001f4e5  R\u1d07\u02e2\u1d1b\u1d0f\u0280\u1d07", callback_data="adm_tg_bkp_restore", style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  A\u1d05\u1d0d\u026a\u0274", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  A\u1d05\u1d0d\u026a\u0274", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -13729,7 +13729,7 @@ def render_gh_repo_host_menu(call: types.CallbackQuery) -> None:
         Btn("\U0001f4c2  M\u028f G\u029c B\u1d0f\u1d1b\u02e2", callback_data="gh_host_list", style="primary"),
         Btn("\U0001f5d1\ufe0f  R\u1d07\u1d0d\u1d0f\u1d20\u1d07 R\u1d07\u1d18\u1d0f", callback_data="gh_host_remove_sel", style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  M\u1d00\u026a\u0274", callback_data="menu_main", style="primary"))
+    kb.add(Btn(f"{G['back']}  M\u1d00\u026a\u0274", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("upload", PHOTOS["main"]), cap, kb, call=call)
 
 
@@ -13810,7 +13810,7 @@ def action_gh_host_list(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup()
     for b in gh_bots:
         kb.add(Btn(f"\U0001f419  {esc(b['name'])[:30]}", callback_data=f"bot_view_{b['_id']}"))
-    kb.add(Btn(f"{G['back']}  Main", callback_data="menu_main"))
+    kb.add(Btn(f"{G['back']}  Main", callback_data="menu_main", style="danger"))
     show_text(call.message.chat.id, cap, kb, call=call)
     ack(call)
 
@@ -13882,7 +13882,7 @@ def _render_gh_dir(call: types.CallbackQuery, path: str = "") -> None:
                 sz = fmt_bytes(f.get("size", 0))
                 path_index.append(f["path"])
                 kb.add(Btn(f"\U0001f4c4  {esc(f['name'])} ({sz})", callback_data=f"ghbrow_ix_{len(path_index)-1}_f"))
-            kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin"))
+            kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
             USER_STATES[call.from_user.id] = USER_STATES.get(call.from_user.id, {})
             USER_STATES[call.from_user.id]["ghbrow_path_index"] = path_index
             show_text(call.message.chat.id, cap, kb)
@@ -13934,11 +13934,11 @@ def _render_gh_file(call: types.CallbackQuery, path: str) -> None:
             kb = types.InlineKeyboardMarkup(row_width=2)
             kb.add(
                 Btn("\U0001f4e5  Download", callback_data="ghbrow_dl_0"),
-                Btn("\u2b06\ufe0f  Back up",  callback_data="ghbrow_ix_0_d"),
+                Btn("\u2b06\ufe0f  Back up",  callback_data="ghbrow_ix_0_d", style="danger"),
             )
             if fname.endswith((".py", ".js", ".mjs")):
                 kb.add(Btn("\u25b6\ufe0f  Run this file", callback_data="ghbrow_run_0"))
-            kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin"))
+            kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
             show_text(call.message.chat.id, cap, kb)
         except Exception as e:
             try:
@@ -14061,7 +14061,7 @@ def render_adm_approval_group(call: types.CallbackQuery) -> None:
     )
     kb.add(
         Btn("Stats",          callback_data="adm_grpv_stats",  style="primary"),
-        Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="primary"),
+        Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"),
     )
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
@@ -14105,7 +14105,7 @@ def render_adm_private_group_panel(call: types.CallbackQuery) -> None:
         Btn(f"Notify: {'Admins' if notify_admins_only else 'All'}", callback_data="adm_apgrp_toggle_notify", style="primary"),
         Btn("Test",         callback_data="adm_apgrp_test",   style="success"),
     )
-    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -14461,7 +14461,7 @@ def render_bots_menu(call: types.CallbackQuery) -> None:
         Btn(f"{G['plus']}  {sc('Upload')}", callback_data="menu_upload", style="success"),
         Btn("\U0001f419  From GitHub",      callback_data="menu_gh_host", style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="primary"))
+    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["bots"], cap + FOOTER, kb, call=call)
 
 
@@ -14522,7 +14522,7 @@ def render_plan_detail(call: types.CallbackQuery, plan: str) -> None:
     kb = types.InlineKeyboardMarkup()
     if plan != "free":
         kb.add(Btn(f"{G['spark']}  {sc('Buy')} {p['name']}", callback_data=f"plan_buy_{plan}"))
-    kb.add(Btn(f"{G['back']}  {sc('Plans')}", callback_data="menu_plans"))
+    kb.add(Btn(f"{G['back']}  {sc('Plans')}", callback_data="menu_plans", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["buy"], cap, kb, call=call)
 
 
@@ -14601,7 +14601,7 @@ def render_payment_screen(call: types.CallbackQuery, data: str) -> None:
     kb = types.InlineKeyboardMarkup()
     USER_STATES[call.from_user.id] = {"flow": "await_payment_proof", "method": method, "plan": plan}
     kb.add(Btn(f"{G['plus']}  {sc('Send Proof')}", callback_data="pay_proof"))
-    kb.add(Btn(f"{G['back']}  {sc('Methods')}", callback_data=f"plan_buy_{plan}" if plan else "menu_buy"))
+    kb.add(Btn(f"{G['back']}  {sc('Methods')}", callback_data=f"plan_buy_{plan}" if plan else "menu_buy", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
 
 
@@ -14675,7 +14675,7 @@ def render_wallet(call: types.CallbackQuery) -> None:
     kb.add(Btn(f"{G['plus']}  {sc('Top Up')}", callback_data="wallet_topup", style="success"))
     if u.get("plan") not in ("free", None):
         kb.add(Btn(f"{G['spark']}  {sc('Gift Plan')}", callback_data="wallet_gift", style="success"))
-    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="primary"))
+    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["wallet"], cap, kb, call=call)
 
 
@@ -14756,7 +14756,7 @@ def render_trial(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup()
     if not trial_active and not claimed_this_epoch:
         kb.add(Btn(f"{G['ok']}  {sc(f'Claim {hours}h {plan.capitalize()} Trial')}", callback_data="trial_claim"))
-    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main"))
+    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("trial", PHOTOS["main"]), cap, kb, call=call)
 
 
@@ -14802,7 +14802,7 @@ def render_coupon(call: types.CallbackQuery) -> None:
     )
     kb = types.InlineKeyboardMarkup()
     kb.add(Btn(f"{G['plus']}  {sc('Redeem Code')}", callback_data="coupon_redeem"))
-    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main"))
+    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("coupon", PHOTOS["main"]), cap, kb, call=call)
 
 
@@ -14861,7 +14861,7 @@ def render_user_tickets(call: types.CallbackQuery) -> None:
         kb.add(Btn(f"#{t['id']} {esc(t.get('subject', ''))[:25]}", callback_data=f"ticket_view_{t['id']}", style="primary"))
     kb.add(
         Btn(f"{G['plus']}  {sc('Open Ticket')}", callback_data="ticket_open", style="success"),
-        Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="primary"),
+        Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"),
     )
     show_menu(call.message.chat.id, PHOTOS.get("ticket", PHOTOS["main"]), cap, kb, call=call)
 
@@ -14899,7 +14899,7 @@ def render_ticket_view(call: types.CallbackQuery, tid: str) -> None:
         Btn(f"{G['fwd']}  {sc('Reply')}", callback_data=f"ticket_reply_{tid}", style="success"),
         Btn(f"{G['no']}  {sc('Close')}", callback_data=f"ticket_close_{tid}", style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  {sc('Tickets')}", callback_data="menu_tickets", style="primary"))
+    kb.add(Btn(f"{G['back']}  {sc('Tickets')}", callback_data="menu_tickets", style="danger"))
     show_text(call.message.chat.id, cap, kb, call=call)
 
 
@@ -14983,7 +14983,7 @@ def render_bot_webhook(call: types.CallbackQuery, bot_id: str) -> None:
     )
     kb = types.InlineKeyboardMarkup()
     kb.add(Btn(f"🔄  Rᴇɢᴇɴᴇʀᴀᴛᴇ Sᴇᴄʀᴇᴛ", callback_data=f"bot_wh_regen_{bot_id}", style="danger"))
-    kb.add(Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data=f"bot_view_{bot_id}", style="primary"))
+    kb.add(Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data=f"bot_view_{bot_id}", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["bot"], cap, kb, call=call)
 
 
@@ -15108,7 +15108,7 @@ def action_bot_logs(call: types.CallbackQuery, bot_id: str) -> None:
     )
     kb = types.InlineKeyboardMarkup()
     kb.add(Btn(f"\u21bb  {sc('Refresh')}", callback_data=f"bot_logs_{bot_id}"))
-    kb.add(Btn(f"{G['back']}  {sc('Bot')}", callback_data=f"bot_view_{bot_id}"))
+    kb.add(Btn(f"{G['back']}  {sc('Bot')}", callback_data=f"bot_view_{bot_id}", style="danger"))
     show_text(call.message.chat.id, cap, kb, call=call)
 
 
@@ -15133,7 +15133,7 @@ def render_env_menu(call: types.CallbackQuery, bot_id: str) -> None:
     kb.add(Btn(f"{G['plus']}  {sc('Add / Edit Var')}", callback_data=f"env_add_{bot_id}"))
     for k in list(env.keys())[:10]:
         kb.add(Btn(f"\U0001f5d1\ufe0f {k}", callback_data=f"env_del_{bot_id}_{k}"))
-    kb.add(Btn(f"{G['back']}  {sc('Bot')}", callback_data=f"bot_view_{bot_id}"))
+    kb.add(Btn(f"{G['back']}  {sc('Bot')}", callback_data=f"bot_view_{bot_id}", style="danger"))
     show_text(call.message.chat.id, cap, kb, call=call)
 
 
@@ -15203,7 +15203,7 @@ def start_pip_install_flow(call: types.CallbackQuery, bot_id: str) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     for name, code in all_libs:
         kb.add(Btn(f"📦 {name}", callback_data=f"pkg_quick_{bot_id}_{name}"))
-    kb.add(Btn(f"{G['back']} Back", callback_data=f"bot_view_{bot_id}", style="primary"))
+    kb.add(Btn(f"{G['back']} Back", callback_data=f"bot_view_{bot_id}", style="danger"))
     
     guide_text = (
         f"<b>{G['download']} {sc('Package Installer & Guide')}</b>\n"
@@ -15243,7 +15243,7 @@ def render_bot_delete_confirm(call: types.CallbackQuery, bot_id: str) -> None:
         Btn(f"{G['no']}  Delete Everything", callback_data=f"bot_delall_{bot_id}", style="danger"),
         Btn(f"\U0001f5d1\ufe0f  Delete Files Only", callback_data=f"bot_delfiles_{bot_id}", style="danger"),
         Btn(f"{G['ok']}  Delete Record Only", callback_data=f"bot_delyes_{bot_id}", style="danger"),
-        Btn(f"{G['back']}  Cancel",            callback_data=f"bot_view_{bot_id}",  style="primary"),
+        Btn(f"{G['back']}  Cancel",            callback_data=f"bot_view_{bot_id}",  style="danger"),
     )
     show_text(call.message.chat.id, cap, kb, call=call)
 
@@ -15271,7 +15271,7 @@ def render_bot_delfiles_confirm(call: types.CallbackQuery, bot_id: str) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         Btn(f"{G['ok']}  Delete Files", callback_data=f"bot_delfilesyes_{bot_id}", style="danger"),
-        Btn(f"{G['no']}  Cancel",        callback_data=f"bot_view_{bot_id}",       style="primary"),
+        Btn(f"{G['no']}  Cancel",        callback_data=f"bot_view_{bot_id}",       style="danger"),
     )
     show_text(call.message.chat.id, cap, kb, call=call)
 
@@ -15304,7 +15304,7 @@ def render_bot_delall_confirm(call: types.CallbackQuery, bot_id: str) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         Btn(f"{G['no']}  Delete All", callback_data=f"bot_delallyes_{bot_id}", style="danger"),
-        Btn(f"{G['ok']}  Cancel",     callback_data=f"bot_view_{bot_id}",      style="primary"),
+        Btn(f"{G['ok']}  Cancel",     callback_data=f"bot_view_{bot_id}",      style="danger"),
     )
     show_text(call.message.chat.id, cap, kb, call=call)
 
@@ -15580,7 +15580,7 @@ def render_adm_tickets(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup()
     for t in open_t:
         kb.add(Btn(f"{G['eye']}  #{t['id']}", callback_data=f"ticket_view_{t['id']}", style="primary"))
-    kb.add(Btn(f"{G['back']}  {sc('Admin')}", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  {sc('Admin')}", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("ticket", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -15614,7 +15614,7 @@ def render_adm_trial(call: types.CallbackQuery) -> None:
         Btn("🔄 Reset Epoch", callback_data="adm_trial_reset_epoch", style="primary"),
         Btn("🗑️ Wipe Claims", callback_data="adm_trial_wipe_claims", style="danger"),
     )
-    kb.add(Btn(f"{G['back']} Admin", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']} Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -15682,7 +15682,7 @@ def render_adm_pending(call: types.CallbackQuery) -> None:
             Btn(f"{G['ok']}  OK {esc(nm)[:18]}", callback_data=f"appr_ok_{bid}"),
             Btn(f"{G['no']}  No {esc(nm)[:18]}", callback_data=f"appr_no_{bid}"),
         )
-    kb.add(Btn(f"{G['back']}  {sc('Admin')}", callback_data="menu_admin"))
+    kb.add(Btn(f"{G['back']}  {sc('Admin')}", callback_data="menu_admin", style="danger"))
     cap = (
         f"<b>{G['eye']} {sc('Pending Uploads')} ({len(items)})</b>\n"
         f"{G['div_eq']}\n" + "\n".join(rows) + f"\n{G['div']}{FOOTER}"
@@ -15702,7 +15702,7 @@ def render_adm_photos(call: types.CallbackQuery) -> None:
     for key, label in sorted(PHOTO_KEYS_FRIENDLY.items()):
         if key in _PHOTO_SPECS:
             kb.add(Btn(f"{G['cog']}  {sc(label)}", callback_data=f"adm_photo_{key}"))
-    kb.add(Btn(f"{G['back']}  {sc('Admin')}", callback_data="menu_admin"))
+    kb.add(Btn(f"{G['back']}  {sc('Admin')}", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -15722,7 +15722,7 @@ def render_adm_security(call: types.CallbackQuery) -> None:
         Btn("\U0001f6e1\ufe0f  Sec Center",       callback_data="adm_sec_center",    style="danger"),
         Btn(f"{G['eye']}  Scan Log",    callback_data="adm_security_log",  style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin"))
+    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["security"], cap, kb, call=call)
 
 
@@ -15741,7 +15741,7 @@ def render_adm_maintenance(call: types.CallbackQuery) -> None:
     kb.add(Btn(f"{'Disable' if on else 'Enable'} Maintenance",
                callback_data="adm_maint_toggle",
                style="danger" if on else "success"))
-    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -15776,7 +15776,7 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
         Btn("\U0001f4e4  Export Data",       callback_data="adm_set_export",      style="primary"),
     )
     kb.add(
-        Btn("\U0001f4e1  TG Ch Backup",      callback_data="adm_tg_backup",       style="primary"),
+        Btn("\U0001f4e1  TG Ch Backup",      callback_data="adm_tg_backup",       style="danger"),
         Btn("\U0001f510  Force-Join Groups",   callback_data="adm_approval_group",  style="primary"),
     )
     kb.add(
@@ -15800,7 +15800,7 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
         Btn("\U0001f310  Public URL",        callback_data="adm_set_public_url",  style="primary"),
         Btn(f"{'🟢' if wh_on else '⚪'} Webhook Mode", callback_data="adm_webhook_toggle", style="success" if wh_on else "primary"),
     )
-    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -15840,13 +15840,13 @@ def render_adm_github(call: types.CallbackQuery) -> None:
     kb.add(
         Btn(f"{'OK' if auto else 'OFF'}  Auto", callback_data="gh_toggle_auto",
             style="success" if auto else "danger"),
-        Btn("\U0001f4be  Backup Now", callback_data="gh_backup_now", style="success"),
+        Btn("\U0001f4be  Backup Now", callback_data="gh_backup_now", style="danger"),
     )
     kb.add(
         Btn("\U0001f4e5  Restore",    callback_data="gh_restore_now", style="danger"),
         Btn("\U0001f419  Browse",     callback_data="adm_gh_browser", style="primary"),
     )
-    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="primary"))
+    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -15896,7 +15896,7 @@ def render_adm_plans(call: types.CallbackQuery) -> None:
     for k, v in PLAN_LIMITS.items():
         kb.add(Btn(f"\u270f\ufe0f  {sc(v['name'])}", callback_data=f"adm_plan_edit_{k}"))
     kb.add(Btn("\u21ba  Reset All Defaults", callback_data="adm_set_plans_reset", style="danger"))
-    kb.add(Btn(f"{G['back']}  Settings", callback_data="adm_settings", style="primary"))
+    kb.add(Btn(f"{G['back']}  Settings", callback_data="adm_settings", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -15926,7 +15926,7 @@ def render_adm_plan_edit(call: types.CallbackQuery, key: str) -> None:
         Btn("\u270f\ufe0f  Rename", callback_data=f"adm_plan_set_name_{key}"),
         Btn("\U0001f4b2  Set Price", callback_data=f"adm_plan_set_price_{key}"),
     )
-    kb.add(Btn(f"{G['back']}  All Plans", callback_data="adm_set_plans", style="primary"))
+    kb.add(Btn(f"{G['back']}  All Plans", callback_data="adm_set_plans", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -15938,7 +15938,7 @@ def render_adm_confirm(call: types.CallbackQuery, action: str, label: str) -> No
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         Btn(f"{G['ok']}  Yes, do it",   callback_data=f"{action}_yes", style="danger"),
-        Btn(f"{G['no']}  Cancel",        callback_data="adm_settings",  style="primary"),
+        Btn(f"{G['no']}  Cancel",        callback_data="adm_settings",  style="danger"),
     )
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
@@ -17591,6 +17591,6 @@ def render_adm_pay_modes(call: types.CallbackQuery) -> None:
         Btn(f"{'✅' if auto_enabled else '❌'}  {sc('Automatic Mode')}",
             callback_data="adm_pay_toggle_auto",
             style="success" if auto_enabled else "danger"),
-        Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data="adm_pay_config", style="primary")
+        Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data="adm_pay_config", style="danger")
     )
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
