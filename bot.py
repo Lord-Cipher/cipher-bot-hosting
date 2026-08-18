@@ -17726,6 +17726,7 @@ def render_ai_chat(call: types.CallbackQuery) -> None:
         f"<b>{sc('Capabilities')}:</b>\n"
         f"{G['bullet']} {sc('Write Python/Node.js code')}\n"
         f"{G['bullet']} {sc('Debug hosting errors')}\n"
+        f"{G['bullet']} {sc('Advanced Blackbox coding logic')}\n"
         f"{G['bullet']} {sc('Explain complex logic')}\n"
         f"{G['bullet']} {sc('General chat & support')}\n\n"
         f"<b>{sc('Instructions')}:</b>\n"
@@ -17763,12 +17764,12 @@ def handle_ai_chat_message(m: types.Message) -> None:
         
         if res.get("result"):
             ai_response = res["result"]
-            # Ensure code blocks are properly formatted if AI didn't do it
-            # This is a simple heuristic: if it looks like code, wrap it.
-            # But GPT-4o usually handles markdown well.
+            
+            bb_active = bool(get_setting("ai_model_blackbox_enabled", True))
+            model_tag = "GPT-4o + Blackbox" if bb_active else "GPT-4o"
             
             final_text = (
-                f"🤖 <b>{sc('AI Operative')}</b>\n"
+                f"🤖 <b>{sc('AI Operative')}</b> (<code>{model_tag}</code>)\n"
                 f"{G['div']}\n"
                 f"<blockquote>{ai_response}</blockquote>\n"
                 f"{G['div']}{FOOTER}"
@@ -17820,8 +17821,11 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         
         if res.get("result"):
             ai_fix = res["result"]
+            bb_active = bool(get_setting("ai_model_blackbox_enabled", True))
+            model_tag = "GPT-4o + Blackbox" if bb_active else "GPT-4o"
+            
             final_text = (
-                f"🩺 <b>{sc('AI Bot Doctor Report')}</b>\n"
+                f"🩺 <b>{sc('AI Bot Doctor Report')}</b> (<code>{model_tag}</code>)\n"
                 f"{G['div_eq']}\n"
                 f"🤖 <b>{sc('Diagnosis')}</b>:\n"
                 f"<blockquote>{ai_fix}</blockquote>\n"
@@ -17841,6 +17845,7 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
         "gpt4o": "GPT-4o (Chat/Doctor)",
         "claude3": "Claude-3.5 (Coding)",
         "deepseek": "DeepSeek-R1 (Logic)",
+        "blackbox": "Blackbox (Advanced Coding)",
         "flux": "Flux.1 (Digital Seal)"
     }
     
@@ -17862,6 +17867,8 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     cap += f"{G['div']}{FOOTER}"
     kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
+
 
 if __name__ == "__main__":
     sys.exit(main())
