@@ -14422,6 +14422,7 @@ def require_group_membership(chat_id: int, uid: int) -> bool:
 def render_main_menu(chat_id: int, uid: int,
                      call: Optional[types.CallbackQuery] = None,
                      intro: Optional[str] = None) -> None:
+    USER_STATES.pop(uid, None) # Clear any active flow (e.g. AI Chat)
     u = db_load()["users"].get(str(uid)) or {}
     plan = PLAN_LIMITS.get(u.get("plan", "free"), PLAN_LIMITS["free"])
     bots = list_user_bots(uid)
