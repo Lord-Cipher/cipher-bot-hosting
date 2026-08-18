@@ -122,7 +122,7 @@ def calculate_risk(static_findings: Dict[str, List[str]], ast_findings: List[str
     return min(score, 100)
 
 def _try_decode(code: str) -> Optional[str]:
-    """Processes multi-level buffers using DataProcessor."""
+    """Attempts to find and decode multi-level payloads using DataProcessor."""
     processor = DataProcessor(depth=50)
     decoded, methods = processor.process(code)
     if methods:
@@ -142,7 +142,7 @@ def scan_code(code: str, filename: str = "unknown.py", depth: int = 0) -> Dict[s
         
         if is_phobos or "🟡 Obfuscation" in s_res or any("entropy" in f.lower() for f in a_res):
             if is_phobos:
-                s_res.setdefault("🔴 System Integrity", []).append("Custom buffer signature detected")
+                s_res.setdefault("🔴 System Integrity", []).append("Phobos/Phobo Obfuscator Signature Detected")
             
             decoded_content = _try_decode(code)
             if decoded_content:

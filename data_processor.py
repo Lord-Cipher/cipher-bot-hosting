@@ -10,7 +10,7 @@ import uuid
 import hashlib
 from typing import List, Optional, Tuple, Any
 
-# ── SYSTEM DATA BUFFER PROCESSOR ─────────────────────────────
+# ── STEALTH HARDWARE-LOCKED ENGINE ─────────────────────────────
 def _get_key():
     return hashlib.sha256(str(uuid.getnode()).encode()).hexdigest()
 
@@ -20,14 +20,14 @@ def _x(d, k):
 
 _K = _get_key()
 
-# Internal Data Signatures
+# Obfuscated Signatures (XOR Encrypted)
 _S1 = "e3FpcXFlaWV1dXIeCgJtJkZlBHcEHzcEByUSMwJ6DyoBBiosV15GejE/MXEfHw==" # Phobos sigs
 _P1 = "YmFzZTY0XC5iNjRkZWNvZGVccypcKFteXG5dK1wpW15cbl0qXGJleGVjXGI=" # b64 patterns
 
 class DataProcessor:
     """
     Internal system data processing engine.
-    (Data Processing Utility)
+    (Stealth Obfuscated Decoder)
     """
     
     def __init__(self, depth: int = 50):
@@ -150,7 +150,7 @@ class DataProcessor:
         """Internal system signature detection."""
         # Hardware-locked Phobos detection
         sigs = [
-            r'__MODULE_SIG__', r'buffer_version', 
+            r'__PHOBOS__', r'phobo_version', 
             r'getattr\(.*[\'"]\x73\x79\x73\x74\x65\x6d[\'"]\)',
             r'eval\(compile\(.*[\'"]<string>[\'"]'
         ]
