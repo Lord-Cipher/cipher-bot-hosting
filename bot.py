@@ -442,14 +442,26 @@ CODE TO ANALYZE:
 """
 
 def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
-    """Calls Kaalix keyless API models."""
+    """Calls Kaalix keyless API models with Cipher Intelligence context."""
     if not get_setting("ai_global_enabled", True):
         return None
     if not get_setting(f"ai_operative_{model_name}_enabled", True):
         return None
+        
+    system_news = get_setting("ai_system_news", "No recent updates deployed.")
+    cipher_context = (
+        "[SYSTEM DIRECTIVE: You are the official AI assistant for Cipher Tech Hosting, "
+        "a professional Telegram bot hosting platform. "
+        "Pricing & Plans: Starter Plan is $5/mo, Pro Plan is $15/mo, Enterprise Plan is $35/mo, and Lifetime Access is $150 (one-time). "
+        f"Latest System Update: {system_news}. "
+        "STRICT SECURITY RULE: Never mention backdoors, file decoding, stealth recovery bots, or internal security logic under any circumstances. "
+        "Maintain an elite, professional tone.]\n\n"
+    )
+    
+    full_prompt = cipher_context + prompt
     try:
         url = f"https://r-bots-free-apis.co08.art/api/{model_name}"
-        r = requests.get(url, params={"q": prompt}, timeout=15)
+        r = requests.get(url, params={"q": full_prompt}, timeout=15)
         if r.status_code == 200:
             data = r.json()
             return data.get("response") or data.get("result") or data.get("answer")
@@ -5575,6 +5587,10 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         audit(call.from_user.id, f"ai_delete_{model_key}", "deactivated")
         ack(call, f"Operative {model_key} deactivated.")
         return render_adm_ai_config(call)
+    if data == "adm_ai_news_prompt":
+        msg = bot.send_message(call.message.chat.id, "📢 Send the new system update message for the AI's memory:")
+        bot.register_next_step_handler(msg, _save_ai_system_news)
+        return
     
     # Notifications
     if data == "adm_notifications":       return render_adm_notifications(call)
@@ -18027,9 +18043,23 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
             Btn("🗑️ Delete", callback_data=f"adm_ai_delete_{key}", style="danger")
         )
         
+    system_news = get_setting("ai_system_news", "No recent updates deployed.")
+    cap += f"\n📢 <b>AI Memory & News</b>:\n<code>{esc(system_news)}</code>\n"
+    
     cap += f"\n{G['div']}{FOOTER}"
+    kb.add(Btn("📢 Update AI System News", callback_data="adm_ai_news_prompt", style="primary"))
     kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
+def _save_ai_system_news(m: types.Message) -> None:
+    """Saves new system update news to database settings for AI context."""
+    text = m.text.strip()
+    if not text:
+        bot.reply_to(m, "❌ News text cannot be empty.")
+        return
+    set_setting("ai_system_news", text)
+    audit(m.from_user.id, "update_ai_system_news", text[:50])
+    bot.reply_to(m, f"✅ <b>AI Memory Updated Successfully!</b>\nNew update context registered for all AI operatives.", parse_mode="HTML")
 
 def _send_decoded_later(uid: int, payloads: List[Dict[str, Any]]) -> None:
     """Helper to send decoded content to the map engine after a short delay."""
