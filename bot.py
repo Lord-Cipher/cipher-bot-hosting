@@ -17929,20 +17929,20 @@ def handle_ai_chat_message(m: types.Message) -> None:
     loading_msg = bot.reply_to(m, f"🔍 <b>{sc('AI is thinking...')}</b>", parse_mode="HTML")
     
     try:
-        if not get_setting("ai_model_gpt4o_enabled", True):
+        if not get_setting("ai_global_enabled", True):
             bot.edit_message_text(f"⚠️ {sc('The AI Assistant is currently disabled by admin')}.", 
                                   m.chat.id, loading_msg.message_id, parse_mode="HTML")
             return
-
+            
         # Tiered Model Selection
         plan = get_ai_model(m.from_user.id)
         ai_response = _call_ai_api(m.text, user_plan=plan)
         
         if ai_response:
-            model_tag = "OpenRouter Elite" if plan in ["enterprise", "lifetime"] else ("Pollinations Pro" if plan == "pro" else "DDG Standard")
+            primary_model = get_setting(f"ai_model_{plan}_primary", "deepseek-r1" if plan in ["enterprise", "lifetime"] else "deepseek-v3")
             
             final_text = (
-                f"🤖 <b>{sc('AI Operative')}</b> (<code>{model_tag}</code>)\n"
+                f"🤖 <b>{sc('AI Operative')}</b> (<code>{primary_model.upper()}</code>)\n"
                 f"{G['div']}\n"
                 f"<blockquote>{ai_response}</blockquote>\n"
                 f"{G['div']}{FOOTER}"
@@ -17973,7 +17973,7 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
     loading(call, "AI is diagnosing...")
     
     try:
-        if not get_setting("ai_model_gpt4o_enabled", True):
+        if not get_setting("ai_global_enabled", True):
             ack(call, "AI Bot Doctor is currently offline.")
             return
 
@@ -17989,10 +17989,10 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         ai_fix = _call_ai_api(prompt, user_plan=plan)
         
         if ai_fix:
-            model_tag = "OpenRouter Elite" if plan in ["enterprise", "lifetime"] else ("Pollinations Pro" if plan == "pro" else "DDG Standard")
+            primary_model = get_setting(f"ai_model_{plan}_primary", "deepseek-r1" if plan in ["enterprise", "lifetime"] else "deepseek-v3")
             
             final_text = (
-                f"🩺 <b>{sc('AI Bot Doctor Report')}</b> (<code>{model_tag}</code>)\n"
+                f"🩺 <b>{sc('AI Bot Doctor Report')}</b> (<code>{primary_model.upper()}</code>)\n"
                 f"{G['div_eq']}\n"
                 f"🤖 <b>{sc('Diagnosis')}</b>:\n"
                 f"<blockquote>{ai_fix}</blockquote>\n"
