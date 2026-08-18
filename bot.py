@@ -2204,23 +2204,23 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         Btn(f"  Mʏ Bᴏᴛꜱ",   callback_data="menu_bots",     style="primary"),
-        Btn(f" Uᴘʟᴏᴀᴅ Bᴏᴛ",   callback_data="menu_upload",   style="primary"),
+        Btn(f" Uᴘʟᴏᴀᴅ Bᴏᴛ",   callback_data="menu_upload",   style="success"),
     )
     kb.add(
         Btn(f"Pʟᴀɴꜱ",        callback_data="menu_plans",    style="primary"),
-        Btn(f" Bᴜʏ Pʟᴀɴ",    callback_data="menu_buy",      style="primary"),
+        Btn(f" Bᴜʏ Pʟᴀɴ",    callback_data="menu_buy",      style="success"),
     )
     kb.add(
         Btn(f"Rᴇꜰᴇʀʀᴀʟ",    callback_data="menu_referral", style="primary"),
         Btn(f"Pʀᴏꜰɪʟᴇ",      callback_data="menu_profile",  style="primary"),
     )
     kb.add(
-        Btn(f" Wᴀʟʟᴇᴛ",     callback_data="menu_wallet",   style="primary"),
+        Btn(f" Wᴀʟʟᴇᴛ",     callback_data="menu_wallet",   style="success"),
         Btn(f"Tɪᴄᴋᴇᴛꜱ",    callback_data="menu_tickets",  style="primary"),
     )
     if bool(get_setting("trial_enabled", True)):
         kb.add(
-            Btn(f" Fʀᴇᴇ Tʀɪᴀʟ",    callback_data="menu_trial",    style="primary"),
+            Btn(f" Fʀᴇᴇ Tʀɪᴀʟ",    callback_data="menu_trial",    style="success"),
             Btn(f" Cᴏᴜᴘᴏɴ",        callback_data="menu_coupon",   style="primary"),
         )
     else:
@@ -14456,7 +14456,7 @@ def render_bots_menu(call: types.CallbackQuery) -> None:
             mark = G["play"] if running else G["stop"]
             src_mark = " \U0001f419" if b.get("source") in ("github", "github_browser") else ""
             kb.add(Btn(f"{mark}  {sc(b['name'])[:30]}{src_mark}",
-                       callback_data=f"bot_view_{b['_id']}"))
+                       callback_data=f"bot_view_{b['_id']}", style="primary"))
     kb.add(
         Btn(f"{G['plus']}  {sc('Upload')}", callback_data="menu_upload", style="success"),
         Btn("\U0001f419  From GitHub",      callback_data="menu_gh_host", style="primary"),
@@ -14672,10 +14672,10 @@ def render_wallet(call: types.CallbackQuery) -> None:
         f"{sc('Top up by sending payment proof. Admin will credit your wallet')}.{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup()
-    kb.add(Btn(f"{G['plus']}  {sc('Top Up')}", callback_data="wallet_topup"))
+    kb.add(Btn(f"{G['plus']}  {sc('Top Up')}", callback_data="wallet_topup", style="success"))
     if u.get("plan") not in ("free", None):
-        kb.add(Btn(f"{G['spark']}  {sc('Gift Plan')}", callback_data="wallet_gift"))
-    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main"))
+        kb.add(Btn(f"{G['spark']}  {sc('Gift Plan')}", callback_data="wallet_gift", style="success"))
+    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="primary"))
     show_menu(call.message.chat.id, PHOTOS["wallet"], cap, kb, call=call)
 
 
@@ -14858,10 +14858,10 @@ def render_user_tickets(call: types.CallbackQuery) -> None:
     )
     kb = types.InlineKeyboardMarkup()
     for t in mine:
-        kb.add(Btn(f"#{t['id']} {esc(t.get('subject', ''))[:25]}", callback_data=f"ticket_view_{t['id']}"))
+        kb.add(Btn(f"#{t['id']} {esc(t.get('subject', ''))[:25]}", callback_data=f"ticket_view_{t['id']}", style="primary"))
     kb.add(
-        Btn(f"{G['plus']}  {sc('Open Ticket')}", callback_data="ticket_open"),
-        Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main"),
+        Btn(f"{G['plus']}  {sc('Open Ticket')}", callback_data="ticket_open", style="success"),
+        Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="primary"),
     )
     show_menu(call.message.chat.id, PHOTOS.get("ticket", PHOTOS["main"]), cap, kb, call=call)
 
@@ -14896,10 +14896,10 @@ def render_ticket_view(call: types.CallbackQuery, tid: str) -> None:
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        Btn(f"{G['fwd']}  {sc('Reply')}", callback_data=f"ticket_reply_{tid}"),
-        Btn(f"{G['no']}  {sc('Close')}", callback_data=f"ticket_close_{tid}"),
+        Btn(f"{G['fwd']}  {sc('Reply')}", callback_data=f"ticket_reply_{tid}", style="success"),
+        Btn(f"{G['no']}  {sc('Close')}", callback_data=f"ticket_close_{tid}", style="danger"),
     )
-    kb.add(Btn(f"{G['back']}  {sc('Tickets')}", callback_data="menu_tickets"))
+    kb.add(Btn(f"{G['back']}  {sc('Tickets')}", callback_data="menu_tickets", style="primary"))
     show_text(call.message.chat.id, cap, kb, call=call)
 
 
@@ -15579,8 +15579,8 @@ def render_adm_tickets(call: types.CallbackQuery) -> None:
     )
     kb = types.InlineKeyboardMarkup()
     for t in open_t:
-        kb.add(Btn(f"{G['eye']}  #{t['id']}", callback_data=f"ticket_view_{t['id']}"))
-    kb.add(Btn(f"{G['back']}  {sc('Admin')}", callback_data="menu_admin"))
+        kb.add(Btn(f"{G['eye']}  #{t['id']}", callback_data=f"ticket_view_{t['id']}", style="primary"))
+    kb.add(Btn(f"{G['back']}  {sc('Admin')}", callback_data="menu_admin", style="primary"))
     show_menu(call.message.chat.id, PHOTOS.get("ticket", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -15741,7 +15741,7 @@ def render_adm_maintenance(call: types.CallbackQuery) -> None:
     kb.add(Btn(f"{'Disable' if on else 'Enable'} Maintenance",
                callback_data="adm_maint_toggle",
                style="danger" if on else "success"))
-    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin"))
+    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="primary"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -15895,8 +15895,8 @@ def render_adm_plans(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     for k, v in PLAN_LIMITS.items():
         kb.add(Btn(f"\u270f\ufe0f  {sc(v['name'])}", callback_data=f"adm_plan_edit_{k}"))
-    kb.add(Btn("\u21ba  Reset All Defaults", callback_data="adm_set_plans_reset"))
-    kb.add(Btn(f"{G['back']}  Settings", callback_data="adm_settings"))
+    kb.add(Btn("\u21ba  Reset All Defaults", callback_data="adm_set_plans_reset", style="danger"))
+    kb.add(Btn(f"{G['back']}  Settings", callback_data="adm_settings", style="primary"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -15926,7 +15926,7 @@ def render_adm_plan_edit(call: types.CallbackQuery, key: str) -> None:
         Btn("\u270f\ufe0f  Rename", callback_data=f"adm_plan_set_name_{key}"),
         Btn("\U0001f4b2  Set Price", callback_data=f"adm_plan_set_price_{key}"),
     )
-    kb.add(Btn(f"{G['back']}  All Plans", callback_data="adm_set_plans"))
+    kb.add(Btn(f"{G['back']}  All Plans", callback_data="adm_set_plans", style="primary"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
@@ -17290,7 +17290,7 @@ def cmd_admin(m: types.Message) -> None:
         bot.reply_to(m, f"{G['no']} Admin only."); return
     get_or_create_user(m.from_user)
     kb = types.InlineKeyboardMarkup()
-    kb.add(Btn(f"{G['shield']}  Admin Panel", callback_data="menu_admin"))
+    kb.add(Btn(f"{G['shield']}  Admin Panel", callback_data="menu_admin", style="danger"))
     bot.send_message(m.chat.id,
         f"<b>{G['shield']} Admin Panel</b>", parse_mode="HTML", reply_markup=kb)
 
