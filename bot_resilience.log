@@ -1,0 +1,28 @@
+
+══════════════════════════════════════════════════
+ 🛠️  CIPHER SYSTEM BOOT: ENVIRONMENT CHECK
+══════════════════════════════════════════════════
+ 🤖 BOT_TOKEN:      ✅ LOADED (8854...7VSM)
+ 👤 OWNER_ID:      ✅ LOADED (8065...3971)
+ 💳 OXAPAY_KEY:    ✅ LOADED (ZMUB...F4YL)
+ 📢 ANNOUNCE_CH:   ❌ NOT SET
+ 🌐 PORT:          10460 (Default)
+══════════════════════════════════════════════════
+
+================================================================
+   ᶜᴵᴾᴴᴱᴿ ᵀᴱᶜᴴ ᴴᴼˢᵀ v2.1
+   owner id    : 8065173971
+   gh backup   : off
+   tg bkp ch   : —
+   announce ch : —
+================================================================
+[sys] keepalive server started on port 10460
+[sys] public url detected: https://10460-ifdszhph8bcyi096anya7-eb75fb27.us2.manus.computer
+ * Serving Flask app 'bot'
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:10460
+ * Running on http://169.254.0.21:10460
+[33mPress CTRL+C to quit[0m
+[bot] webhook enabled: https://10460-ifdszhph8bcyi096anya7-eb75fb27.us2.manus.computer/tg-webhook/8854808821:AAF4Ep1MVWJhG7lLIT4ElAknZHKPwFH7VSM

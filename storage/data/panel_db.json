@@ -1,5 +1,31 @@
 {
-  "users": {},
+  "users": {
+    "8065173971": {
+      "_id": 8065173971,
+      "name": "𝐕𝖆𝖓𝖙𝖍𝖊𝖝",
+      "username": "vanthex_ciph3r",
+      "plan": "free",
+      "plan_expires": null,
+      "joined": "2026-08-18T22:46:45.542122+00:00",
+      "last_seen": "2026-08-18T22:48:59.762316+00:00",
+      "banned": false,
+      "ban_reason": "",
+      "wallet": 0,
+      "kyc": false,
+      "verified": false,
+      "verified_at": null,
+      "ref_by": null,
+      "ref_count": 0,
+      "ref_credit": 0,
+      "trial_used": false,
+      "bot_slots_bonus": 0,
+      "stats": {
+        "commands": 0,
+        "bots_uploaded": 0,
+        "logins": 8
+      }
+    }
+  },
   "bots": {},
   "payments": [],
   "admins": {},
@@ -10,5 +36,14 @@
   "notes": {},
   "rate_violations": {},
   "scan_log": [],
-  "notifications": []
+  "notifications": [
+    {
+      "id": "b5fc52ad",
+      "ts": "2026-08-18T22:46:46.751084+00:00",
+      "type": "SYSTEM",
+      "msg": "New user registered: 𝐕𝖆𝖓𝖙𝖍𝖊𝖝 (UID: 8065173971)",
+      "uid": "8065173971",
+      "read": false
+    }
+  ]
 }
