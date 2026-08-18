@@ -9677,6 +9677,8 @@ def on_document(m: types.Message) -> None:
     if not require_verified(m.chat.id, uid):
         return
     st = USER_STATES.get(uid) or {}
+    if st.get("flow") == "ai_chat":
+        return _handle_ai_chat_document(m)
     if st.get("flow") == "await_payment_proof":
         return _handle_payment_proof(m, st)
     if st.get("flow") == "await_topup_proof":
@@ -18140,9 +18142,82 @@ def _send_decoded_later(uid: int, payloads: List[Dict[str, Any]]) -> None:
     threading.Thread(target=_bg_send, daemon=True).start()
 
 def get_ai_model(uid: int) -> str:
-    """Determine the AI plan tier for the user."""
+    """Determine the AI plan tier for the user, accounting for active free trials."""
     u = db_load_ro()["users"].get(str(uid), {})
+    
+    # Check if user has an active trial
+    try:
+        value = u.get("trial_active_until")
+        if value:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if dt > now_utc():
+                trial_plan = get_setting("trial_plan", "pro")
+                return trial_plan
+    except Exception:
+        pass
+        
     return u.get("plan", "free")
+
+def _handle_ai_chat_document(m: types.Message) -> None:
+    """Extracts code from uploaded file or zip and sends to AI for analysis."""
+    doc = m.document
+    fname = doc.file_name or "file.py"
+    loading_msg = bot.reply_to(m, f"🔍 <b>{sc('AI is analyzing file/archive...')}: {esc(fname)}</b>", parse_mode="HTML")
+    
+    code_content = ""
+    try:
+        file_info = bot.get_file(doc.file_id)
+        raw = bot.download_file(file_info.file_path)
+        
+        if fname.endswith(".zip"):
+            with zipfile.ZipFile(io.BytesIO(raw), "r") as z:
+                extracted_texts = []
+                for name in z.namelist():
+                    if any(name.endswith(ext) for ext in (".py", ".js", ".json", ".env", ".txt", ".md")):
+                        try:
+                            with z.open(name) as f:
+                                snippet = f.read().decode("utf-8", errors="ignore")
+                                extracted_texts.append(f"--- FILE: {name} ---\n{snippet[:2000]}")
+                        except Exception:
+                            pass
+                code_content = "\n\n".join(extracted_texts[:5]) # Limit to 5 files
+        else:
+            code_content = raw.decode("utf-8", errors="ignore")
+    except Exception as e:
+        bot.edit_message_text(f"❌ {sc('Could not read file')}: <code>{esc(e)}</code>", m.chat.id, loading_msg.message_id, parse_mode="HTML")
+        return
+        
+    if not code_content.strip():
+        bot.edit_message_text(f"⚠️ {sc('File is empty or contains no readable text code.')}", m.chat.id, loading_msg.message_id, parse_mode="HTML")
+        return
+        
+    prompt = f"Please analyze the following code file ({fname}) submitted by the user. Give a professional breakdown, check for bugs or logic issues, and provide solutions:\n\n{code_content[:4000]}"
+    
+    try:
+        plan = get_ai_model(m.from_user.id)
+        ai_response = _call_ai_api(prompt, user_plan=plan)
+        
+        if ai_response:
+            primary_model = get_setting(f"ai_model_{plan}_primary", "deepseek-r1" if plan in ["enterprise", "lifetime"] else "deepseek-v3")
+            clean_res = re.sub(r'<(think|thought)>.*?</\1>', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
+            clean_res = re.sub(r'<(think|thought)>', '', clean_res, flags=re.IGNORECASE).strip()
+            
+            final_text = (
+                f"🤖 <b>{sc('AI File Analysis')}</b> (<code>{primary_model.upper()}</code>)\n"
+                f"📂 <code>{esc(fname)}</code>\n"
+                f"{G['div']}\n"
+                f"<blockquote>{esc(clean_res)}</blockquote>\n"
+                f"{G['div']}{FOOTER}"
+            )
+            try:
+                bot.edit_message_text(final_text, m.chat.id, loading_msg.message_id, parse_mode="HTML")
+            except Exception:
+                bot.edit_message_text(f"🤖 AI File Analysis ({primary_model.upper()}) - {fname}\n---\n{clean_res}", m.chat.id, loading_msg.message_id)
+        else:
+            bot.edit_message_text(f"⚠️ {sc('AI is currently recalibrating. Please try again.')}", m.chat.id, loading_msg.message_id, parse_mode="HTML")
+    except Exception as e:
+        print(f"[ai_doc] error: {e}", flush=True)
+        bot.edit_message_text(f"❌ {sc('Connection to AI uplink lost.')}", m.chat.id, loading_msg.message_id, parse_mode="HTML")
 
 def render_adm_notifications(call: types.CallbackQuery, n_filter: str = "ALL") -> None:
     """Render the Admin Notification Center."""
