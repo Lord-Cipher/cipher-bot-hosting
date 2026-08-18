@@ -1692,8 +1692,8 @@ def maybe_auto_ban(uid: int, reason: str) -> None:
 #  8. BOT INSTANCE  +  KEEP-ALIVE  WEB SERVER
 # ═════════════════════════════════════════════════════════════════
 
-telebot.apihelper.CONNECT_TIMEOUT = 30
-telebot.apihelper.READ_TIMEOUT = 30
+telebot.apihelper.CONNECT_TIMEOUT = 60
+telebot.apihelper.READ_TIMEOUT = 60
 # Increased worker threads to prevent update backlog during slow AI calls
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=20)
 
