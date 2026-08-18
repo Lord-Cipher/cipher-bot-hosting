@@ -17956,13 +17956,22 @@ def handle_ai_chat_message(m: types.Message) -> None:
         if ai_response:
             primary_model = get_setting(f"ai_model_{plan}_primary", "deepseek-r1" if plan in ["enterprise", "lifetime"] else "deepseek-v3")
             
+            # Sanitize AI response: remove unsupported tags like <think>
+            clean_res = re.sub(r'<(think|thought)>.*?</\1>', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
+            clean_res = re.sub(r'<(think|thought)>', '', clean_res, flags=re.IGNORECASE)
+            clean_res = clean_res.strip()
+            
             final_text = (
                 f"🤖 <b>{sc('AI Operative')}</b> (<code>{primary_model.upper()}</code>)\n"
                 f"{G['div']}\n"
-                f"<blockquote>{ai_response}</blockquote>\n"
+                f"<blockquote>{esc(clean_res)}</blockquote>\n"
                 f"{G['div']}{FOOTER}"
             )
-            bot.edit_message_text(final_text, m.chat.id, loading_msg.message_id, parse_mode="HTML")
+            try:
+                bot.edit_message_text(final_text, m.chat.id, loading_msg.message_id, parse_mode="HTML")
+            except Exception:
+                # Fallback to plain text if HTML parsing still fails
+                bot.edit_message_text(f"🤖 AI Operative ({primary_model.upper()})\n---\n{clean_res}", m.chat.id, loading_msg.message_id)
         else:
             bot.edit_message_text(f"⚠️ {sc('AI is currently recalibrating. Please try again in a moment')}.", 
                                   m.chat.id, loading_msg.message_id, parse_mode="HTML")
@@ -18006,14 +18015,21 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         if ai_fix:
             primary_model = get_setting(f"ai_model_{plan}_primary", "deepseek-r1" if plan in ["enterprise", "lifetime"] else "deepseek-v3")
             
+            # Sanitize AI response
+            clean_fix = re.sub(r'<(think|thought)>.*?</\1>', '', ai_fix, flags=re.DOTALL | re.IGNORECASE)
+            clean_fix = re.sub(r'<(think|thought)>', '', clean_fix, flags=re.IGNORECASE).strip()
+            
             final_text = (
                 f"🩺 <b>{sc('AI Bot Doctor Report')}</b> (<code>{primary_model.upper()}</code>)\n"
                 f"{G['div_eq']}\n"
                 f"🤖 <b>{sc('Diagnosis')}</b>:\n"
-                f"<blockquote>{ai_fix}</blockquote>\n"
+                f"<blockquote>{esc(clean_fix)}</blockquote>\n"
                 f"{G['div']}{FOOTER}"
             )
-            show_text(call.message.chat.id, final_text, back_kb(f"bot_view_{bot_id}", "Bot"), call=call)
+            try:
+                show_text(call.message.chat.id, final_text, back_kb(f"bot_view_{bot_id}", "Bot"), call=call)
+            except Exception:
+                show_text(call.message.chat.id, f"🩺 AI Bot Doctor Report ({primary_model.upper()})\n---\n{clean_fix}", back_kb(f"bot_view_{bot_id}", "Bot"), call=call)
         else:
             ack(call, "AI Doctor is currently unavailable.")
             

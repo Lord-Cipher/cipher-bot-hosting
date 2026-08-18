@@ -4,10 +4,10 @@
       "_id": 8065173971,
       "name": "𝐕𝖆𝖓𝖙𝖍𝖊𝖝",
       "username": "vanthex_ciph3r",
-      "plan": "free",
-      "plan_expires": null,
+      "plan": "pro",
+      "plan_expires": "2026-08-20T21:48:56.738924+00:00",
       "joined": "2026-08-18T21:26:26.882369+00:00",
-      "last_seen": "2026-08-18T21:37:44.125126+00:00",
+      "last_seen": "2026-08-18T21:49:28.724382+00:00",
       "banned": false,
       "ban_reason": "",
       "wallet": 0,
@@ -17,19 +17,29 @@
       "ref_by": null,
       "ref_count": 0,
       "ref_credit": 0,
-      "trial_used": false,
+      "trial_used": true,
       "bot_slots_bonus": 0,
       "stats": {
         "commands": 0,
         "bots_uploaded": 0,
-        "logins": 18
-      }
+        "logins": 38
+      },
+      "trial_epoch": 1,
+      "trial_active_until": "2026-08-20T21:48:56.738367+00:00",
+      "last_expiry_warn": 1
     }
   },
   "bots": {},
   "payments": [],
   "admins": {},
-  "audit": [],
+  "audit": [
+    {
+      "ts": "2026-08-18T21:48:57.182070+00:00",
+      "uid": 0,
+      "action": "trial_grant",
+      "detail": "uid=8065173971 plan=pro hours=48 epoch=1"
+    }
+  ],
   "coupons": {},
   "tickets": {},
   "scheduled_broadcasts": [],
