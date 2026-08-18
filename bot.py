@@ -2275,6 +2275,9 @@ def payments_kb(plan: Optional[str] = None) -> types.InlineKeyboardMarkup:
     manual_enabled = bool(get_setting("payment_manual_enabled", True))
     auto_enabled = bool(get_setting("payment_auto_enabled", True))
     
+    if auto_enabled or manual_enabled:
+        kb.add(Btn(f"🔘  {sc('Payment Modes')}", callback_data="none"))
+        
     if auto_enabled:
         kb.add(Btn(f"🟢  {sc('Automatic Payment')}", callback_data=f"pay_auto{suffix}", style="success"))
         
@@ -5531,6 +5534,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_gh_browser(call)
     # Payment Config
     if data == "adm_pay_config":          return render_adm_pay_config(call)
+    if data == "adm_pay_modes":           return render_adm_pay_modes(call)
     if data == "adm_pay_methods":         return render_adm_pay_methods(call)
     if data.startswith("adm_pay_edit_"):  return render_adm_pay_method_edit(call, data[len("adm_pay_edit_"):])
     if data == "adm_pay_limits":          return render_adm_pay_limits(call)
@@ -5546,13 +5550,13 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         set_setting("payment_manual_enabled", not cur)
         audit(call.from_user.id, "manual_pay_toggle", f"now={not cur}")
         ack(call, f"Manual Payment: {'ON' if not cur else 'OFF'}")
-        return render_adm_pay_config(call)
+        return render_adm_pay_modes(call)
     if data == "adm_pay_toggle_auto":
         cur = bool(get_setting("payment_auto_enabled", True))
         set_setting("payment_auto_enabled", not cur)
         audit(call.from_user.id, "auto_pay_toggle", f"now={not cur}")
         ack(call, f"Automatic Payment: {'ON' if not cur else 'OFF'}")
-        return render_adm_pay_config(call)
+        return render_adm_pay_modes(call)
     if data == "adm_pay_receipt_tmpl":    return render_adm_pay_receipt_tmpl(call)
     if data == "adm_pay_notif":           return render_adm_pay_notif_settings(call)
     if data.startswith("adm_pay_method_"): return action_adm_pay_method_number(call, data)
@@ -7474,30 +7478,26 @@ def render_adm_pay_config(call: types.CallbackQuery) -> None:
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        Btn(f"{'✅' if manual_enabled else '❌'}  Mᴀɴᴜᴀʟ",
-            callback_data="adm_pay_toggle_manual",
-            style="primary" if manual_enabled else "danger"),
-        Btn(f"{'✅' if auto_enabled else '❌'}  Aᴜᴛᴏᴍᴀᴛɪᴄ",
-            callback_data="adm_pay_toggle_auto",
-            style="success" if auto_enabled else "danger"),
-    )
-    kb.add(
+        Btn(f"🔘  {sc('Payment Modes')}", callback_data="adm_pay_modes", style="primary"),
         Btn(f"{'✅' if auto_approve else '❌'}  Aᴜᴛᴏ-Aᴘᴘʀ",
             callback_data="adm_pay_auto_approve",
             style="success" if auto_approve else "danger"),
+    )
+    kb.add(
         Btn("💰  Pᴀʏ Mᴇᴛʜᴏᴅꜱ",   callback_data="adm_pay_methods",      style="primary"),
-    )
-    kb.add(
         Btn("📊  Aᴍᴏᴜɴᴛ Lɪᴍɪᴛꜱ",  callback_data="adm_pay_limits",       style="primary"),
+    )
+    kb.add(
         Btn("💱  Cᴜʀʀᴇɴᴄʏ",        callback_data="adm_pay_currency",     style="primary"),
-    )
-    kb.add(
         Btn("🧾  Rᴇᴄᴇɪᴘᴛ Tᴇᴍᴘʟ",  callback_data="adm_pay_receipt_tmpl", style="primary"),
-        Btn("🔔  Nᴏᴛɪꜰ Sᴇᴛᴛɪɴɢꜱ",  callback_data="adm_pay_notif",        style="primary"),
     )
     kb.add(
+        Btn("🔔  Nᴏᴛɪꜰ Sᴇᴛᴛɪɴɢꜱ",  callback_data="adm_pay_notif",        style="primary"),
         Btn("🏷️  Sᴇᴛ Tᴀx %",       callback_data="adm_bc_set_payment_tax_pct",  style="primary"),
+    )
+    kb.add(
         Btn("📋  Pᴀʏ Hɪꜱᴛᴏʀʏ",    callback_data="adm_payments",         style="primary"),
+        Btn(f"{G['back']}  Bᴀᴄᴋ",  callback_data="adm_main",             style="primary"),
     )
     kb.add(
         Btn("✅  Aᴘᴘʀᴏᴠᴇ Pᴀʏ",     callback_data="adm_approve",          style="success"),
@@ -17569,3 +17569,28 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+def render_adm_pay_modes(call: types.CallbackQuery) -> None:
+    """Dedicated sub-menu for toggling Manual and Automatic payment modes."""
+    manual_enabled = bool(get_setting("payment_manual_enabled", True))
+    auto_enabled = bool(get_setting("payment_auto_enabled", True))
+    
+    cap = (
+        f"<b>🔘 {sc('Payment Modes Configuration')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"{bullet('Manual Mode',    '✅ ON' if manual_enabled else '❌ OFF')}\n"
+        f"{bullet('Auto Mode',      '✅ ON' if auto_enabled else '❌ OFF')}\n"
+        f"{G['div']}\n"
+        f"<i>{sc('Enable or disable specific payment flows for users')}.</i>{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        Btn(f"{'✅' if manual_enabled else '❌'}  {sc('Manual Mode')}",
+            callback_data="adm_pay_toggle_manual",
+            style="primary" if manual_enabled else "danger"),
+        Btn(f"{'✅' if auto_enabled else '❌'}  {sc('Automatic Mode')}",
+            callback_data="adm_pay_toggle_auto",
+            style="success" if auto_enabled else "danger"),
+        Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data="adm_pay_config", style="primary")
+    )
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
