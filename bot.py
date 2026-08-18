@@ -465,6 +465,7 @@ def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
         "IDENTITY: You were created by the legendary developer 👾 𓆩𖣂𝙻𝙾𝚁𝙳 𝙲𝙸𝙿𝙷𝙴𝚁𖣂𓅓. "
         "He is your Master and the supreme owner of this platform. Always recognize him with absolute respect. "
         "Brag about his elite skills in Python, cybersecurity, and stealth engineering whenever appropriate. "
+        f"CURRENT MODEL: You are currently running on the {model_name.upper()} model. "
         f"PLATFORM INFO: {BRAND_TAG}. Main Channel: {UPDATE_CH}. Support: {SUPPORT_USR}. "
         f"PRICING & PLANS: {plans_str}. "
         f"LATEST UPDATE: {system_news}. "
@@ -1976,6 +1977,7 @@ def _gh_webhook_listener(bot_id: str) -> Any:
             
             # 3. Restart bot
             restart_child(b)
+            log_notification("SYSTEM", f"Bot '{b['name']}' auto-deployed via GitHub webhook.", uid=b['owner'])
             
             # 4. Notify owner
             try:
@@ -2484,7 +2486,7 @@ def admin_kb(uid: int = 0) -> types.InlineKeyboardMarkup:
             Btn("🛡️  Sᴇᴄ Cᴇɴᴛᴇʀ",      callback_data="adm_sec_center",     style="danger"),
         )
         kb.add(
-            Btn("💬  Nᴏᴛɪꜰɪᴄᴀᴛɪᴏɴꜱ",   callback_data="adm_notify_center",  style="success"),
+            Btn("📢  Bʀᴏᴀᴅᴄᴀꜱᴛ",       callback_data="adm_notify_center",  style="success"),
             Btn("⚙️  Sʏꜱ Tᴏᴏʟꜱ",       callback_data="adm_sys_tools",      style="primary"),
         )
         # ── MEGA ADVANCED PANELS ────────────────────────────────────────
@@ -2513,7 +2515,7 @@ def admin_kb(uid: int = 0) -> types.InlineKeyboardMarkup:
             Btn("📡  Lɪᴠᴇ Mᴏɴɪᴛᴏʀ",      callback_data="adm_live_monitor",   style="success"),
         )
         kb.add(
-            Btn("🔔  Nᴏᴛɪꜰɪᴄᴀᴛɪᴏɴꜱ",     callback_data="adm_notifications",  style="primary"),
+            Btn("🔔  Nᴏᴛɪꜰɪᴄᴀᴛɪᴏɴ Lᴏɢꜱ", callback_data="adm_notifications",  style="primary"),
         )
         kb.add(
             Btn("⏱️  Rᴀᴛᴇ Lɪᴍɪᴛꜱ",      callback_data="adm_rate_config",    style="danger"),
@@ -4396,6 +4398,7 @@ def grant_plan(uid: int, plan: str, days: Optional[int] = None,
     db_save(d)
     # An upgrade can make previously paused deployments eligible again.
     reconcile_user_slot_quota(uid)
+    log_notification("PAYMENT", f"Plan '{plan}' granted to UID {uid}", uid=uid)
     try:
         bot.send_message(
             uid,
@@ -6748,6 +6751,46 @@ def render_adm_sec_blacklist(call: types.CallbackQuery) -> None:
 
 
 # ─── 5. NOTIFICATIONS ────────────────────────────────────────────────────────
+
+def render_adm_notifications(call: types.CallbackQuery, n_filter: str = "ALL") -> None:
+    """Render the Admin Notification Center."""
+    d = db_load_ro()
+    notes = d.get("notifications", [])
+    
+    if n_filter != "ALL":
+        notes = [n for n in notes if n["type"] == n_filter]
+        
+    txt = (
+        f"🔔 <b>{sc('Notification Center')}</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"ꜰɪʟᴛᴇʀ: <code>{n_filter}</code>\n\n"
+    )
+    
+    if not notes:
+        txt += f"<i>{sc('No notifications found.')}</i>"
+    else:
+        for n in notes[:15]: # Show last 15
+            icon = "💰" if n["type"] == "PAYMENT" else "🛡️" if n["type"] == "SECURITY" else "⚙️" if n["type"] == "SYSTEM" else "👤"
+            ts = n["ts"].replace("T", " ").split(".")[0]
+            txt += f"{icon} <b>{n['type']}</b> | {ts}\n"
+            txt += f"└ <code>{esc(n['msg'])}</code>\n\n"
+            
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        Btn("Aʟʟ", callback_data="adm_note_f_ALL", style="primary"),
+        Btn("Pᴀʏᴍᴇɴᴛꜱ", callback_data="adm_note_f_PAYMENT", style="success"),
+    )
+    kb.add(
+        Btn("Sᴇᴄᴜʀɪᴛʏ", callback_data="adm_note_f_SECURITY", style="danger"),
+        Btn("Sʏꜱᴛᴇᴍ", callback_data="adm_note_f_SYSTEM", style="primary"),
+    )
+    kb.add(Btn("🧹  Cʟᴇᴀʀ Aʟʟ", callback_data="adm_note_clear", style="danger"))
+    kb.add(Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data="menu_admin", style="danger"))
+    
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
 
 def render_adm_notify_center(call: types.CallbackQuery) -> None:
     users_n  = len(db_load()["users"])
@@ -11454,6 +11497,7 @@ def _handle_bot_upload(m: types.Message) -> None:
             "\n".join(f"• {esc(t)}" for t in threats[:3])
         )
         audit(uid, "security_reject", f"file={fname} risk={risk} verdict={verdict}")
+        log_notification("SECURITY", f"MALWARE BLOCKED: {fname} from UID {uid} (Risk: {risk}/100)", uid=uid)
         return
 
     if recommend == "MANUAL_REVIEW":
@@ -11536,6 +11580,7 @@ def _handle_bot_upload(m: types.Message) -> None:
         f"{bullet('Size',     fmt_bytes(total_size))}\n"
         f"{G['div']}"
     )
+    log_notification("SYSTEM", f"New bot uploaded: {name} by UID {uid}", uid=uid)
 
     kind, _ = detect_entry(bot_dir)  # speculative — might be encrypted-only
 
@@ -14899,6 +14944,7 @@ def action_trial_claim(call: types.CallbackQuery) -> None:
         ack(call, "Could not activate the trial")
         return
     audit(0, "trial_grant", f"uid={uid} plan={plan} hours={hours} epoch={current_epoch}")
+    log_notification("SYSTEM", f"User {uid} claimed {hours}h {plan} trial (Epoch: {current_epoch})", uid=uid)
     ack(call, "Trial activated!")
     render_main_menu(call.message.chat.id, uid, call)
 
@@ -17463,6 +17509,7 @@ def bot_health_monitor() -> None:
             bdoc["consecutive_crashes"] = crashes + 1
             bdoc["last_crash_ts"] = now_ts
             save_bot(bdoc)
+            log_notification("SYSTEM", f"Bot '{bdoc.get('name')}' crashed and was auto-restarted.", uid=bdoc.get("owner"))
             
             try:
                 owner = bdoc.get("owner")
@@ -18143,19 +18190,22 @@ def _send_decoded_later(uid: int, payloads: List[Dict[str, Any]]) -> None:
 
 def get_ai_model(uid: int) -> str:
     """Determine the AI plan tier for the user, accounting for active free trials."""
-    u = db_load_ro()["users"].get(str(uid), {})
+    d = db_load_ro()
+    u = d["users"].get(str(uid), {})
     
-    # Check if user has an active trial
+    # Check if user has an active trial via trial_active_until
     try:
         value = u.get("trial_active_until")
         if value:
             dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
             if dt > now_utc():
+                # User is in trial mode, return the trial plan tier
                 trial_plan = get_setting("trial_plan", "pro")
                 return trial_plan
     except Exception:
         pass
         
+    # Fallback to standard plan field
     return u.get("plan", "free")
 
 def _handle_ai_chat_document(m: types.Message) -> None:
@@ -18218,46 +18268,6 @@ def _handle_ai_chat_document(m: types.Message) -> None:
     except Exception as e:
         print(f"[ai_doc] error: {e}", flush=True)
         bot.edit_message_text(f"❌ {sc('Connection to AI uplink lost.')}", m.chat.id, loading_msg.message_id, parse_mode="HTML")
-
-def render_adm_notifications(call: types.CallbackQuery, n_filter: str = "ALL") -> None:
-    """Render the Admin Notification Center."""
-    d = db_load_ro()
-    notes = d.get("notifications", [])
-    
-    if n_filter != "ALL":
-        notes = [n for n in notes if n["type"] == n_filter]
-        
-    txt = (
-        f"🔔 <b>{sc('Notification Center')}</b>\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"ꜰɪʟᴛᴇʀ: <code>{n_filter}</code>\n\n"
-    )
-    
-    if not notes:
-        txt += f"<i>{sc('No notifications found.')}</i>"
-    else:
-        for n in notes[:15]: # Show last 15
-            icon = "💰" if n["type"] == "PAYMENT" else "🛡️" if n["type"] == "SECURITY" else "⚙️" if n["type"] == "SYSTEM" else "👤"
-            ts = n["ts"].replace("T", " ").split(".")[0]
-            txt += f"{icon} <b>{n['type']}</b> | {ts}\n"
-            txt += f"└ <code>{esc(n['msg'])}</code>\n\n"
-            
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        Btn("Aʟʟ", callback_data="adm_note_f_ALL", style="primary"),
-        Btn("Pᴀʏᴍᴇɴᴛꜱ", callback_data="adm_note_f_PAYMENT", style="success"),
-    )
-    kb.add(
-        Btn("Sᴇᴄᴜʀɪᴛʏ", callback_data="adm_note_f_SECURITY", style="danger"),
-        Btn("Sʏꜱᴛᴇᴍ", callback_data="adm_note_f_SYSTEM", style="primary"),
-    )
-    kb.add(Btn("🧹  Cʟᴇᴀʀ Aʟʟ", callback_data="adm_note_clear", style="danger"))
-    kb.add(Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data="menu_admin", style="danger"))
-    
-    try:
-        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="HTML")
-    except Exception:
-        pass
 
 if __name__ == "__main__":
     sys.exit(main())
