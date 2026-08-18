@@ -441,52 +441,44 @@ Telegram bot patterns as malicious.
 CODE TO ANALYZE:
 """
 
-def _ai_scan_code(code: str, filename: str = "file.py") -> Optional[Dict[str, Any]]:
-    """Call OpenRouter free AI model to analyze code. Returns result dict or None on error."""
-    base_url = os.environ.get("AI_INTEGRATIONS_OPENROUTER_BASE_URL", "").rstrip("/")
-    api_key  = os.environ.get("AI_INTEGRATIONS_OPENROUTER_API_KEY", "no-key")
-    if not base_url:
+def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
+    """Calls Kaalix keyless API models."""
+    if not get_setting("ai_global_enabled", True):
         return None
-
-    # Limit code sent to AI — first 6000 chars covers most bots
-    code_snippet = code[:6000]
-    payload = _json.dumps({
-        "model": "google/gemma-4-31b-it:free",
-        "max_tokens": 512,
-        "temperature": 0.1,
-        "messages": [
-            {"role": "user", "content": f"{_AI_SCAN_PROMPT}{code_snippet}"}
-        ]
-    }).encode("utf-8")
-
-    req = _urllib_req.Request(
-        f"{base_url}/chat/completions",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST"
-    )
+    if not get_setting(f"ai_operative_{model_name}_enabled", True):
+        return None
     try:
-        with _urllib_req.urlopen(req, timeout=30) as resp:
-            body = _json.loads(resp.read())
-        content = body["choices"][0]["message"]["content"].strip()
-        # Strip markdown fences if any
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-        result = _json.loads(content)
-        return {
-            "ai_verdict":    result.get("verdict", "SAFE"),
-            "ai_risk_score": int(result.get("risk_score", 0)),
-            "ai_reason":     result.get("reason", ""),
-            "ai_threats":    result.get("threats", []),
-        }
-    except Exception as _ai_err:
-        print(f"[ai_scan] error: {_ai_err}", file=sys.stderr)
-        return None
+        url = f"https://r-bots-free-apis.co08.art/api/{model_name}"
+        r = requests.get(url, params={"q": prompt}, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("response") or data.get("result") or data.get("answer")
+    except Exception as e:
+        print(f"[kaalix] {model_name} error: {e}", flush=True)
+    return None
+
+def _ai_scan_code(code: str, filename: str = "file.py") -> Optional[Dict[str, Any]]:
+    """Keyless security scan using Kaalix reasoning models."""
+    prompt = f"{_AI_SCAN_PROMPT}\n{code[:4000]}"
+    res_text = _call_kaalix_model("deepseek-r1", prompt)
+    if not res_text:
+        res_text = _call_kaalix_model("gptlogic", prompt)
+    
+    if res_text:
+        try:
+            if "```" in res_text:
+                res_text = res_text.split("```")[1]
+                if res_text.startswith("json"): res_text = res_text[4:]
+            result = _json.loads(res_text.strip())
+            return {
+                "ai_verdict":    result.get("verdict", "SAFE"),
+                "ai_risk_score": int(result.get("risk_score", 0)),
+                "ai_reason":     result.get("reason", ""),
+                "ai_threats":    result.get("threats", []),
+            }
+        except Exception:
+            pass
+    return None
 
 
 def _combined_scan(file_path: str) -> dict:
@@ -5565,12 +5557,23 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     # Payment Config
     if data == "adm_pay_config":          return render_adm_pay_config(call)
     if data == "adm_ai_config":           return render_adm_ai_config(call)
+    if data == "adm_ai_toggle_global":
+        cur = bool(get_setting("ai_global_enabled", True))
+        set_setting("ai_global_enabled", not cur)
+        ack(call, f"Global AI: {'ON' if not cur else 'OFF'}")
+        return render_adm_ai_config(call)
     if data.startswith("adm_ai_toggle_"):
         model_key = data[len("adm_ai_toggle_"):]
-        cur = bool(get_setting(f"ai_model_{model_key}_enabled", True))
-        set_setting(f"ai_model_{model_key}_enabled", not cur)
+        cur = bool(get_setting(f"ai_operative_{model_key}_enabled", True))
+        set_setting(f"ai_operative_{model_key}_enabled", not cur)
         audit(call.from_user.id, f"ai_toggle_{model_key}", f"now={'off' if cur else 'on'}")
         ack(call, f"{model_key.upper()}: {'ON' if not cur else 'OFF'}")
+        return render_adm_ai_config(call)
+    if data.startswith("adm_ai_delete_"):
+        model_key = data[len("adm_ai_delete_"):]
+        set_setting(f"ai_operative_{model_key}_enabled", False)
+        audit(call.from_user.id, f"ai_delete_{model_key}", "deactivated")
+        ack(call, f"Operative {model_key} deactivated.")
         return render_adm_ai_config(call)
     
     # Notifications
@@ -11351,10 +11354,27 @@ def _handle_bot_upload(m: types.Message) -> None:
     # Runs BEFORE any file is saved, encrypted, or approved.
     _scan_msg = bot.reply_to(
         m,
-        f"{G['shield']} {sc('Security scan in progress...')}",
+        f"{G['shield']} {sc('Advanced Safety Protocol active')}...\n<code>[░░░░░░░░░░] 0% ({sc('Initializing check')})</code>",
         parse_mode="HTML",
     )
+    try:
+        time.sleep(0.3)
+        bot.edit_message_text(
+            f"{G['shield']} {sc('Advanced Safety Protocol active')}...\n<code>[████░░░░░░] 40% ({sc('Analyzing pattern structures')})</code>",
+            m.chat.id, _scan_msg.message_id, parse_mode="HTML"
+        )
+    except Exception: pass
+    
     scan      = _run_security_scan(files_added, uploader_uid=m.from_user.id)
+    
+    try:
+        time.sleep(0.3)
+        bot.edit_message_text(
+            f"{G['shield']} {sc('Advanced Safety Protocol active')}...\n<code>[████████░░] 80% ({sc('Deep layer verification')})</code>",
+            m.chat.id, _scan_msg.message_id, parse_mode="HTML"
+        )
+    except Exception: pass
+    time.sleep(0.3)
     recommend = scan.get("recommendation", "APPROVE")
     risk      = scan.get("risk_score", 0)
     verdict   = scan.get("verdict", "SAFE")
@@ -17706,90 +17726,35 @@ def _telemetry_loop():
 # ─── AI SERVICES ───────────────────────────────────────────────────────────
 
 def _call_ai_api(prompt: str, user_plan: str = "free") -> Optional[str]:
-    """Resilient AI call system using tiered elite providers based on user plan."""
-    if not get_setting("ai_model_gpt4o_enabled", True):
+    """Tiered AI call system routing through Kaalix models based on admin settings."""
+    if not get_setting("ai_global_enabled", True):
         return None
 
     p_low = prompt.lower().strip()
     
-    # 0. Instant Local Greetings (Bypasses network for speed)
+    # Instant local greetings for speed
     greetings = ["hello", "hi", "hey", "sup", "yo", "morning", "evening"]
     if any(p_low.startswith(g) for g in greetings) or len(p_low) < 4:
         return f"Hello, Commander! How may I assist you with your elite bot hosting today?"
 
-    # Tiered Strategy:
-    # All plans now prioritize OpenRouter if the key is present (most stable)
-    providers = ["openrouter", "pollinations", "duckduckgo"]
+    primary_key = f"ai_model_{user_plan}_primary"
+    fallback_key = f"ai_model_{user_plan}_fallback"
     
-    # Adjust order based on plan if keys are missing
-    if user_plan not in ["enterprise", "lifetime", "pro"]:
-        providers = ["duckduckgo", "pollinations", "openrouter"]
-
-    for provider in providers:
-        if not get_setting(f"ai_model_{provider}_enabled", True):
-            continue
-            
-        # 1. OpenRouter (Elite Performance - Working Key Integrated)
-        if provider == "openrouter":
-            or_key = os.environ.get("OPENROUTER_KEY", "your-key-here")
-            if or_key:
-                try:
-                    is_coding = any(k in p_low for k in ["python", "code", "fix", "error", "script", "write"])
-                    # Use Gemma 4 for all free requests as it's the most reliable
-                    or_model = "google/gemma-4-26b-a4b-it:free" 
-                    if is_coding and user_plan in ["enterprise", "lifetime"]:
-                        or_model = "poolside/laguna-s-2.1:free"
-                        
-                    headers = {"Authorization": f"Bearer {or_key}", "Content-Type": "application/json"}
-                    payload = {"model": or_model, "messages": [{"role": "user", "content": prompt}]}
-                    r = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=12)
-                    if r.status_code == 200:
-                        res = r.json()
-                        return res["choices"][0]["message"]["content"]
-                except Exception: pass
-
-        # 2. Pollinations (Pro Tiers / Fallback - Key Integrated)
-        if provider == "pollinations":
-            pol_key = os.environ.get("POLLINATIONS_KEY", "your-key-here")
-            try:
-                # Using the OpenAI-compatible endpoint for higher reliability
-                headers = {"Authorization": f"Bearer {pol_key}", "Content-Type": "application/json"}
-                payload = {
-                    "model": "openai", 
-                    "messages": [{"role": "user", "content": prompt}]
-                }
-                r = requests.post("https://gen.pollinations.ai/v1/chat/completions", json=payload, headers=headers, timeout=12)
-                if r.status_code == 200:
-                    res = r.json()
-                    return res["choices"][0]["message"]["content"]
-                elif r.status_code == 402: # Out of balance, try anonymous
-                    r_anon = requests.get(f"https://text.pollinations.ai/{requests.utils.quote(prompt)}", timeout=10)
-                    if r_anon.status_code == 200: return r_anon.text
-            except Exception: pass
-
-        # 3. DuckDuckGo AI (Stealth Fallback)
-        if provider == "duckduckgo":
-            try:
-                # Use simple GET for anonymous speed if DDG status is slow
-                r_ddg = requests.get(f"https://text.pollinations.ai/{requests.utils.quote(prompt)}?model=openai", timeout=10)
-                if r_ddg.status_code == 200: return r_ddg.text
-            except Exception: pass
-
-    # 4. Final Fallback: Rule-based Diagnostic
-    if any(k in p_low for k in ["crash", "error", "fix", "diagnostic", "logs", "failed"]):
-        return (
-            "🤖 <b>Elite Diagnostic Fallback</b>\n"
-            "I've analyzed your request locally. Common fixes:\n"
-            "1. Check if all libraries in `requirements.txt` are installed.\n"
-            "2. Ensure your `BOT_TOKEN` is correct in environment variables.\n"
-            "3. Verify that the script entry point matches your deployment config."
-        )
-
-    return (
-        "I am currently operating in **Low-Power Mode** due to an uplink disturbance. "
-        "I can still assist with bot deployments, security scans, and system diagnostics. "
-        "How can I help you move forward?"
-    )
+    default_primary = "deepseek-r1" if user_plan in ["enterprise", "lifetime"] else ("qwen" if user_plan == "pro" else "deepseek-v3")
+    default_fallback = "qwen" if user_plan in ["enterprise", "lifetime"] else ("deepseek-v3" if user_plan == "pro" else "llama-meta")
+    
+    primary_model = get_setting(primary_key, default_primary)
+    fallback_model = get_setting(fallback_key, default_fallback)
+    
+    res = _call_kaalix_model(primary_model, prompt)
+    if res:
+        return res
+        
+    res_fb = _call_kaalix_model(fallback_model, prompt)
+    if res_fb:
+        return res_fb
+        
+    return "I am currently operating in Low-Power Mode due to an uplink disturbance. Please try again shortly."
 
 def _ai_vision_verify(file_path: str, expected_amt: float) -> Dict[str, Any]:
     """
@@ -18026,35 +17991,43 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         ack(call, "Uplink to AI Doctor failed.")
 
 def render_adm_ai_config(call: types.CallbackQuery) -> None:
-    """Admin UI to manage AI providers and tiering."""
-    providers = {
-        "openrouter": "OpenRouter (Elite Tiers)",
-        "pollinations": "Pollinations (Pro Tiers)",
-        "duckduckgo": "DuckDuckGo (Free Tiers)",
-        "gpt4o": "Global AI Chat (Master)",
-        "flux": "AI Digital Seals (Visual)"
+    """Admin UI to manage AI Command Center and Operatives."""
+    global_on = bool(get_setting("ai_global_enabled", True))
+    
+    operatives = {
+        "deepseek-r1": "Deepseek-R1 (Elite Reasoning)",
+        "deepseek-v3": "Deepseek-V3 (High-Speed Chat)",
+        "qwen": "Qwen (Technical Logic)",
+        "gemini": "Gemini (Broad Knowledge)",
+        "gptlogic": "Gptlogic (Logic Analysis)",
+        "llama-meta": "Llama-Meta (General Chat)",
+        "cohere": "Cohere (Efficient Chat)"
     }
     
     cap = (
-        f"<b>🧠 {sc('AI Infrastructure Management')}</b>\n"
+        f"<b>🤖 {sc('AI Command Center')}</b>\n"
         f"{G['div_eq']}\n"
-        f"<i>{sc('Manage AI providers and global availability settings')}.</i>\n\n"
-        f"💎 <b>{sc('Current Tiering')}</b>:\n"
-        f"• {sc('Enterprise/Lifetime')}: OpenRouter Elite\n"
-        f"• {sc('Pro Plan')}: Pollinations Coder\n"
-        f"• {sc('Free/Basic')}: DuckDuckGo Anonymous\n\n"
+        f"<i>{sc('Manage Kaalix AI operatives and model routing')}.</i>\n\n"
+        f"🌐 <b>Global Status</b>: {'🟢 ACTIVE' if global_on else '🔴 OFFLINE'}\n\n"
+        f"💎 <b>Active Operatives</b>:\n"
     )
     
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    for key, name in providers.items():
-        is_on = bool(get_setting(f"ai_model_{key}_enabled", True))
-        status = "✅ ON" if is_on else "❌ OFF"
-        cap += f"{bullet(name, status)}\n"
-        kb.add(Btn(f"{'✅' if is_on else '❌'}  {sc(name)}", 
-                   callback_data=f"adm_ai_toggle_{key}", 
-                   style="success" if is_on else "danger"))
-    
-    cap += f"{G['div']}{FOOTER}"
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn(f"{'🟢' if global_on else '🔴'}  Global AI: {'ON' if global_on else 'OFF'}", 
+               callback_data="adm_ai_toggle_global", 
+               style="success" if global_on else "danger"))
+               
+    for key, name in operatives.items():
+        is_on = bool(get_setting(f"ai_operative_{key}_enabled", True))
+        status = "🟢 ON" if is_on else "🔴 OFF"
+        cap += f"• <code>{key}</code>: {status}\n"
+        
+        kb.add(
+            Btn(f"{'🟢' if is_on else '🔴'} {name[:18]}", callback_data=f"adm_ai_toggle_{key}", style="success" if is_on else "danger"),
+            Btn("🗑️ Delete", callback_data=f"adm_ai_delete_{key}", style="danger")
+        )
+        
+    cap += f"\n{G['div']}{FOOTER}"
     kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
