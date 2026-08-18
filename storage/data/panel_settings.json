@@ -10,5 +10,7 @@
     "commands": 0,
     "plan_upgrades": 0,
     "payments_received": 0
-  }
+  },
+  "webhook_enabled": true,
+  "public_url": "https://10460-ifdszhph8bcyi096anya7-eb75fb27.us2.manus.computer"
 }
