@@ -17576,15 +17576,6 @@ def main() -> int:
             print(f"[bot] poll error: {e}", flush=True)
             time.sleep(5)
 
-
-
-
-
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-
 def render_adm_pay_modes(call: types.CallbackQuery) -> None:
     """Dedicated sub-menu for toggling Manual and Automatic payment modes."""
     manual_enabled = bool(get_setting("payment_manual_enabled", True))
@@ -17656,3 +17647,6 @@ def _telemetry_loop():
 
 # Start telemetry thread
 threading.Thread(target=_telemetry_loop, daemon=True).start()
+
+if __name__ == "__main__":
+    sys.exit(main())
