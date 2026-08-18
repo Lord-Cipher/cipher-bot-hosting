@@ -2462,8 +2462,11 @@ def admin_kb(uid: int = 0) -> types.InlineKeyboardMarkup:
             Btn("🎯  Fᴇᴀᴛᴜʀᴇ Fʟᴀɢꜱ",    callback_data="adm_feature_flags",  style="primary"),
         )
         kb.add(
-            Btn("⏱️  Rᴀᴛᴇ Lɪᴍɪᴛꜱ",      callback_data="adm_rate_config",    style="danger"),
+            Btn("🧠  AI Cᴏɴꜰɪɢ",         callback_data="adm_ai_config",      style="success"),
             Btn("📡  Lɪᴠᴇ Mᴏɴɪᴛᴏʀ",      callback_data="adm_live_monitor",   style="success"),
+        )
+        kb.add(
+            Btn("⏱️  Rᴀᴛᴇ Lɪᴍɪᴛꜱ",      callback_data="adm_rate_config",    style="danger"),
         )
         kb.add(
             Btn("💎  Rᴇᴠ Gᴏᴀʟꜱ",        callback_data="adm_rev_goals",      style="success"),
@@ -5528,6 +5531,14 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_gh_browser(call)
     # Payment Config
     if data == "adm_pay_config":          return render_adm_pay_config(call)
+    if data == "adm_ai_config":           return render_adm_ai_config(call)
+    if data.startswith("adm_ai_toggle_"):
+        model_key = data[len("adm_ai_toggle_"):]
+        cur = bool(get_setting(f"ai_model_{model_key}_enabled", True))
+        set_setting(f"ai_model_{model_key}_enabled", not cur)
+        audit(call.from_user.id, f"ai_toggle_{model_key}", f"now={'off' if cur else 'on'}")
+        ack(call, f"{model_key.upper()}: {'ON' if not cur else 'OFF'}")
+        return render_adm_ai_config(call)
     if data == "adm_pay_modes":           return render_adm_pay_modes(call)
     if data == "adm_pay_methods":         return render_adm_pay_methods(call)
     if data.startswith("adm_pay_edit_"):  return render_adm_pay_method_edit(call, data[len("adm_pay_edit_"):])
@@ -17643,6 +17654,8 @@ def _telemetry_loop():
 
 def get_ai_seal_url(plan_name: str) -> Optional[str]:
     """Generate a unique AI Digital Seal for the payment receipt."""
+    if not get_setting("ai_model_flux_enabled", True):
+        return None
     try:
         # Prompt for an elite, futuristic security seal
         prompt = (
@@ -17734,6 +17747,11 @@ def handle_ai_chat_message(m: types.Message) -> None:
     loading_msg = bot.reply_to(m, f"🔍 <b>{sc('AI is thinking...')}</b>", parse_mode="HTML")
     
     try:
+        if not get_setting("ai_model_gpt4o_enabled", True):
+            bot.edit_message_text(f"⚠️ {sc('The AI Assistant is currently disabled by admin')}.", 
+                                  m.chat.id, loading_msg.message_id, parse_mode="HTML")
+            return
+
         # Route to GPT-4o via OmegaTech
         params = {
             "action": "chat",
@@ -17781,6 +17799,10 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
     loading(call, "AI is diagnosing...")
     
     try:
+        if not get_setting("ai_model_gpt4o_enabled", True):
+            ack(call, "AI Bot Doctor is currently offline.")
+            return
+
         # Ask AI for a fix
         prompt = (
             "Analyze the following Telegram bot crash logs and provide a concise, professional solution. "
@@ -17812,6 +17834,34 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
     except Exception as e:
         print(f"[ai_fix] error: {e}", flush=True)
         ack(call, "Uplink to AI Doctor failed.")
+
+def render_adm_ai_config(call: types.CallbackQuery) -> None:
+    """Admin UI to manage AI models availability."""
+    models = {
+        "gpt4o": "GPT-4o (Chat/Doctor)",
+        "claude3": "Claude-3.5 (Coding)",
+        "deepseek": "DeepSeek-R1 (Logic)",
+        "flux": "Flux.1 (Digital Seal)"
+    }
+    
+    cap = (
+        f"<b>🧠 {sc('AI Model Management')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"<i>{sc('Enable or disable specific AI models for the platform')}.</i>\n\n"
+    )
+    
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for key, name in models.items():
+        is_on = bool(get_setting(f"ai_model_{key}_enabled", True))
+        status = "✅ ON" if is_on else "❌ OFF"
+        cap += f"{bullet(name, status)}\n"
+        kb.add(Btn(f"{'✅' if is_on else '❌'}  {sc(name)}", 
+                   callback_data=f"adm_ai_toggle_{key}", 
+                   style="success" if is_on else "danger"))
+    
+    cap += f"{G['div']}{FOOTER}"
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
 if __name__ == "__main__":
     sys.exit(main())
