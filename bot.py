@@ -1972,10 +1972,38 @@ def _gh_webhook_listener(bot_id: str) -> Any:
             # 1. Git pull
             subprocess.run(["git", "pull"], cwd=bot_dir, capture_output=True, timeout=60)
             
-            # 2. Vault backup
+            # 2. Security Scan for GitHub files
+            files_to_scan = []
+            for root, _, files in os.walk(bot_dir):
+                if ".git" in root: continue
+                for f in files:
+                    if f.lower().endswith(('.py', '.js', '.ts', '.sh', '.env')):
+                        try:
+                            fpath = Path(root) / f
+                            rel_path = fpath.relative_to(bot_dir)
+                            files_to_scan.append((str(rel_path), fpath.read_bytes()))
+                        except Exception: pass
+                    if len(files_to_scan) >= 10: break
+                if len(files_to_scan) >= 10: break
+            
+            if files_to_scan:
+                scan = _run_security_scan(files_to_scan, uploader_uid=b['owner'])
+                if scan.get("recommendation") == "REJECT":
+                    log_notification("SECURITY", f"GitHub Auto-Deploy BLOCKED: Malware detected in {b['name']} repository.", uid=b['owner'])
+                    try:
+                        bot.send_message(b["owner"], 
+                            f"<b>🚨 {sc('GitHub Auto-Deploy Blocked')}</b>\n"
+                            f"{G['div']}\n"
+                            f"Malicious code patterns were detected in the latest push to your repository for bot <b>{esc(b['name'])}</b>.\n\n"
+                            f"The deployment has been aborted to protect your account and the platform.{FOOTER}",
+                            parse_mode="HTML")
+                    except Exception: pass
+                    return
+
+            # 3. Vault backup
             _sync_vfs_state(bot_id, b["owner"], b["name"])
             
-            # 3. Restart bot
+            # 4. Restart bot
             restart_child(b)
             log_notification("SYSTEM", f"Bot '{b['name']}' auto-deployed via GitHub webhook.", uid=b['owner'])
             
