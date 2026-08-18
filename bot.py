@@ -2276,7 +2276,7 @@ def payments_kb(plan: Optional[str] = None) -> types.InlineKeyboardMarkup:
     auto_enabled = bool(get_setting("payment_auto_enabled", True))
     
     if auto_enabled or manual_enabled:
-        kb.add(Btn(f"🔘  {sc('Payment Modes')}", callback_data="none"))
+        kb.add(Btn(f"🔘  {sc('Payment Modes')}", callback_data="none", style="primary"))
         
     if auto_enabled:
         kb.add(Btn(f"🟢  {sc('Automatic Payment')}", callback_data=f"pay_auto{suffix}", style="success"))
@@ -2363,7 +2363,7 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
                 f"{G['div']}{FOOTER}"
             )
             kb = types.InlineKeyboardMarkup()
-            kb.add(Btn(f"💳  Pᴀʏ Nᴏᴡ (${final_price})", url=pay_url))
+            kb.add(Btn(f"💳  Pᴀʏ Nᴏᴡ (${final_price})", url=pay_url, style="success"))
             kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="primary"))
             show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
         else:
