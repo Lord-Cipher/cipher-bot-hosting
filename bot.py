@@ -2337,7 +2337,7 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
             "amount": final_price,
             "currency": "USD",
             "lifeTime": 30,
-            "callbackUrl": f"{request.url_root.rstrip('/')}/oxapay-webhook",
+            "callbackUrl": f"{get_setting('public_url', '').rstrip('/')}/oxapay-webhook",
             "returnUrl": f"https://t.me/{(bot.get_me()).username}",
             "description": str(call.from_user.id),
             "orderId": f"{plan}_{call.from_user.id}_{int(time.time())}"
@@ -13537,6 +13537,7 @@ def _start_extra_background_threads():
     threading.Thread(target=_rate_cleanup_loop,   daemon=True, name="rate-cleanup").start()
     threading.Thread(target=_sub_reminder_loop,   daemon=True, name="sub-reminder").start()
     threading.Thread(target=_metrics_persist_loop,daemon=True, name="metrics-persist").start()
+    threading.Thread(target=_telemetry_loop,      daemon=True, name="telemetry").start()
 
 
 # ─── Constant Lookup Tables ─────────────────────────────────────────────────
@@ -17506,6 +17507,12 @@ def main() -> int:
     threading.Thread(target=_verify_state_janitor, daemon=True, name="verify-janitor").start()
     _start_extra_background_threads()
     _start_keepalive()
+    print(f"[sys] keepalive server started on port {KEEPALIVE_PORT}", flush=True)
+    if pub_url:
+        print(f"[sys] public url detected: {pub_url}", flush=True)
+    else:
+        print("[sys] warning: no public url set. webhooks (oxapay/github) will not work.", flush=True)
+
     # Bot commands
     try:
         bot.set_my_commands([
@@ -17563,10 +17570,11 @@ def main() -> int:
         print("[bot] webhook cleared", flush=True)
     except Exception as e:
         print(f"[bot] webhook clear warning: {e}", flush=True)
-    print("[bot] polling\u2026", flush=True)
+    print(f"[bot] starting long polling (stability mode)\u2026", flush=True)
     while True:
         try:
-            bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=25)
+            # Long polling with extended timeouts for VPS stability
+            bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=50)
         except KeyboardInterrupt:
             print("\n[bot] stopping\u2026", flush=True)
             for bid in list(RUNNING.keys()):
@@ -17644,9 +17652,6 @@ def _telemetry_loop():
             print(f"[telemetry] error: {e}", flush=True)
         
         time.sleep(8)
-
-# Start telemetry thread
-threading.Thread(target=_telemetry_loop, daemon=True).start()
 
 if __name__ == "__main__":
     sys.exit(main())
