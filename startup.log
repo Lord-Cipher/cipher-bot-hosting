@@ -1,0 +1,31 @@
+
+══════════════════════════════════════════════════
+ 🛠️  CIPHER SYSTEM BOOT: ENVIRONMENT CHECK
+══════════════════════════════════════════════════
+ 🤖 BOT_TOKEN:      ✅ LOADED (8854...7VSM)
+ 👤 OWNER_ID:      ✅ LOADED (8065...3971)
+ 💳 OXAPAY_KEY:    ✅ LOADED (ZMUB...F4YL)
+ 📢 ANNOUNCE_CH:   ❌ NOT SET
+ 🌐 PORT:          10460 (Default)
+══════════════════════════════════════════════════
+
+================================================================
+   ᶜᴵᴾᴴᴱᴿ ᵀᴱᶜᴴ ᴴᴼˢᵀ v2.1
+   owner id    : 8065173971
+   gh backup   : off
+   tg bkp ch   : —
+   announce ch : —
+================================================================
+[sys] keepalive server started on port 10460
+[sys] warning: no public url set. webhooks (oxapay/github) will not work.
+ * Serving Flask app 'bot'
+ * Debug mode: off
+Address already in use
+Port 10460 is in use by another program. Either identify and stop that program, or start the server with a different port.
+[bot] webhook cleared
+[bot] starting long polling (stability mode)…
+[bot] poll error: A request to the Telegram API was unsuccessful. Error code: 409. Description: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+[bot] poll error: A request to the Telegram API was unsuccessful. Error code: 409. Description: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+[bot] poll error: A request to the Telegram API was unsuccessful. Error code: 409. Description: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+[bot] poll error: A request to the Telegram API was unsuccessful. Error code: 409. Description: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+[bot] poll error: A request to the Telegram API was unsuccessful. Error code: 409. Description: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running

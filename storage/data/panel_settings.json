@@ -1,0 +1,14 @@
+{
+  "metrics_total": {
+    "messages_received": 0,
+    "callbacks_received": 0,
+    "bot_starts": 0,
+    "bot_stops": 0,
+    "bot_crashes": 0,
+    "uploads": 0,
+    "errors": 0,
+    "commands": 0,
+    "plan_upgrades": 0,
+    "payments_received": 0
+  }
+}

@@ -445,6 +445,7 @@ def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
     """Calls Kaalix keyless API models with Cipher Intelligence context."""
     if not get_setting("ai_global_enabled", True):
         return None
+    # Force operatives ON by default if not explicitly set
     if not get_setting(f"ai_operative_{model_name}_enabled", True):
         return None
         
@@ -17583,6 +17584,10 @@ def main() -> int:
     _start_extra_background_threads()
     _start_keepalive()
     print(f"[sys] keepalive server started on port {KEEPALIVE_PORT}", flush=True)
+    
+    wh_enabled = get_setting("webhook_enabled", False)
+    pub_url = get_setting("public_url", "").strip().rstrip("/")
+    
     if pub_url:
         print(f"[sys] public url detected: {pub_url}", flush=True)
     else:
@@ -17602,8 +17607,6 @@ def main() -> int:
         pass
 
     # --- WEBHOOK HYBRID LOGIC ---
-    wh_enabled = get_setting("webhook_enabled", False)
-    pub_url = get_setting("public_url", "").strip().rstrip("/")
     
     if wh_enabled and pub_url:
         webhook_url = f"{pub_url}/tg-webhook/{TOKEN}"
@@ -17761,6 +17764,10 @@ def _call_ai_api(prompt: str, user_plan: str = "free") -> Optional[str]:
     
     primary_model = get_setting(primary_key, default_primary)
     fallback_model = get_setting(fallback_key, default_fallback)
+    
+    # Ensure we have a model name, even if setting is weird
+    if not primary_model: primary_model = default_primary
+    if not fallback_model: fallback_model = default_fallback
     
     res = _call_kaalix_model(primary_model, prompt)
     if res:
