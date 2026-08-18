@@ -17924,18 +17924,8 @@ def _call_ai_api(prompt: str, user_plan: str = "free") -> Optional[str]:
     if any(p_low.startswith(g) for g in greetings) or len(p_low) < 4:
         return f"Hello, Commander! How may I assist you with your elite bot hosting today?"
 
-    primary_key = f"ai_model_{user_plan}_primary"
-    fallback_key = f"ai_model_{user_plan}_fallback"
-    
-    default_primary = "deepseek-r1" if user_plan in ["enterprise", "lifetime"] else ("qwen" if user_plan == "pro" else "deepseek-v3")
-    default_fallback = "qwen" if user_plan in ["enterprise", "lifetime"] else ("deepseek-v3" if user_plan == "pro" else "llama-meta")
-    
-    primary_model = get_setting(primary_key, default_primary)
-    fallback_model = get_setting(fallback_key, default_fallback)
-    
-    # Ensure we have a model name, even if setting is weird
-    if not primary_model: primary_model = default_primary
-    if not fallback_model: fallback_model = default_fallback
+    primary_model = get_plan_primary_model(user_plan)
+    fallback_model = get_plan_fallback_model(user_plan)
     
     res = _call_kaalix_model(primary_model, prompt)
     if res:
@@ -18114,7 +18104,7 @@ def handle_ai_chat_message(m: types.Message) -> None:
         ai_response = _call_ai_api(m.text, user_plan=plan)
         
         if ai_response:
-            primary_model = get_setting(f"ai_model_{plan}_primary", "deepseek-r1" if plan in ["enterprise", "lifetime"] else "deepseek-v3")
+            primary_model = get_plan_primary_model(plan)
             
             # Sanitize AI response: remove unsupported tags like <think>
             clean_res = re.sub(r'<(think|thought)>.*?</\1>', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
@@ -18183,7 +18173,7 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         ai_fix = _call_ai_api(prompt, user_plan=plan)
         
         if ai_fix:
-            primary_model = get_setting(f"ai_model_{plan}_primary", "deepseek-r1" if plan in ["enterprise", "lifetime"] else "deepseek-v3")
+            primary_model = get_plan_primary_model(plan)
             
             # Sanitize AI response
             clean_fix = re.sub(r'<(think|thought)>.*?</\1>', '', ai_fix, flags=re.DOTALL | re.IGNORECASE)
@@ -18309,13 +18299,29 @@ def get_ai_model(uid: int) -> str:
             dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
             if dt > now_utc():
                 # User is in trial mode, return the trial plan tier
-                trial_plan = get_setting("trial_plan", "pro")
-                return trial_plan
+                # Force elite tier for trials to ensure user sees the difference
+                return "enterprise" 
     except Exception:
         pass
         
     # Fallback to standard plan field
     return u.get("plan", "free")
+
+def get_plan_primary_model(plan: str) -> str:
+    """Helper to get the primary model name for a plan tier with consistent defaults."""
+    if plan in ["enterprise", "lifetime"]:
+        return get_setting("ai_model_enterprise_primary", "deepseek-r1")
+    if plan == "pro":
+        return get_setting("ai_model_pro_primary", "deepseek-r1") # Upgraded pro to R1 by default
+    return get_setting("ai_model_free_primary", "deepseek-v3")
+
+def get_plan_fallback_model(plan: str) -> str:
+    """Helper to get the fallback model name for a plan tier."""
+    if plan in ["enterprise", "lifetime"]:
+        return get_setting("ai_model_enterprise_fallback", "qwen")
+    if plan == "pro":
+        return get_setting("ai_model_pro_fallback", "qwen")
+    return get_setting("ai_model_free_fallback", "llama-meta")
 
 def _handle_ai_chat_document(m: types.Message) -> None:
     """Extracts code from uploaded file or zip and sends to AI for analysis."""
@@ -18357,7 +18363,7 @@ def _handle_ai_chat_document(m: types.Message) -> None:
         ai_response = _call_ai_api(prompt, user_plan=plan)
         
         if ai_response:
-            primary_model = get_setting(f"ai_model_{plan}_primary", "deepseek-r1" if plan in ["enterprise", "lifetime"] else "deepseek-v3")
+            primary_model = get_plan_primary_model(plan)
             clean_res = re.sub(r'<(think|thought)>.*?</\1>', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
             clean_res = re.sub(r'<(think|thought)>', '', clean_res, flags=re.IGNORECASE)
             
