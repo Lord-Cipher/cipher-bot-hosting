@@ -443,7 +443,9 @@ CODE TO ANALYZE:
 
 def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
     """Calls Kaalix keyless API models with Cipher Intelligence context."""
+    print(f"[kaalix] calling {model_name}...", flush=True)
     if not get_setting("ai_global_enabled", True):
+        print(f"[kaalix] global ai disabled", flush=True)
         return None
     # Force operatives ON by default if not explicitly set
     if not get_setting(f"ai_operative_{model_name}_enabled", True):
@@ -4789,6 +4791,10 @@ def cb_verify(call: types.CallbackQuery) -> None:
 # actually live at runtime; this removed copy was already dead code).
 # NOTE: `_is_private` used to be defined twice in this file (bulk dedup pass — kept the second definition, which was the one
 # actually live at runtime; this removed copy was already dead code).
+@bot.message_handler(func=lambda m: m.text and m.text.lower() == "ping")
+def ping_pong(m: types.Message) -> None:
+    bot.reply_to(m, "PONG! I am alive and listening.")
+
 @bot.message_handler(commands=["start"])
 def cmd_start(m: types.Message) -> None:
     if not _is_private(m):
@@ -9788,6 +9794,8 @@ def on_text(m: types.Message) -> None:
     st = USER_STATES.get(uid) or {}
     flow = st.get("flow")
     try:
+        if flow == "ai_chat":
+            return handle_ai_chat_message(m)
         if flow == "await_env_kv":
             return _handle_env_kv(m, st)
         if flow == "await_pip_install":
@@ -17924,9 +17932,9 @@ def render_ai_chat(call: types.CallbackQuery) -> None:
     USER_STATES[call.from_user.id] = {"flow": "ai_chat"}
     show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, back_main_kb(), call=call)
 
-@bot.message_handler(func=lambda m: USER_STATES.get(m.from_user.id, {}).get("flow") == "ai_chat")
 def handle_ai_chat_message(m: types.Message) -> None:
-    """Processes user messages and routes them to the OmegaTech AI API."""
+    """Processes user messages and routes them to the Kaalix AI API."""
+    print(f"[ai_chat] message from {m.from_user.id}: {m.text[:50]}", flush=True)
     if not m.text: return
     
     if m.text.startswith("/"):

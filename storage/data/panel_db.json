@@ -7,7 +7,7 @@
       "plan": "free",
       "plan_expires": null,
       "joined": "2026-08-18T21:26:26.882369+00:00",
-      "last_seen": "2026-08-18T21:29:12.189296+00:00",
+      "last_seen": "2026-08-18T21:37:44.125126+00:00",
       "banned": false,
       "ban_reason": "",
       "wallet": 0,
@@ -22,7 +22,7 @@
       "stats": {
         "commands": 0,
         "bots_uploaded": 0,
-        "logins": 11
+        "logins": 18
       }
     }
   },
