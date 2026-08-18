@@ -2541,16 +2541,20 @@ def bot_actions_kb(bot_id: str, running: bool, premium: bool = False) -> types.I
             Btn(f"{G['refresh']}  Rᴇꜱᴛᴀʀᴛ", callback_data=f"bot_restart_{bot_id}", style="primary"),
         )
     kb.add(
+        Btn(f"📊  Rᴇꜰʀᴇꜱʜ Sᴛᴀᴛꜱ", callback_data=f"bot_view_{bot_id}",      style="success"),
         Btn(f"{G['bolt']}  Lɪᴠᴇ Lᴏɢꜱ", callback_data=f"bot_logs_{bot_id}", style="primary"),
+    )
+    kb.add(
         Btn(f"{G['eye']}  Iɴꜰᴏ",       callback_data=f"bot_info_{bot_id}", style="primary"),
-    )
-    kb.add(
         Btn(f"{G['settings']}  Eɴᴠ Vᴀʀꜱ", callback_data=f"bot_env_{bot_id}",  style="primary"),
-        Btn(f"{G['cog']}  Cʀᴏɴ",          callback_data=f"bot_cron_{bot_id}", style="primary"),
     )
     kb.add(
+        Btn(f"{G['cog']}  Cʀᴏɴ",          callback_data=f"bot_cron_{bot_id}", style="primary"),
         Btn(f"{G['download']}  Iɴꜱᴛᴀʟʟ Pᴋɢ", callback_data=f"bot_pip_{bot_id}",   style="primary"),
+    )
+    kb.add(
         Btn(f"{G['plus']}  Cʟᴏɴᴇ",           callback_data=f"bot_clone_{bot_id}", style="primary"),
+        Btn(f"{G['arrow']}  Dᴏᴡɴʟᴏᴀᴅ", callback_data=f"bot_dl_{bot_id}", style="primary"),
     )
     if premium:
         is_open = bot_id in TUNNELS and TUNNELS[bot_id].get("proc") and TUNNELS[bot_id]["proc"].poll() is None
@@ -2558,7 +2562,7 @@ def bot_actions_kb(bot_id: str, running: bool, premium: bool = False) -> types.I
         glyph = G['no'] if is_open else G['cloud']
         kb.add(Btn(f"{glyph}  {label}", callback_data=f"bot_tunnel_{bot_id}",
                    style="danger" if is_open else "success"))
-    kb.add(Btn(f"{G['arrow']}  Dᴏᴡɴʟᴏᴀᴅ", callback_data=f"bot_dl_{bot_id}", style="primary"))
+
     if b := find_bot(bot_id):
         if b.get("source") == "github" and premium:
             kb.add(Btn(f"🚀  Aᴜᴛᴏ-Dᴇᴘʟᴏʏ", callback_data=f"bot_webhook_{bot_id}", style="success"))
@@ -3434,13 +3438,18 @@ def child_status(bot_id: str, b_doc: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
     cpu = mem = 0.0
-    if running and psutil is not None:
-        try:
-            p = psutil.Process(info["proc"].pid)
-            cpu = p.cpu_percent(interval=0.05)
-            mem = p.memory_info().rss
-        except Exception:
-            pass
+    if running:
+        t_data = TELEMETRY.get(bot_id)
+        if t_data:
+            cpu = t_data["cpu"]
+            mem = t_data["ram"]
+        elif psutil is not None:
+            try:
+                p = psutil.Process(info["proc"].pid)
+                cpu = p.cpu_percent(interval=0.05)
+                mem = p.memory_info().rss
+            except Exception:
+                pass
     return {
         "running":   running,
         "pid":       info["proc"].pid if running else None,
@@ -8586,20 +8595,18 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
                     if info["proc"].poll() is not None]
     total_child_ram = 0
     total_child_cpu = 0.0
-    if psutil:
-        for bid, info in running_bots:
-            try:
-                p = psutil.Process(info["proc"].pid)
-                total_child_ram += p.memory_info().rss
-                total_child_cpu += p.cpu_percent(interval=0)
-            except Exception:
-                pass
+    for bid, info in running_bots:
+        t_data = TELEMETRY.get(bid)
+        if t_data:
+            total_child_ram += t_data["ram"]
+            total_child_cpu += t_data["cpu"]
+    
     panel_ram = panel_cpu = 0
     if psutil:
         try:
             pp = psutil.Process(os.getpid())
             panel_ram = pp.memory_info().rss
-            panel_cpu = pp.cpu_percent(interval=0.1)
+            panel_cpu = SYS_TELEMETRY.get("cpu", 0.0) # Use global system CPU as proxy for panel
         except Exception:
             pass
     up_s = int(time.time() - START_TIME) if "START_TIME" in globals() else 0
@@ -8646,13 +8653,18 @@ def render_adm_monitor_bots(call: types.CallbackQuery) -> None:
         pid  = info["proc"].pid
         rss  = 0
         cpu  = 0.0
-        if psutil and is_running:
-            try:
-                p = psutil.Process(pid)
-                rss = p.memory_info().rss
-                cpu = p.cpu_percent(interval=0)
-            except Exception:
-                pass
+        if is_running:
+            t_data = TELEMETRY.get(bid)
+            if t_data:
+                rss = t_data["ram"]
+                cpu = t_data["cpu"]
+            elif psutil:
+                try:
+                    p = psutil.Process(pid)
+                    rss = p.memory_info().rss
+                    cpu = p.cpu_percent(interval=0)
+                except Exception:
+                    pass
         status = "▶ running" if is_running else f"⏹ exit={rc}"
         rows.append(
             f"{G['bullet']} <b>{esc(name)}</b> <code>{bid[:8]}</code>\n"
@@ -8669,11 +8681,11 @@ def render_adm_monitor_bots(call: types.CallbackQuery) -> None:
 
 
 def render_adm_monitor_system(call: types.CallbackQuery) -> None:
-    cpu_pct = mem_pct = disk_pct = 0.0
+    cpu_pct = SYS_TELEMETRY.get("cpu", 0.0)
+    mem_pct = disk_pct = 0.0
     load1 = load5 = load15 = 0.0
     if psutil:
         try:
-            cpu_pct  = psutil.cpu_percent(interval=0.3)
             vm       = psutil.virtual_memory()
             mem_pct  = vm.percent
             du       = psutil.disk_usage("/")
@@ -14994,6 +15006,8 @@ def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
     if b["owner"] != call.from_user.id and not is_admin(call.from_user.id):
         ack(call, "Not yours"); return
     st = child_status(bot_id, b)
+    owner_doc = db_load()["users"].get(str(b["owner"])) or {}
+    plan = PLAN_LIMITS.get(owner_doc.get("plan", "free"), PLAN_LIMITS["free"])
     err_block = ""
     if not st["running"]:
         rc = b.get("last_exit_code")
@@ -15021,13 +15035,15 @@ def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
 
     # Visual resource gauges
     cpu_pct = min(100.0, max(0.0, st['cpuPct']))
-    cpu_filled = int(cpu_pct / 10)
-    cpu_bar = '█' * cpu_filled + '░' * (10 - cpu_filled)
+    cpu_filled = int(cpu_pct / 5) # 20 blocks for more precision
+    cpu_bar = '█' * cpu_filled + '░' * (20 - cpu_filled)
 
     mem_mb = st['memBytes'] / (1024 * 1024)
-    mem_pct = min(100.0, (mem_mb / 512.0) * 100)  # normalized against 512MB cap
-    mem_filled = int(mem_pct / 10)
-    mem_bar = '█' * mem_filled + '░' * (10 - mem_filled)
+    # Use plan limit for normalization, fallback to 512MB
+    plan_ram = float(plan.get("ram", 512))
+    mem_pct = min(100.0, (mem_mb / plan_ram) * 100)
+    mem_filled = int(mem_pct / 5)
+    mem_bar = '█' * mem_filled + '░' * (20 - mem_filled)
 
     cap = (
         f"<b>{G['diamond']} {esc(b['name'])}</b>\n"
@@ -15043,7 +15059,6 @@ def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
         f"{err_block}\n"
         f"{G['div']}{FOOTER}"
     )
-    owner_doc = db_load()["users"].get(str(b["owner"])) or {}
     is_premium = owner_doc.get("plan", "free") != "free" and user_plan_active(owner_doc)
     tun = TUNNELS.get(bot_id) if "TUNNELS" in globals() else None
     if tun and tun.get("proc") and tun["proc"].poll() is None and tun.get("url"):
@@ -17594,3 +17609,50 @@ def render_adm_pay_modes(call: types.CallbackQuery) -> None:
         Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data="adm_pay_config", style="danger")
     )
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
+# ─── TELEMETRY SYSTEM ──────────────────────────────────────────────────────
+# Stores real-time CPU/RAM stats for all running bots and the system itself.
+TELEMETRY:     Dict[str, Dict[str, Any]] = {}
+SYS_TELEMETRY: Dict[str, Any] = {"cpu": 0.0, "ram_used": 0, "ram_total": 0}
+
+def _telemetry_loop():
+    """Background thread to update resource usage stats every 10 seconds."""
+    while True:
+        try:
+            if psutil is None:
+                time.sleep(60); continue
+            
+            # System-wide stats
+            SYS_TELEMETRY["cpu"] = psutil.cpu_percent(interval=1)
+            mem = psutil.virtual_memory()
+            SYS_TELEMETRY["ram_used"] = mem.used
+            SYS_TELEMETRY["ram_total"] = mem.total
+            
+            # Per-bot stats
+            for bot_id, info in list(RUNNING.items()):
+                try:
+                    proc = info.get("proc")
+                    if not proc or proc.poll() is not None:
+                        TELEMETRY.pop(bot_id, None); continue
+                    
+                    p = psutil.Process(proc.pid)
+                    # Use a short interval but cache it so the UI doesn't block
+                    cpu = p.cpu_percent(interval=0.1)
+                    mem_rss = p.memory_info().rss
+                    
+                    TELEMETRY[bot_id] = {
+                        "cpu": cpu,
+                        "ram": mem_rss,
+                        "ts":  time.time()
+                    }
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    TELEMETRY.pop(bot_id, None)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[telemetry] error: {e}", flush=True)
+        
+        time.sleep(8)
+
+# Start telemetry thread
+threading.Thread(target=_telemetry_loop, daemon=True).start()
