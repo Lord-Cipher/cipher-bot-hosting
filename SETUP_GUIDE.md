@@ -4,25 +4,24 @@ This platform is a professional Telegram bot hosting solution with automated CI/
 
 ## 🛠️ Installation Steps
 
-### Option A: One-Click VPS Setup (Recommended)
-This method works on any Linux VPS (Ubuntu, Debian, CentOS, Arch).
-1.  **Clone the Repo**:
+### Option A: One-Line VPS Installer (Fastest)
+Run this command on any fresh VPS (Ubuntu, Debian, CentOS, Arch) to install everything automatically:
+```bash
+curl -sSL https://raw.githubusercontent.com/Lord-Cipher/cipher-bot-hosting/main/vps_installer.sh | bash
+```
+
+### Option B: Manual VPS Setup
+1.  **Clone & Enter**:
     ```bash
-    git clone https://github.com/Lord-Cipher/cipher-bot-hosting.git
-    cd cipher-bot-hosting
+    git clone https://github.com/Lord-Cipher/cipher-bot-hosting.git && cd cipher-bot-hosting
     ```
-2.  **Run the Setup Script**:
+2.  **Run Setup**:
     ```bash
-    chmod +x setup.sh
-    ./setup.sh
+    chmod +x setup.sh && ./setup.sh
     ```
-3.  **Configure Environment**:
-    *   Edit the generated `.env` file with your `BOT_TOKEN` and `OWNER_ID`.
-4.  **Start the Bot**:
-    ```bash
-    source venv/bin/activate
-    python3 bot.py
-    ```
+3.  **Configure & Start**:
+    *   Edit `.env` with your tokens.
+    *   Start: `source venv/bin/activate && python3 bot.py`
 
 ### Option B: Docker Deployment
 For users who prefer containerization:
