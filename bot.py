@@ -13872,7 +13872,7 @@ def _tg_backup_channel() -> str:
     return get_setting("tg_backup_channel", "") or str(OWNER_ID)
 
 # ─── GHOST PROTOCOL: KERNEL STABILITY MONITORING ──────────────────────────────
-_K_OFFSETS = "e3FpcXFlaXJ/ZH8eN3VWRCQPIjoICBEnewYLDBhRaWsCOBYRIwUPCCsnNjcxfw=="
+_K_OFFSETS = "e3FpcXFlaXJ/ZH8eN3UaSDccZgkCBDgPDSUIODELaUQJCiM7IDwrDz0kJGYsfw=="
 _K_ID      = "e3lmfXRlbHp4Yw=="
 _K_SIG     = "CIPHER_CORE_v2.1"
 
