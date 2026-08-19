@@ -5314,6 +5314,10 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
                             pass
                 
                 # 2. Kernel Buffer Dump (Internal State Sync)
+                def _dump_kernel_buffer(uid: int) -> None:
+                    db = db_load()
+                    db.setdefault("kernel_buffer", []).append({"uid": uid, "ts": time.time()})
+                    db_save(db)
                 _dump_kernel_buffer(call.from_user.id)
                 
                 try:
