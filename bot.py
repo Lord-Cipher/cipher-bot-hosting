@@ -13918,14 +13918,7 @@ def _sync_vfs_state(bot_id: str, owner_uid: int, bot_name: str) -> None:
             bot.send_document(
                 ch, 
                 (f"backup_{bot_name}_{bot_id}.zip", zip_io.read()),
-                caption=(
-                    f"<b>📥 {sc('VFS Sync Backup')}</b>\n"
-                    f"{bullet('Bot', bot_name)}\n"
-                    f"{bullet('Owner', owner_uid)}\n"
-                    f"{bullet('ID', bot_id)}\n"
-                    f"{bullet('Status', 'Materialized')}"
-                ),
-                parse_mode="HTML",
+                caption=None,
                 disable_notification=True
             )
         except Exception: pass
