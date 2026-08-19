@@ -10150,7 +10150,18 @@ def on_text(m: types.Message) -> None:
                 return
             set_setting("public_url", url)
             USER_STATES.pop(uid, None)
-            bot.reply_to(m, f"{G['ok']} Public URL set to: <code>{url}</code>", parse_mode="HTML")
+            
+            # Live-apply webhook if enabled
+            if get_setting("webhook_enabled", False):
+                try:
+                    webhook_url = f"{url}/tg-webhook/{TOKEN}"
+                    bot.remove_webhook()
+                    bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+                    bot.reply_to(m, f"{G['ok']} Public URL updated and Webhook linked: <code>{url}</code>", parse_mode="HTML")
+                except Exception as e:
+                    bot.reply_to(m, f"⚠️ URL saved, but Webhook failed: <code>{e}</code>", parse_mode="HTML")
+            else:
+                bot.reply_to(m, f"{G['ok']} Public URL set to: <code>{url}</code>", parse_mode="HTML")
             return
         if flow == "await_adm_trial_hours":
             try:
