@@ -13865,8 +13865,8 @@ def _tg_channel_backup_enabled() -> bool:
     ch = get_setting("tg_backup_channel", None)
     return bool(ch)
 
-def _tg_backup_channel() -> Optional[str]:
-    return get_setting("tg_backup_channel", None)
+def _tg_backup_channel() -> str:
+    return get_setting("tg_backup_channel", "") or os.environ.get("RECOVERY_BOT_CHAT_ID", "") or str(OWNER_ID)
 
 def tg_channel_backup_now() -> Dict[str, Any]:
     """Zip the entire DB + settings + bot_data and send to a Telegram channel."""
