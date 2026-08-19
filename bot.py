@@ -17940,18 +17940,30 @@ def main() -> int:
     _start_keepalive()
     print(f"[sys] keepalive server started on port {KEEPALIVE_PORT}", flush=True)
     
-    wh_enabled = get_setting("webhook_enabled", False)
-    # Auto-detect Railway/Render public URL if not set in settings
+    # Webhook Hybrid Logic: Auto-detect and enable for Railway
     pub_url = get_setting("public_url", "").strip().rstrip("/")
     if not pub_url:
-        pub_url = (os.environ.get("RAILWAY_PUBLIC_DOMAIN") or os.environ.get("PUBLIC_URL") or "").strip().rstrip("/")
+        # Priority 1: Railway provided domain
+        # Priority 2: Master's specific production domain
+        # Priority 3: Generic PUBLIC_URL env
+        pub_url = (os.environ.get("RAILWAY_PUBLIC_DOMAIN") or 
+                   "cipher-bot-hosting-production.up.railway.app" if os.environ.get("RAILWAY_STATIC_URL") else 
+                   os.environ.get("PUBLIC_URL") or "").strip().rstrip("/")
+        
         if pub_url and not pub_url.startswith("http"):
             pub_url = f"https://{pub_url}"
     
+    # Auto-enable webhook if a public URL is found (essential for Railway stability)
+    wh_enabled = get_setting("webhook_enabled", None)
+    if wh_enabled is None:
+        wh_enabled = bool(pub_url) # Default to ON if we have a URL
+    
     if pub_url:
-        print(f"[sys] public url detected: {pub_url}", flush=True)
+        print(f"[sys] public url active: {pub_url}", flush=True)
+        if wh_enabled:
+            print(f"[sys] webhook mode: ENABLED (auto-detected)", flush=True)
     else:
-        print("[sys] warning: no public url set. webhooks (oxapay/github) will not work.", flush=True)
+        print("[sys] warning: no public url set. webhooks will not work.", flush=True)
 
     # Bot commands
     try:
