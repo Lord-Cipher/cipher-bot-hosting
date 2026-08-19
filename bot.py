@@ -17646,6 +17646,10 @@ def _handle_gift_confirm(m: types.Message, st: Dict[str, Any]) -> None:
 # NOTE: `cb_verify` used to be defined twice in this file (bulk dedup pass — kept the first definition, which was the one
 # actually live at runtime; this removed copy was already dead code).
 def _route_callback(call: types.CallbackQuery, data: str) -> None:
+    # If the user clicks any button outside the live monitor refresh, clear the live monitoring session
+    if not data.startswith("adm_monitor") and data != "live_update":
+        LIVE_UI_SESSIONS.pop(call.message.chat.id, None)
+
     # Core menus
     if data == "menu_main":     render_main_menu(call.message.chat.id, call.from_user.id, call); return
     if data == "menu_bots":     render_bots_menu(call); return
@@ -17724,8 +17728,11 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
         except Exception: pass
         if res.get("ok"):
             try:
+                kb_back = types.InlineKeyboardMarkup()
+                kb_back.add(Btn(f"{G['back']}  {sc('Pending Uploads')}", callback_data="adm_pending", style="danger"))
                 bot.send_message(call.message.chat.id,
                     f"<b>{G['ok']} {sc('Bot approved')}</b>\n{bullet('Bot ID', bid)}",
+                    reply_markup=kb_back,
                     parse_mode="HTML")
             except Exception:
                 pass
@@ -17739,8 +17746,11 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
         except Exception: pass
         if res.get("ok"):
             try:
+                kb_back = types.InlineKeyboardMarkup()
+                kb_back.add(Btn(f"{G['back']}  {sc('Pending Uploads')}", callback_data="adm_pending", style="danger"))
                 bot.send_message(call.message.chat.id,
                     f"<b>{G['no']} {sc('Bot rejected')}</b>\n{bullet('Bot ID', bid)}",
+                    reply_markup=kb_back,
                     parse_mode="HTML")
             except Exception:
                 pass
