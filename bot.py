@@ -13792,7 +13792,7 @@ def render_adm_rate_stats(call):
         lines.append(f"  <code>{key[:30]}</code>: {bucket['count']} hits")
     lines.append(G["div"] + FOOTER)
     show_menu(call.message.chat.id, PHOTOS.get("rate_limits", PHOTOS["admin"]),
-              "\n".join(lines), _adm_back("adm_rate_cfg"), call=call)
+              "\n".join(lines), _adm_back("adm_rate_config"), call=call)
 
 
 def action_adm_export_full_db(call):
@@ -18356,7 +18356,7 @@ def send_elite_receipt(uid: int, tx_id: str, plan_key: str) -> None:
 def render_ai_chat(call: types.CallbackQuery) -> None:
     """Entry screen for the AI Assistant."""
     cap = (
-        f"<b>🤖 {sc('AI Assistant')}</b>\n"
+        f"<b>{sc('AI Assistant')}</b>\n"
         f"{G['div_eq']}\n"
         f"<i>{sc('Welcome, Commander. I am your elite AI operative')}.</i>\n\n"
         f"<b>{sc('Capabilities')}:</b>\n"
