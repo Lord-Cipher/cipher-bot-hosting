@@ -17982,8 +17982,24 @@ def get_ai_seal_url(plan_name: str) -> Optional[str]:
     return seals.get(plan_name.lower(), seals["pro"])
 
 def send_elite_receipt(uid: int, tx_id: str, plan_key: str) -> None:
-    """Sends a high-end receipt with an AI Digital Seal and smart fallback."""
+    """Sends a high-end receipt with an AI Digital Seal and dynamic template support."""
     p = PLAN_LIMITS.get(plan_key, PLAN_LIMITS["pro"])
+    u = get_user(uid)
+    name = u.get("name", "Commander")
+    
+    # Load and process template
+    tmpl = get_setting("tmpl_payment_received", "") or _MESSAGE_TEMPLATES["payment_received"]["default"]
+    
+    # Dynamic Variable Replacement
+    processed_tmpl = tmpl.replace("{name}", name)\
+                         .replace("{amount}", str(p['price']))\
+                         .replace("{sym}", "$")\
+                         .replace("{plan}", sc(p['name']))\
+                         .replace("{tx_id}", tx_id)\
+                         .replace("{date}", ts_iso())\
+                         .replace("{brand}", "Cipher Tech Hosting")
+    
+    # Elite Formatting
     receipt_text = (
         f"<blockquote>💳 <b>{sc('OFFICIAL PAYMENT RECEIPT')}</b>\n"
         f"{divider(15)}\n"
@@ -17992,12 +18008,12 @@ def send_elite_receipt(uid: int, tx_id: str, plan_key: str) -> None:
         f"{divider(15)}\n"
         f"💎 <b>{sc('Plan Activated')}</b>: <code>{sc(p['name'])}</code>\n"
         f"🤖 <b>{sc('New Bot Slots')}</b>: <code>{p['max_bots']} {sc('Slots')}</code>\n"
-        f"💰 <b>{sc('Amount Paid')}</b>: <code>${p['price']}</code>\n"
         f"{divider(15)}\n"
-        f"⏰ <b>{sc('Activated On')}</b>: <code>{ts_iso()}</code>\n"
+        f"📝 <b>{sc('Message')}</b>:\n"
+        f"<i>{processed_tmpl}</i>\n"
+        f"{divider(15)}\n"
         f"🛡️ <b>{sc('Status')}</b>: <code>{sc('CONFIRMED ON BLOCKCHAIN')}</code>\n"
-        f"{divider(15)}\n"
-        f"🚀 <i>{sc('Your bots are now ready for deployment!')}</i></blockquote>"
+        f"🚀 <i>{sc('Legitimacy to the top. It is honour to do business.')}</i></blockquote>"
     )
     
     # Attempt AI Seal
