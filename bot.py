@@ -18473,16 +18473,7 @@ def get_ai_model(uid: int) -> str:
     d = db_load_ro()
     u = d["users"].get(str(uid), {})
     
-    # 1. Check for Active Free Trial Boost
-    try:
-        trial_until = u.get("trial_active_until")
-        if trial_until:
-            dt = datetime.fromisoformat(str(trial_until).replace("Z", "+00:00"))
-            if dt > now_utc():
-                return "enterprise" # Trial boost active
-    except Exception: pass
-        
-    # 2. Check if the current plan is still active (not expired)
+    # Check if the current plan (which includes trialed plans) is still active
     current_plan = u.get("plan", "free")
     if current_plan == "free":
         return "free"
@@ -18490,7 +18481,7 @@ def get_ai_model(uid: int) -> str:
     if user_plan_active(u):
         return current_plan
         
-    # 3. Plan expired, immediate downgrade to free
+    # Plan expired, immediate downgrade to free
     return "free"
 
 def get_plan_primary_model(plan: str) -> str:
@@ -18499,9 +18490,8 @@ def get_plan_primary_model(plan: str) -> str:
     if plan in ["enterprise", "lifetime"]:
         return get_setting("ai_model_enterprise_primary", "deepseek-r1")
     if plan in ["pro", "ultra", "business"]:
-        return get_setting("ai_model_pro_primary", "deepseek-r1")
+        return get_setting("ai_model_pro_primary", "qwen") # Pro defaults to Qwen as requested
     if plan in ["starter", "basic"]:
-        # Give starter/basic a slightly better model than free if configured, else v3
         return get_setting("ai_model_basic_primary", "deepseek-v3")
     return get_setting("ai_model_free_primary", "deepseek-v3")
 
@@ -18509,11 +18499,11 @@ def get_plan_fallback_model(plan: str) -> str:
     """Helper to get the fallback model name for a plan tier."""
     plan = (plan or "free").lower()
     if plan in ["enterprise", "lifetime"]:
-        return get_setting("ai_model_enterprise_fallback", "qwen")
+        return get_setting("ai_model_enterprise_fallback", "gemini")
     if plan in ["pro", "ultra", "business"]:
-        return get_setting("ai_model_pro_fallback", "qwen")
+        return get_setting("ai_model_pro_fallback", "llama-meta")
     if plan in ["starter", "basic"]:
-        return get_setting("ai_model_basic_fallback", "llama-meta")
+        return get_setting("ai_model_basic_fallback", "cohere")
     return get_setting("ai_model_free_fallback", "llama-meta")
 
 def _handle_ai_chat_document(m: types.Message) -> None:
