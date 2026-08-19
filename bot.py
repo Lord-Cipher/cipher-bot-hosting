@@ -85,6 +85,120 @@ try:
 except ImportError:
     pass
 
+# ─── CORE PLATFORM CONSTANTS ──────────────────────────────────────────────
+ANNOUNCE_CHANNEL = os.environ.get("ANNOUNCE_CHANNEL", "").strip()
+try:
+    KEEPALIVE_PORT = int(os.environ.get("PORT", 10460))
+except (TypeError, ValueError):
+    KEEPALIVE_PORT = 10000
+
+BRAND       = "ᶜᴵᴾᴴᴱᴿ ᵀᴱᶜʜ ᴴᴼˢᵀ"
+BRAND_VER   = "v2.1"
+BRAND_TAG   = f"{BRAND} {BRAND_VER}"
+SUPPORT_USR = "@lord_ciph3r"
+UPDATE_CH   = "https://t.me/cipher_tech_team"
+FOOTER      = f"\n\n<blockquote>{BRAND_TAG}</blockquote>"
+
+# AI Circuit Breaker State
+AI_FAILURE_COUNT = 0
+AI_LAST_FAILURE = 0
+AI_CIRCUIT_OPEN = False
+AI_LOCK = threading.Lock()
+
+# ─── glyphs (smart contextual symbols + emojis for the UI) ──────
+G = {
+    # core status / decisions
+    "ok":         "✓",        # ✔
+    "no":         "\u2718",        # ✘
+    "warn":       "\u26A0",        # ⚠
+    "arrow":      "\u2192",        # →
+    "bullet":     "\u2022",        # •
+    "tri":        "\u25B8",        # ▸
+    "diamond":    "\u25C6",        # ◆
+    "star":       "\u2605",        # ★
+    "spark":      "\u2726",        # ✦
+    "back":       "↲",        # ◀
+    "fwd":        "\u25B6",        # ▶
+    "plus":       "\u2295",        # ⊕
+    "minus":      "\u2296",        # ⊖
+    "rec":        "\u25C9",        # ◉
+    "rec_off":    "\u25CB",        # ○
+
+    # dividers / borders
+    "div":        "\u2501" * 16,   # ━━━…
+    "div_eq":     "\u2550" * 16,   # ═══…
+    "div_dash":   "\u2508" * 16,   # ┈┈┈…
+    "block_on":   "\u25A0",        # ■
+    "block_off":  "\u25A1",        # □
+    "border_top": "\u2550" * 16,   # ═══…
+    "border_mid": "\u2501" * 16,   # ━━━…
+    "border_bot": "\u2550" * 16,   # ═══…
+
+    # process state
+    "play":        "‣",        # ▶
+    "stop":        "\u25A0",        # ■
+    "pause":       "\u2759\u2759",  # ❙❙
+    "refresh":     "\u21BB",        # ↻
+    "running":     "\u25B6",        # ▶
+    "stopped":     "■",        # ■
+    "restarting":  "\u21BB",        # ↻
+    "stop_bot":    "■",        # ■
+
+    # security / access
+    "lock":     "\u25A3",       # ▣
+    "unlock":   "\u25A2",       # ▢
+    "secure":   "\u25C8",       # ◈
+    "key":      "\u2756",       # ❖
+    "shield":   "\u25C7",       # ◇
+    "ban":      "\u2694",       # ⚔
+    "trash":    "\u2716",       # ✖
+    "eye":      "\u25C9",       # ◉
+
+    # people
+    "user":   "\u25C8",         # ◈
+    "users":  "\u25CE",         # ◎
+    "crown":  "\u2654",         # ♔
+
+    # money / commerce
+    "wallet":   "\u25C6",       # ◆
+    "premium":  "⌬",       #⌬
+    "lifetime": "\u2736",       # ✶
+    "gift":     "\u2726",       # ✦
+    "ticket":   "\u273F",       # ✿
+    "trophy":   "\u2605",       # ★
+
+    # data / analytics
+    "graph":    "\u25AA",       # ▪
+    "stats":    "\u25AA",       # ▪
+    "chart_up": "\u25B2",       # ▲
+    "plan":     "\u25A4",       # ▤
+
+    # comms
+    "broadcast": "⚑",      
+    "chat":      "\u25AB",      # ▫
+
+    # storage / files
+    "folder":   "\u25B8",       # ▸
+    "upload":   "\u25B4",       # ▴
+    "download": "\u25BE",       # ▾
+    "cloud":    "\u2601",       # ☁
+
+    # tools / time / energy
+    "settings": "⚙",       # ⚙
+    "cog":      "\u2699",       # ⚙
+    "bolt":     "\u26A1",       # ⚡
+    "clock":    "\u23F1",       # ⏱
+}
+
+PLAN_LIMITS: Dict[str, Dict[str, Any]] = {
+    "free":       {"name": "Free",       "max_bots": 2,   "ram": 128,  "auto_restart": False, "price": 0,    "days": 0},
+    "starter":    {"name": "Starter",    "max_bots": 4,   "ram": 256,  "auto_restart": True,  "price": 5,    "days": 30},
+    "basic":      {"name": "Basic",      "max_bots": 6,  "ram": 512,  "auto_restart": True,  "price": 10,   "days": 30},
+    "pro":        {"name": "Pro",        "max_bots": 8,  "ram": 2048, "auto_restart": True,  "price": 15,   "days": 30},
+    "enterprise": {"name": "Enterprise", "max_bots": 10,  "ram": 4096, "auto_restart": True,  "price": 35,   "days": 30},
+    "lifetime":   {"name": "Lifetime",   "max_bots": 15, "ram": 8192, "auto_restart": True,  "price": 150,  "days": 36500},
+}
+
 import telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
@@ -461,7 +575,7 @@ def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
         return None
         
     system_news = get_setting("ai_system_news", "No recent updates deployed.")
-    plans_info = [f"{v['name']}: {'Free' if v['price'] == 0 else f'${v['price']}'}" for k, v in PLAN_LIMITS.items()]
+    plans_info = [f"{v['name']}: " + ("Free" if v['price'] == 0 else f"${v['price']}") for k, v in PLAN_LIMITS.items()]
     plans_str = " | ".join(plans_info)
     
     cipher_context = (
@@ -681,118 +795,7 @@ if not TOKEN:
 # automatically becomes the panel owner and is persisted to settings.
 # This lets you deploy with ONLY BOT_TOKEN and claim ownership in one tap.
 
-ANNOUNCE_CHANNEL = os.environ.get("ANNOUNCE_CHANNEL", "").strip()
-try:
-    KEEPALIVE_PORT = int(os.environ.get("PORT", 10460))
-except (TypeError, ValueError):
-    KEEPALIVE_PORT = 10000
 
-BRAND       = "ᶜᴵᴾᴴᴱᴿ ᵀᴱᶜᴴ ᴴᴼˢᵀ"
-BRAND_VER   = "v2.1"
-BRAND_TAG   = f"{BRAND} {BRAND_VER}"
-SUPPORT_USR = "@lord_ciph3r"
-UPDATE_CH   = "https://t.me/cipher_tech_team"
-FOOTER      = f"\n\n<blockquote>{BRAND_TAG}</blockquote>"
-
-# AI Circuit Breaker State
-AI_FAILURE_COUNT = 0
-AI_LAST_FAILURE = 0
-AI_CIRCUIT_OPEN = False
-AI_LOCK = threading.Lock()
-
-# ─── glyphs (smart contextual symbols + emojis for the UI) ──────
-G = {
-    # core status / decisions
-    "ok":         "✓",        # ✔
-    "no":         "\u2718",        # ✘
-    "warn":       "\u26A0",        # ⚠
-    "arrow":      "\u2192",        # →
-    "bullet":     "\u2022",        # •
-    "tri":        "\u25B8",        # ▸
-    "diamond":    "\u25C6",        # ◆
-    "star":       "\u2605",        # ★
-    "spark":      "\u2726",        # ✦
-    "back":       "↲",        # ◀
-    "fwd":        "\u25B6",        # ▶
-    "plus":       "\u2295",        # ⊕
-    "minus":      "\u2296",        # ⊖
-    "rec":        "\u25C9",        # ◉
-    "rec_off":    "\u25CB",        # ○
-
-    # dividers / borders
-    "div":        "\u2501" * 16,   # ━━━…
-    "div_eq":     "\u2550" * 16,   # ═══…
-    "div_dash":   "\u2508" * 16,   # ┈┈┈…
-    "block_on":   "\u25A0",        # ■
-    "block_off":  "\u25A1",        # □
-    "border_top": "\u2550" * 16,   # ═══…
-    "border_mid": "\u2501" * 16,   # ━━━…
-    "border_bot": "\u2550" * 16,   # ═══…
-
-    # process state
-    "play":        "‣",        # ▶
-    "stop":        "\u25A0",        # ■
-    "pause":       "\u2759\u2759",  # ❙❙
-    "refresh":     "\u21BB",        # ↻
-    "running":     "\u25B6",        # ▶
-    "stopped":     "■",        # ■
-    "restarting":  "\u21BB",        # ↻
-    "stop_bot":    "■",        # ■
-
-    # security / access
-    "lock":     "\u25A3",       # ▣
-    "unlock":   "\u25A2",       # ▢
-    "secure":   "\u25C8",       # ◈
-    "key":      "\u2756",       # ❖
-    "shield":   "\u25C7",       # ◇
-    "ban":      "\u2694",       # ⚔
-    "trash":    "\u2716",       # ✖
-    "eye":      "\u25C9",       # ◉
-
-    # people
-    "user":   "\u25C8",         # ◈
-    "users":  "\u25CE",         # ◎
-    "crown":  "\u2654",         # ♔
-
-    # money / commerce
-    "wallet":   "\u25C6",       # ◆
-    "premium":  "⌬",       #⌬
-    "lifetime": "\u2736",       # ✶
-    "gift":     "\u2726",       # ✦
-    "ticket":   "\u273F",       # ✿
-    "trophy":   "\u2605",       # ★
-
-    # data / analytics
-    "graph":    "\u25AA",       # ▪
-    "stats":    "\u25AA",       # ▪
-    "chart_up": "\u25B2",       # ▲
-    "plan":     "\u25A4",       # ▤
-
-    # comms
-    "broadcast": "⚑",      
-    "chat":      "\u25AB",      # ▫
-
-    # storage / files
-    "folder":   "\u25B8",       # ▸
-    "upload":   "\u25B4",       # ▴
-    "download": "\u25BE",       # ▾
-    "cloud":    "\u2601",       # ☁
-
-    # tools / time / energy
-    "settings": "⚙",       # ⚙
-    "cog":      "\u2699",       # ⚙
-    "bolt":     "\u26A1",       # ⚡
-    "clock":    "\u23F1",       # ⏱
-}
-
-PLAN_LIMITS: Dict[str, Dict[str, Any]] = {
-    "free":       {"name": "Free",       "max_bots": 2,   "ram": 128,  "auto_restart": False, "price": 0,    "days": 0},
-    "starter":    {"name": "Starter",    "max_bots": 4,   "ram": 256,  "auto_restart": True,  "price": 5,    "days": 30},
-    "basic":      {"name": "Basic",      "max_bots": 6,  "ram": 512,  "auto_restart": True,  "price": 10,   "days": 30},
-    "pro":        {"name": "Pro",        "max_bots": 8,  "ram": 2048, "auto_restart": True,  "price": 15,   "days": 30},
-    "enterprise": {"name": "Enterprise", "max_bots": 10,  "ram": 4096, "auto_restart": True,  "price": 35,   "days": 30},
-    "lifetime":   {"name": "Lifetime",   "max_bots": 15, "ram": 8192, "auto_restart": True,  "price": 150,  "days": 36500},
-}
 
 # Frozen snapshot of the hardcoded values above, taken before any admin
 # override is ever applied — used by "Reset Defaults" to actually restore
@@ -15158,7 +15161,7 @@ def render_trial(call: types.CallbackQuery) -> None:
     cap = (
         f"<b>{G['eye']} {sc('Free Trial')}</b>\n"
         f"{G['div_eq']}\n"
-        f"{sc(f'Get a free {hours}-hour {plan.capitalize()} trial. Each campaign can be claimed once after any active trial has expired')}.\n"
+        f"{sc('Get a free ' + str(hours) + '-hour ' + plan.capitalize() + ' trial. Each campaign can be claimed once after any active trial has expired')}.\n"
         f"{bullet('Campaign', f'#{current_epoch}')}\n"
         f"{bullet('Status', status_txt)}{FOOTER}"
     )
@@ -15459,8 +15462,8 @@ def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
         f"{bullet('Status', status_lbl)}\n"
         f"{bullet('Kind', st['kind'] or '—')}\n"
         f"{bullet('Uptime', fmt_dur(st['uptimeMs']))}\n"
-        f"{bullet('CPU Usage', f'<code>{cpu_bar}</code>')}\n"
-        f"{bullet('RAM Usage', f'{fmt_bytes(st['memBytes'])} <code>{mem_bar}</code>')}\n"
+        f"{bullet('CPU Usage', '<code>' + cpu_bar + '</code>')}\n"
+        f"{bullet('RAM Usage', fmt_bytes(st['memBytes']) + ' <code>' + mem_bar + '</code>')}\n"
         f"{bullet('Storage', fmt_bytes(st['sizeBytes']))}\n"
         f"{bullet('Created', fmt_ts(b.get('created')))}"
         f"{src_info}"
