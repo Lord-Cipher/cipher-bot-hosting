@@ -12,7 +12,7 @@
     "payments_received": 0
   },
   "webhook_enabled": true,
-  "public_url": "https://10460-ifdszhph8bcyi096anya7-eb75fb27.us2.manus.computer",
+  "public_url": "",
   "payment_auto_enabled": true,
   "auto_approve_payments": false,
   "pending_uploads": {

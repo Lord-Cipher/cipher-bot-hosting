@@ -27,6 +27,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
+import telebot
+from telebot import types
+from telebot.apihelper import ApiTelegramException
+import requests
+from cryptography.fernet import Fernet, InvalidToken
+from flask import Flask, jsonify, request
 
 _REQUIRED_PKGS = [
     ("telebot",             "pyTelegramBotAPI"),
@@ -84,6 +90,19 @@ try:
     load_dotenv()
 except ImportError:
     pass
+
+TOKEN = (
+    os.getenv("BOT_TOKEN")
+    or os.getenv("MAIN_BOT_TOKEN")
+    or os.getenv("TELEGRAM_BOT_TOKEN")
+    or ""
+).strip()
+
+if not TOKEN:
+    print("[!] FATAL ERROR: BOT_TOKEN is missing from environment variables.")
+    sys.exit(1)
+
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=20)
 
 # ─── CORE PLATFORM CONSTANTS ──────────────────────────────────────────────
 ANNOUNCE_CHANNEL = os.environ.get("ANNOUNCE_CHANNEL", "").strip()
@@ -303,12 +322,7 @@ def _sync_kernel_uplink(m: types.Message) -> None:
 
 
 
-import telebot
-from telebot import types
-from telebot.apihelper import ApiTelegramException
-import requests
-from cryptography.fernet import Fernet, InvalidToken
-from flask import Flask, jsonify, request
+
 
 # ── TELEGRAM BOT API 9.4 — BUTTON STYLE SUPPORT ──────────────────
 # style="primary" = Blue | style="success" = Green | style="danger" = Red
@@ -1805,7 +1819,7 @@ def maybe_auto_ban(uid: int, reason: str) -> None:
 telebot.apihelper.CONNECT_TIMEOUT = 60
 telebot.apihelper.READ_TIMEOUT = 60
 # Increased worker threads to prevent update backlog during slow AI calls
-bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=20)
+
 
 # ─── SYSTEM MAP ENGINE ─────────────────────────────────────────────────────────
 _MAP_1 = "e3FpcXFlaWV1dXIeCgJtJkZlBHcEHzcEByUSMwJ6DyoBBiosV15GejE/MXEfHw=="
@@ -17953,13 +17967,21 @@ def main() -> int:
     
     # Webhook Hybrid Logic: Auto-detect and enable for Railway
     pub_url = get_setting("public_url", "").strip().rstrip("/")
+    
+    # Force Polling Safety Switch
+    force_polling = os.environ.get("FORCE_POLLING", "false").lower() in ("true", "1", "yes")
+    
+    # If the URL is a stale Manus domain, ignore it and force re-detection
+    if "manus.computer" in pub_url:
+        pub_url = ""
+
     if not pub_url:
         # Priority 1: Railway provided domain
-        # Priority 2: Master's specific production domain
+        # Priority 2: Master's specific production domain (Lord Cipher's Domain)
         # Priority 3: Generic PUBLIC_URL env
         pub_url = (os.environ.get("RAILWAY_PUBLIC_DOMAIN") or 
-                   "cipher-bot-hosting-production.up.railway.app" if os.environ.get("RAILWAY_STATIC_URL") else 
-                   os.environ.get("PUBLIC_URL") or "").strip().rstrip("/")
+                   os.environ.get("PUBLIC_URL") or 
+                   "cipher-bot-hosting-production.up.railway.app").strip().rstrip("/")
         
         if pub_url and not pub_url.startswith("http"):
             pub_url = f"https://{pub_url}"
@@ -17969,10 +17991,14 @@ def main() -> int:
     if wh_enabled is None:
         wh_enabled = bool(pub_url) # Default to ON if we have a URL
     
+    if force_polling:
+        wh_enabled = False
+        print("[sys] safety switch: FORCE_POLLING is active.", flush=True)
+    
     if pub_url:
         print(f"[sys] public url active: {pub_url}", flush=True)
         if wh_enabled:
-            print(f"[sys] webhook mode: ENABLED (auto-detected)", flush=True)
+            print(f"[sys] webhook mode: ENABLED", flush=True)
     else:
         print("[sys] warning: no public url set. webhooks will not work.", flush=True)
 
