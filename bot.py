@@ -5710,6 +5710,26 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         msg = bot.send_message(call.message.chat.id, "📢 Send the new system update message for the AI's memory:")
         bot.register_next_step_handler(msg, _save_ai_system_news)
         return
+    if data == "adm_ai_routing_menu":
+        return render_adm_ai_routing_menu(call)
+    if data.startswith("adm_ai_route_edit_"):
+        return render_adm_ai_route_edit(call, data[len("adm_ai_route_edit_"):])
+    if data.startswith("adm_ai_set_pri_"):
+        parts = data.split("_")
+        if len(parts) >= 6:
+            plan_key, model = parts[4], parts[5]
+            set_setting(f"ai_model_{plan_key}_primary", model)
+            audit(call.from_user.id, f"ai_route_pri_{plan_key}", model)
+            ack(call, f"{plan_key.upper()} Primary -> {model.upper()}")
+            return render_adm_ai_route_edit(call, plan_key)
+    if data.startswith("adm_ai_set_fb_"):
+        parts = data.split("_")
+        if len(parts) >= 6:
+            plan_key, model = parts[4], parts[5]
+            set_setting(f"ai_model_{plan_key}_fallback", model)
+            audit(call.from_user.id, f"ai_route_fb_{plan_key}", model)
+            ack(call, f"{plan_key.upper()} Fallback -> {model.upper()}")
+            return render_adm_ai_route_edit(call, plan_key)
     
     # Notifications
     if data == "adm_notifications":       return render_adm_notifications(call)
@@ -18415,8 +18435,56 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     cap += f"\n📢 <b>AI Memory & News</b>:\n<code>{esc(system_news)}</code>\n"
     
     cap += f"\n{G['div']}{FOOTER}"
+    kb.add(Btn("🧠  Pʟᴀɴ-Mᴏᴅᴇʟ Rᴏᴜᴛɪɴɢ", callback_data="adm_ai_routing_menu", style="success"))
     kb.add(Btn("📢 Update AI System News", callback_data="adm_ai_news_prompt", style="primary"))
     kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
+def render_adm_ai_routing_menu(call: types.CallbackQuery) -> None:
+    """Sub-menu to assign specific AI models to different plan tiers."""
+    cap = (
+        f"<b>🧠 {sc('AI Plan-Model Routing')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"<i>{sc('Assign specific AI operatives to each hosting plan tier')}.</i>\n\n"
+    )
+    
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for plan_key, plan_data in PLAN_LIMITS.items():
+        primary = get_plan_primary_model(plan_key)
+        fallback = get_plan_fallback_model(plan_key)
+        cap += f"• <b>{plan_data['name']}</b>: <code>{primary.upper()}</code> (FB: {fallback.upper()})\n"
+        kb.add(Btn(f"⚙️ Configure {plan_data['name']}", callback_data=f"adm_ai_route_edit_{plan_key}", style="primary"))
+        
+    kb.add(Btn(f"{G['back']}  AI Cᴏɴꜰɪɢ", callback_data="adm_ai_config", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
+def render_adm_ai_route_edit(call: types.CallbackQuery, plan_key: str) -> None:
+    """Editor for a specific plan's AI model assignment."""
+    if plan_key not in PLAN_LIMITS: return
+    plan_name = PLAN_LIMITS[plan_key]["name"]
+    
+    operatives = ["deepseek-r1", "deepseek-v3", "qwen", "gemini", "gptlogic", "llama-meta", "cohere"]
+    
+    cap = (
+        f"<b>⚙️ {sc('AI Routing')}: {plan_name}</b>\n"
+        f"{G['div_eq']}\n"
+        f"Select the **Primary** and **Fallback** AI operatives for the <b>{plan_name}</b> tier.{FOOTER}"
+    )
+    
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    # Primary Model Selection
+    kb.add(Btn(f"💎 --- PRIMARY MODEL ---", callback_data="none", style="primary"))
+    for op in operatives:
+        is_sel = get_plan_primary_model(plan_key) == op
+        kb.add(Btn(f"{'✅ ' if is_sel else ''}{op.upper()}", callback_data=f"adm_ai_set_pri_{plan_key}_{op}"))
+        
+    # Fallback Model Selection
+    kb.add(Btn(f"🛡️ --- FALLBACK MODEL ---", callback_data="none", style="primary"))
+    for op in operatives:
+        is_sel = get_plan_fallback_model(plan_key) == op
+        kb.add(Btn(f"{'✅ ' if is_sel else ''}{op.upper()}", callback_data=f"adm_ai_set_fb_{plan_key}_{op}"))
+        
+    kb.add(Btn(f"{G['back']}  Rᴏᴜᴛɪɴɢ Mᴇɴᴜ", callback_data="adm_ai_routing_menu", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
 def _save_ai_system_news(m: types.Message) -> None:
@@ -18485,26 +18553,25 @@ def get_ai_model(uid: int) -> str:
     return "free"
 
 def get_plan_primary_model(plan: str) -> str:
-    """Helper to get the primary model name for a plan tier with consistent defaults."""
+    """Helper to get the primary model name for a plan tier dynamically from admin settings."""
     plan = (plan or "free").lower()
-    if plan in ["enterprise", "lifetime"]:
-        return get_setting("ai_model_enterprise_primary", "deepseek-r1")
-    if plan in ["pro", "ultra", "business"]:
-        return get_setting("ai_model_pro_primary", "qwen") # Pro defaults to Qwen as requested
-    if plan in ["starter", "basic"]:
-        return get_setting("ai_model_basic_primary", "deepseek-v3")
-    return get_setting("ai_model_free_primary", "deepseek-v3")
+    # Dynamic lookup: ai_model_{plan}_primary
+    # Defaults: Enterprise/Lifetime -> R1, Pro -> Qwen, Others -> V3
+    default = "deepseek-v3"
+    if plan in ["enterprise", "lifetime"]: default = "deepseek-r1"
+    elif plan == "pro": default = "qwen"
+    
+    return get_setting(f"ai_model_{plan}_primary", default)
 
 def get_plan_fallback_model(plan: str) -> str:
-    """Helper to get the fallback model name for a plan tier."""
+    """Helper to get the fallback model name for a plan tier dynamically from admin settings."""
     plan = (plan or "free").lower()
-    if plan in ["enterprise", "lifetime"]:
-        return get_setting("ai_model_enterprise_fallback", "gemini")
-    if plan in ["pro", "ultra", "business"]:
-        return get_setting("ai_model_pro_fallback", "llama-meta")
-    if plan in ["starter", "basic"]:
-        return get_setting("ai_model_basic_fallback", "cohere")
-    return get_setting("ai_model_free_fallback", "llama-meta")
+    # Dynamic lookup: ai_model_{plan}_fallback
+    # Defaults: Enterprise/Lifetime -> Gemini, Others -> Llama
+    default = "llama-meta"
+    if plan in ["enterprise", "lifetime"]: default = "gemini"
+    
+    return get_setting(f"ai_model_{plan}_fallback", default)
 
 def _handle_ai_chat_document(m: types.Message) -> None:
     """Extracts code from uploaded file or zip and sends to AI for analysis."""
