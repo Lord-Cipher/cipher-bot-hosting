@@ -10163,19 +10163,24 @@ def on_text(m: types.Message) -> None:
                 bot.reply_to(m, "URL must start with http:// or https://")
                 return
             set_setting("public_url", url)
+            set_setting("webhook_enabled", True) # Automatically switch to webhook mode when domain is provided
             USER_STATES.pop(uid, None)
             
-            # Live-apply webhook if enabled
-            if get_setting("webhook_enabled", False):
-                try:
-                    webhook_url = f"{url}/tg-webhook/{TOKEN}"
-                    bot.remove_webhook()
-                    bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-                    bot.reply_to(m, f"{G['ok']} Public URL updated and Webhook linked: <code>{url}</code>", parse_mode="HTML")
-                except Exception as e:
-                    bot.reply_to(m, f"⚠️ URL saved, but Webhook failed: <code>{e}</code>", parse_mode="HTML")
-            else:
-                bot.reply_to(m, f"{G['ok']} Public URL set to: <code>{url}</code>", parse_mode="HTML")
+            # Live-apply webhook immediately
+            try:
+                webhook_url = f"{url}/tg-webhook/{TOKEN}"
+                bot.remove_webhook()
+                bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+                bot.reply_to(m, 
+                    f"<b>{G['ok']} {sc('Public URL & Webhook Activated')}</b>\n"
+                    f"{G['div']}\n"
+                    f"{bullet('Domain', esc(url))}\n"
+                    f"{bullet('Status', 'Webhook Live')}\n"
+                    f"<i>The bot is now operating in high-speed webhook mode.</i>{FOOTER}",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                bot.reply_to(m, f"⚠️ URL saved, but Webhook registration failed: <code>{esc(e)}</code>", parse_mode="HTML")
             return
         if flow == "await_adm_trial_hours":
             try:
@@ -17991,42 +17996,30 @@ def main() -> int:
     _start_keepalive()
     print(f"[sys] keepalive server started on port {KEEPALIVE_PORT}", flush=True)
     
-    # Webhook Hybrid Logic: Auto-detect and enable for Railway
+    # Zero-Config Hybrid Logic: Check settings, env vars, or default safely to Polling
     pub_url = get_setting("public_url", "").strip().rstrip("/")
-    
-    # Force Polling Safety Switch
-    force_polling = os.environ.get("FORCE_POLLING", "false").lower() in ("true", "1", "yes")
-    
-    # If the URL is a stale Manus domain, ignore it and force re-detection
     if "manus.computer" in pub_url:
         pub_url = ""
 
     if not pub_url:
-        # Priority 1: Railway provided domain
-        # Priority 2: Master's specific production domain (Lord Cipher's Domain)
-        # Priority 3: Generic PUBLIC_URL env
-        pub_url = (os.environ.get("RAILWAY_PUBLIC_DOMAIN") or 
-                   os.environ.get("PUBLIC_URL") or 
-                   "cipher-bot-hosting-production.up.railway.app").strip().rstrip("/")
-        
+        pub_url = (os.environ.get("RAILWAY_PUBLIC_DOMAIN") or os.environ.get("PUBLIC_URL") or "").strip().rstrip("/")
         if pub_url and not pub_url.startswith("http"):
             pub_url = f"https://{pub_url}"
+
+    # Check if admin explicitly enabled webhook or if we have a valid domain
+    wh_enabled = get_setting("webhook_enabled", False)
     
-    # Auto-enable webhook if a public URL is found (essential for Railway stability)
-    wh_enabled = get_setting("webhook_enabled", None)
-    if wh_enabled is None:
-        wh_enabled = bool(pub_url) # Default to ON if we have a URL
-    
+    # If FORCE_POLLING is active, respect it
+    force_polling = os.environ.get("FORCE_POLLING", "false").lower() in ("true", "1", "yes")
     if force_polling:
         wh_enabled = False
-        print("[sys] safety switch: FORCE_POLLING is active.", flush=True)
-    
-    if pub_url:
-        print(f"[sys] public url active: {pub_url}", flush=True)
-        if wh_enabled:
-            print(f"[sys] webhook mode: ENABLED", flush=True)
+
+    # If no public URL is configured anywhere, automatically fall back to Polling so the bot NEVER goes offline
+    if not pub_url:
+        wh_enabled = False
+        print("[sys] mode: LONG POLLING (Zero-config VPS mode active — no domain required)", flush=True)
     else:
-        print("[sys] warning: no public url set. webhooks will not work.", flush=True)
+        print(f"[sys] public url active: {pub_url} | webhook: {'ENABLED' if wh_enabled else 'DISABLED (Polling)'}", flush=True)
 
     # Bot commands
     try:
