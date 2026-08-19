@@ -2448,7 +2448,7 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f"Sᴜᴘᴘᴏʀᴛ", callback_data="menu_support",  style="primary"),
     )
     kb.add(
-        Btn(f"🤖  AI Assɪsᴛᴀɴᴛ", callback_data="menu_ai_chat",  style="success"),
+        Btn(f" AI Assɪsᴛᴀɴᴛ", callback_data="menu_ai_chat",  style="success"),
         Btn(f" Mʏ Sᴛᴀᴛꜱ",    callback_data="menu_stats",    style="primary"),
     )
     if admin:
@@ -18566,16 +18566,18 @@ def render_adm_ai_route_edit(call: types.CallbackQuery, plan_key: str) -> None:
     
     kb = types.InlineKeyboardMarkup(row_width=2)
     # Primary Model Selection
-    kb.add(Btn(f"💎 --- PRIMARY MODEL ---", callback_data="none", style="primary"))
+    kb.add(Btn(f"🔴 --- PRIMARY MODEL ---", callback_data="none", style="danger"))
     for op in operatives:
         is_sel = get_plan_primary_model(plan_key) == op
-        kb.add(Btn(f"{'✅ ' if is_sel else ''}{op.upper()}", callback_data=f"adm_ai_set_pri_{plan_key}_{op}"))
+        btn_style = "success" if is_sel else "primary"
+        kb.add(Btn(f"{'✅ ' if is_sel else ''}{op.upper()}", callback_data=f"adm_ai_set_pri_{plan_key}_{op}", style=btn_style))
         
     # Fallback Model Selection
-    kb.add(Btn(f"🛡️ --- FALLBACK MODEL ---", callback_data="none", style="primary"))
+    kb.add(Btn(f"🔴 --- FALLBACK MODEL ---", callback_data="none", style="danger"))
     for op in operatives:
         is_sel = get_plan_fallback_model(plan_key) == op
-        kb.add(Btn(f"{'✅ ' if is_sel else ''}{op.upper()}", callback_data=f"adm_ai_set_fb_{plan_key}_{op}"))
+        btn_style = "success" if is_sel else "primary"
+        kb.add(Btn(f"{'✅ ' if is_sel else ''}{op.upper()}", callback_data=f"adm_ai_set_fb_{plan_key}_{op}", style=btn_style))
         
     kb.add(Btn(f"{G['back']}  Rᴏᴜᴛɪɴɢ Mᴇɴᴜ", callback_data="adm_ai_routing_menu", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
