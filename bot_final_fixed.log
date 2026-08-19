@@ -1,3 +1,0 @@
-  File "/home/ubuntu/project/bot.py", line 17842
-    except KeyboardInterrupt:
-SyntaxError: expected 'except' or 'finally' block

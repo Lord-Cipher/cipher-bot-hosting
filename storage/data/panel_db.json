@@ -1,87 +1,10 @@
 {
-  "users": {
-    "8065173971": {
-      "_id": 8065173971,
-      "name": "𝐕𝖆𝖓𝖙𝖍𝖊𝖝",
-      "username": "vanthex_ciph3r",
-      "plan": "pro",
-      "plan_expires": "2026-08-20T23:40:20.453241+00:00",
-      "joined": "2026-08-18T22:46:45.542122+00:00",
-      "last_seen": "2026-08-18T23:40:36.151008+00:00",
-      "banned": false,
-      "ban_reason": "",
-      "wallet": 0,
-      "kyc": false,
-      "verified": false,
-      "verified_at": null,
-      "ref_by": null,
-      "ref_count": 0,
-      "ref_credit": 0,
-      "trial_used": true,
-      "bot_slots_bonus": 0,
-      "stats": {
-        "commands": 0,
-        "bots_uploaded": 0,
-        "logins": 50
-      },
-      "trial_epoch": 1,
-      "trial_active_until": "2026-08-20T23:40:20.452731+00:00",
-      "last_expiry_warn": 1
-    }
-  },
+  "users": {},
   "bots": {},
   "payments": [],
-  "admins": {},
-  "audit": [
-    {
-      "ts": "2026-08-18T23:30:04.178121+00:00",
-      "uid": 8065173971,
-      "action": "webhook_toggle",
-      "detail": "now=off"
-    },
-    {
-      "ts": "2026-08-18T23:30:18.834876+00:00",
-      "uid": 8065173971,
-      "action": "webhook_toggle",
-      "detail": "now=on"
-    },
-    {
-      "ts": "2026-08-18T23:40:20.970450+00:00",
-      "uid": 0,
-      "action": "trial_grant",
-      "detail": "uid=8065173971 plan=pro hours=48 epoch=1"
-    }
-  ],
+  "tickets": [],
   "coupons": {},
-  "tickets": {},
-  "scheduled_broadcasts": [],
-  "notes": {},
-  "rate_violations": {},
-  "scan_log": [],
-  "notifications": [
-    {
-      "id": "79f5a177",
-      "ts": "2026-08-18T23:40:20.971016+00:00",
-      "type": "SYSTEM",
-      "msg": "User 8065173971 claimed 48h pro trial (Epoch: 1)",
-      "uid": "8065173971",
-      "read": false
-    },
-    {
-      "id": "0e0e5a80",
-      "ts": "2026-08-18T23:40:20.453822+00:00",
-      "type": "PAYMENT",
-      "msg": "Plan 'pro' granted to UID 8065173971",
-      "uid": "8065173971",
-      "read": false
-    },
-    {
-      "id": "b5fc52ad",
-      "ts": "2026-08-18T22:46:46.751084+00:00",
-      "type": "SYSTEM",
-      "msg": "New user registered: 𝐕𝖆𝖓𝖙𝖍𝖊𝖝 (UID: 8065173971)",
-      "uid": "8065173971",
-      "read": false
-    }
-  ]
+  "notifications": [],
+  "banned_ips": [],
+  "audit_log": []
 }

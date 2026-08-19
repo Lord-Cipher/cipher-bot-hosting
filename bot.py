@@ -17708,7 +17708,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "wallet_gift":     start_wallet_gift(call); return
     if data.startswith("payapprove_"): action_payment_approve(call, data.split("_", 1)[1]); return
     if data.startswith("payreject_"):  action_payment_reject(call, data.split("_", 1)[1]); return
-    if data == "noop": ack(call); return
+    if data in ["noop", "none"]: ack(call); return
     ack(call, "?")
 
 
