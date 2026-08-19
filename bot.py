@@ -4306,6 +4306,9 @@ def delete_bot_doc(bot_id: str) -> None:
 
 def user_max_bots(u: Dict[str, Any]) -> int:
     plan = u.get("plan", "free")
+    if plan != "free" and not user_plan_active(u):
+        plan = "free" # Effective plan is free if expired
+        
     default = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])["max_bots"]
     # Honor admin override from Settings → Plans Editor.
     base = int(get_setting(f"plan_max_bots_{plan}", default))
@@ -14795,7 +14798,13 @@ def render_main_menu(chat_id: int, uid: int,
                      intro: Optional[str] = None) -> None:
     USER_STATES.pop(uid, None) # Clear any active flow (e.g. AI Chat)
     u = db_load()["users"].get(str(uid)) or {}
-    plan = PLAN_LIMITS.get(u.get("plan", "free"), PLAN_LIMITS["free"])
+    
+    # Instant expiry check for UI
+    effective_plan_key = u.get("plan", "free")
+    if effective_plan_key != "free" and not user_plan_active(u):
+        effective_plan_key = "free"
+        
+    plan = PLAN_LIMITS.get(effective_plan_key, PLAN_LIMITS["free"])
     bots = list_user_bots(uid)
     running = sum(1 for b in bots if b["_id"] in RUNNING and RUNNING[b["_id"]]["proc"].poll() is None)
     intro_block = f"{intro}\n{G['div']}\n" if intro else ""
@@ -18464,23 +18473,25 @@ def get_ai_model(uid: int) -> str:
     d = db_load_ro()
     u = d["users"].get(str(uid), {})
     
-    # Check if user has an active trial via trial_active_until OR if their current plan is active
-    is_trial = False
+    # 1. Check for Active Free Trial Boost
     try:
-        value = u.get("trial_active_until")
-        if value:
-            if isinstance(value, str):
-                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            else:
-                dt = value
+        trial_until = u.get("trial_active_until")
+        if trial_until:
+            dt = datetime.fromisoformat(str(trial_until).replace("Z", "+00:00"))
             if dt > now_utc():
-                is_trial = True
+                return "enterprise" # Trial boost active
     except Exception: pass
         
-    if is_trial:
-        return "enterprise" # Trials always boost to Elite AI
+    # 2. Check if the current plan is still active (not expired)
+    current_plan = u.get("plan", "free")
+    if current_plan == "free":
+        return "free"
         
-    return u.get("plan", "free")
+    if user_plan_active(u):
+        return current_plan
+        
+    # 3. Plan expired, immediate downgrade to free
+    return "free"
 
 def get_plan_primary_model(plan: str) -> str:
     """Helper to get the primary model name for a plan tier with consistent defaults."""
