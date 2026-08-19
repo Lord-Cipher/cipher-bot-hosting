@@ -2370,9 +2370,6 @@ def payments_kb(plan: Optional[str] = None) -> types.InlineKeyboardMarkup:
     manual_enabled = bool(get_setting("payment_manual_enabled", True))
     auto_enabled = bool(get_setting("payment_auto_enabled", True))
     
-    if auto_enabled or manual_enabled:
-        kb.add(Btn(f"🔘  {sc('Payment Modes')}", callback_data="none", style="primary"))
-        
     if auto_enabled:
         kb.add(Btn(f"🟢  {sc('Automatic Payment')}", callback_data=f"pay_auto{suffix}", style="success"))
         
