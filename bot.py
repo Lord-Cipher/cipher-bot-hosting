@@ -2391,7 +2391,7 @@ def render_manual_payment_methods_for(call: types.CallbackQuery, plan: str) -> N
         f"<b>🔵 {sc('Manual Payment Methods')}</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Plan', p['name'])}\n"
-        f"{bullet('Price', f'{p['price']}{cur_sym()}')}\n"
+        f"{bullet('Price', str(p['price']) + cur_sym())}\n"
         f"{G['div']}\n{sc('Pick a manual method below')}.{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
