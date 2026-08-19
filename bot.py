@@ -17941,7 +17941,12 @@ def main() -> int:
     print(f"[sys] keepalive server started on port {KEEPALIVE_PORT}", flush=True)
     
     wh_enabled = get_setting("webhook_enabled", False)
+    # Auto-detect Railway/Render public URL if not set in settings
     pub_url = get_setting("public_url", "").strip().rstrip("/")
+    if not pub_url:
+        pub_url = (os.environ.get("RAILWAY_PUBLIC_DOMAIN") or os.environ.get("PUBLIC_URL") or "").strip().rstrip("/")
+        if pub_url and not pub_url.startswith("http"):
+            pub_url = f"https://{pub_url}"
     
     if pub_url:
         print(f"[sys] public url detected: {pub_url}", flush=True)
