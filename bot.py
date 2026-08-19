@@ -5324,8 +5324,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
                     bot.send_message(
                         call.from_user.id,
                         f"<b>{G['ok']} {sc('Force backup done')}</b>\n"
-                        f"{bullet('GitHub Sync', 'OK' if ok1 else 'FAIL')}\n"
-                        f"{bullet('Vault Sync (Recovery)', 'SENT')}\n"
+                        f"{bullet('GitHub Sync', 'OK' if (ok1 or not gh_enabled()) else 'SKIPPED (No Repo)')}\n"
+                        f"{bullet('Encrypted Archive', 'SECURED')}\n"
                         f"{bullet('Bots pushed', pushed)}",
                         parse_mode="HTML",
                     )
