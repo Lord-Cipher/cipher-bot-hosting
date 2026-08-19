@@ -8807,6 +8807,14 @@ def render_adm_rate_plan(call: types.CallbackQuery, plan: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_adm_live_monitor(call: types.CallbackQuery) -> None:
+    # Register for live updates
+    if call and call.message:
+        LIVE_UI_SESSIONS[call.message.chat.id] = {
+            "type": "adm_monitor",
+            "msg_id": call.message.message_id,
+            "ts": time.time()
+        }
+
     running_bots = [(bid, info) for bid, info in RUNNING.items()
                     if info["proc"].poll() is None]
     crashed_bots = [(bid, info) for bid, info in RUNNING.items()
@@ -8829,11 +8837,11 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
             pass
     up_s = int(time.time() - START_TIME) if "START_TIME" in globals() else 0
     
-    # Progress bar helper for live monitor
+    # Progress bar helper for live monitor (Elite 20-block precision)
     def lbar(pct: float) -> str:
         p = min(100.0, max(0.0, pct))
-        filled = int(p / 10)
-        return '█' * filled + '░' * (10 - filled) + f" {p:.1f}%"
+        filled = int(p / 5)
+        return '█' * filled + '░' * (20 - filled) + f" {p:.1f}%"
 
     cpu_bar = lbar(panel_cpu)
     mem_total = psutil.virtual_memory().total if psutil else 1
@@ -15361,6 +15369,15 @@ def render_bot_webhook(call: types.CallbackQuery, bot_id: str) -> None:
 
 
 def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
+    # Register for live updates
+    if call and call.message:
+        LIVE_UI_SESSIONS[call.message.chat.id] = {
+            "type": "bot_view",
+            "bot_id": bot_id,
+            "msg_id": call.message.message_id,
+            "ts": time.time()
+        }
+
     b = find_bot(bot_id)
     if not b:
         ack(call, "Not found"); return
@@ -15394,17 +15411,18 @@ def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
     if b.get("source") in ("github", "github_browser"):
         src_info = f"\n{bullet('Source', '🐙 GitHub')}\n{bullet('Repo', esc((b.get('gh_repo','?'))[:40]))}"
 
-    # Visual resource gauges
-    cpu_pct = min(100.0, max(0.0, st['cpuPct']))
-    cpu_filled = int(cpu_pct / 5) # 20 blocks for more precision
-    cpu_bar = '█' * cpu_filled + '░' * (20 - cpu_filled)
+    # Visual resource gauges (Elite 20-block precision)
+    def _make_elite_bar(pct: float) -> str:
+        p = min(100.0, max(0.0, pct))
+        filled = int(p / 5)
+        return '█' * filled + '░' * (20 - filled) + f" {p:.1f}%"
 
+    cpu_bar = _make_elite_bar(st['cpuPct'])
+    
     mem_mb = st['memBytes'] / (1024 * 1024)
-    # Use plan limit for normalization, fallback to 512MB
     plan_ram = float(plan.get("ram", 512))
-    mem_pct = min(100.0, (mem_mb / plan_ram) * 100)
-    mem_filled = int(mem_pct / 5)
-    mem_bar = '█' * mem_filled + '░' * (20 - mem_filled)
+    mem_pct = (mem_mb / plan_ram) * 100 if plan_ram > 0 else 0
+    mem_bar = _make_elite_bar(mem_pct)
 
     cap = (
         f"<b>{G['diamond']} {esc(b['name'])}</b>\n"
@@ -15412,8 +15430,8 @@ def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
         f"{bullet('Status', status_lbl)}\n"
         f"{bullet('Kind', st['kind'] or '—')}\n"
         f"{bullet('Uptime', fmt_dur(st['uptimeMs']))}\n"
-        f"{bullet('CPU Usage', '{:.1f}% <code>{}</code>'.format(st['cpuPct'], cpu_bar))}\n"
-        f"{bullet('RAM Usage', '{} <code>{}</code>'.format(fmt_bytes(st['memBytes']), mem_bar))}\n"
+        f"{bullet('CPU Usage', f'<code>{cpu_bar}</code>')}\n"
+        f"{bullet('RAM Usage', f'{fmt_bytes(st['memBytes'])} <code>{mem_bar}</code>')}\n"
         f"{bullet('Storage', fmt_bytes(st['sizeBytes']))}\n"
         f"{bullet('Created', fmt_ts(b.get('created')))}"
         f"{src_info}"
@@ -17996,41 +18014,39 @@ def render_adm_pay_modes(call: types.CallbackQuery) -> None:
 # Stores real-time CPU/RAM stats for all running bots and the system itself.
 TELEMETRY:     Dict[str, Dict[str, Any]] = {}
 SYS_TELEMETRY: Dict[str, Any] = {"cpu": 0.0, "ram_used": 0, "ram_total": 0}
+_PROC_CACHE:   Dict[int, psutil.Process] = {}
+LIVE_UI_SESSIONS: Dict[int, Dict[str, Any]] = {}
 
 def _telemetry_loop():
-    """Background thread to update resource usage stats every 10 seconds."""
+    """Background thread to update resource usage stats and refresh live UI every 5 seconds."""
     while True:
         try:
             if psutil is None:
                 time.sleep(60); continue
             
             # System-wide stats
-            SYS_TELEMETRY["cpu"] = psutil.cpu_percent(interval=1)
+            SYS_TELEMETRY["cpu"] = psutil.cpu_percent(interval=None)
             mem = psutil.virtual_memory()
             SYS_TELEMETRY["ram_used"] = mem.used
             SYS_TELEMETRY["ram_total"] = mem.total
             
-            # Alert on high system usage (once per hour to avoid spam)
-            now = time.time()
-            last_alert = SYS_TELEMETRY.get("last_alert", 0)
-            if now - last_alert > 3600:
-                if SYS_TELEMETRY["cpu"] > 90:
-                    log_notification("SYSTEM", f"Critical CPU Usage Alert: {SYS_TELEMETRY['cpu']}%")
-                    SYS_TELEMETRY["last_alert"] = now
-                elif (mem.used / mem.total) > 0.9:
-                    log_notification("SYSTEM", f"Critical RAM Usage Alert: {int(mem.used/1024/1024)}MB / {int(mem.total/1024/1024)}MB")
-                    SYS_TELEMETRY["last_alert"] = now
-            
             # Per-bot stats
+            active_pids = set()
             for bot_id, info in list(RUNNING.items()):
                 try:
                     proc = info.get("proc")
                     if not proc or proc.poll() is not None:
                         TELEMETRY.pop(bot_id, None); continue
                     
-                    p = psutil.Process(proc.pid)
-                    # Use a short interval but cache it so the UI doesn't block
-                    cpu = p.cpu_percent(interval=0.1)
+                    pid = proc.pid
+                    active_pids.add(pid)
+                    
+                    if pid not in _PROC_CACHE:
+                        _PROC_CACHE[pid] = psutil.Process(pid)
+                        _PROC_CACHE[pid].cpu_percent(interval=None) # Initialize
+                    
+                    p = _PROC_CACHE[pid]
+                    cpu = p.cpu_percent(interval=None)
                     mem_rss = p.memory_info().rss
                     
                     TELEMETRY[bot_id] = {
@@ -18040,8 +18056,51 @@ def _telemetry_loop():
                     }
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     TELEMETRY.pop(bot_id, None)
+                    _PROC_CACHE.pop(pid, None)
                 except Exception:
                     pass
+            
+            # Cleanup dead processes from cache
+            for pid in list(_PROC_CACHE.keys()):
+                if pid not in active_pids:
+                    _PROC_CACHE.pop(pid, None)
+            
+            # ── LIVE UI UPDATES ──
+            now = time.time()
+            for chat_id, sess in list(LIVE_UI_SESSIONS.items()):
+                # Auto-expire sessions after 2 minutes of no manual interaction
+                if now - sess.get("ts", 0) > 120:
+                    LIVE_UI_SESSIONS.pop(chat_id, None)
+                    continue
+                
+                try:
+                    # Construct a mock CallbackQuery to reuse existing render functions
+                    mock_call = types.CallbackQuery(
+                        id=str(random.randint(1000, 9999)),
+                        from_user=types.User(id=chat_id, is_bot=False, first_name="Master"),
+                        chat_instance="0",
+                        data="live_update",
+                        json_string=""
+                    )
+                    # Manually attach the message object
+                    mock_msg = types.Message(
+                        message_id=sess["msg_id"],
+                        from_user=None,
+                        date=int(now),
+                        chat=types.Chat(id=chat_id, type="private"),
+                        content_type="photo",
+                        options=[],
+                        json_string=""
+                    )
+                    mock_call.message = mock_msg
+                    
+                    if sess["type"] == "bot_view":
+                        render_bot_view(mock_call, sess["bot_id"])
+                    elif sess["type"] == "adm_monitor":
+                        render_adm_live_monitor(mock_call)
+                except Exception:
+                    pass
+                    
         except Exception as e:
             print(f"[telemetry] error: {e}", flush=True)
         
