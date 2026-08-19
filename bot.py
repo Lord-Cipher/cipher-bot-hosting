@@ -11352,87 +11352,113 @@ def _send_approval_request_to_admins(b: Dict[str, Any], info: Dict[str, Any],
 
 def approve_bot(bot_id: str, admin_uid: int) -> Dict[str, Any]:
     b = find_bot(bot_id)
-    if not b:
-        return {"ok": False, "error": "Bot not found."}
-    pending_remove(bot_id)
-    b["approval_status"] = "approved"
-    b["approval_reason"] = ""
-    b["status"] = "stopped"
-    save_bot(b)
-    audit(admin_uid, "approve_bot", f"bot={bot_id}")
-    # Notify uploader
-    try:
-        owner = b.get("owner")
-        if owner:
-            bot.send_message(
-                owner,
-                f"<b>{G['ok']} {sc('Your bot was approved')}</b>\n"
-                f"{bullet('Bot', b.get('name'))}\n"
-                f"{sc('Starting it now')}…",
-                parse_mode="HTML",
-            )
-    except Exception:
-        pass
-    # Auto-start in background
-    def _bg() -> None:
+    info = pending_remove(bot_id)
+    if not b and not info:
+        return {"ok": False, "error": "Bot or pending upload not found."}
+    
+    if b:
+        b["approval_status"] = "approved"
+        b["approval_reason"] = ""
+        b["status"] = "stopped"
+        save_bot(b)
+        audit(admin_uid, "approve_bot", f"bot={bot_id}")
         try:
-            res = start_child(b)
-            if not res.get("ok") and b.get("owner"):
-                try:
-                    bot.send_message(
-                        b["owner"],
-                        f"<b>{G['no']} {sc('Auto-start failed after approval')}</b>\n"
-                        f"{bullet('Error', esc(res.get('error', '')))}",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"[approve_bot bg] {e}")
-    threading.Thread(target=_bg, daemon=True).start()
+            owner = b.get("owner")
+            if owner:
+                bot.send_message(
+                    owner,
+                    f"<b>{G['ok']} {sc('Your bot was approved')}</b>\n"
+                    f"{bullet('Bot', b.get('name'))}\n"
+                    f"{sc('Starting it now')}…",
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
+        def _bg() -> None:
+            try:
+                res = start_child(b)
+                if not res.get("ok") and b.get("owner"):
+                    try:
+                        bot.send_message(
+                            b["owner"],
+                            f"<b>{G['no']} {sc('Auto-start failed after approval')}</b>\n"
+                            f"{bullet('Error', esc(res.get('error', '')))}",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[approve_bot bg] {e}")
+        threading.Thread(target=_bg, daemon=True).start()
+    elif info:
+        audit(admin_uid, "approve_pending_file", f"file={info.get('file_name')} user={info.get('user_id')}")
+        try:
+            owner = info.get("user_id")
+            if owner:
+                bot.send_message(
+                    owner,
+                    f"<b>{G['ok']} {sc('Your file upload was approved')}</b>\n"
+                    f"{bullet('File', info.get('file_name'))}",
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
     return {"ok": True}
 
 
 def reject_bot(bot_id: str, admin_uid: int, reason: str = "") -> Dict[str, Any]:
     b = find_bot(bot_id)
-    if not b:
-        return {"ok": False, "error": "Bot not found."}
-    pending_remove(bot_id)
-    b["approval_status"] = "rejected"
-    b["approval_reason"] = reason or "rejected by admin"
-    b["status"] = "rejected"
-    save_bot(b)
-    # Wipe the encrypted blobs + bot dir — rejected uploads should not
-    # linger on disk.
-    try:
-        for f in b.get("enc_files") or []:
-            try:
-                Path(f.get("enc_path", "")).unlink(missing_ok=True)
-            except Exception:
-                pass
-        rmrf(b.get("dir", ""))
-    except Exception:
-        pass
-    # Remove the bot entry so the user's slot frees up
-    try:
-        db = db_load()
-        db["bots"].pop(bot_id, None)
-        db_save(db)
-    except Exception:
-        pass
-    audit(admin_uid, "reject_bot", f"bot={bot_id} reason={reason}")
-    try:
-        owner = b.get("owner")
-        if owner:
-            bot.send_message(
-                owner,
-                f"<b>{G['no']} {sc('Your bot was rejected')}</b>\n"
-                f"{bullet('Bot', b.get('name'))}\n"
-                f"{bullet('Reason', reason or 'No reason given')}",
-                parse_mode="HTML",
-            )
-    except Exception:
-        pass
+    info = pending_remove(bot_id)
+    if not b and not info:
+        return {"ok": False, "error": "Bot or pending upload not found."}
+    
+    if b:
+        b["approval_status"] = "rejected"
+        b["approval_reason"] = reason or "rejected by admin"
+        b["status"] = "rejected"
+        save_bot(b)
+        try:
+            for f in b.get("enc_files") or []:
+                try:
+                    Path(f.get("enc_path", "")).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            rmrf(b.get("dir", ""))
+        except Exception:
+            pass
+        try:
+            db = db_load()
+            db["bots"].pop(bot_id, None)
+            db_save(db)
+        except Exception:
+            pass
+        audit(admin_uid, "reject_bot", f"bot={bot_id} reason={reason}")
+        try:
+            owner = b.get("owner")
+            if owner:
+                bot.send_message(
+                    owner,
+                    f"<b>{G['no']} {sc('Your bot was rejected')}</b>\n"
+                    f"{bullet('Bot', b.get('name'))}\n"
+                    f"{bullet('Reason', reason or 'No reason given')}",
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
+    elif info:
+        audit(admin_uid, "reject_pending_file", f"file={info.get('file_name')} user={info.get('user_id')} reason={reason}")
+        try:
+            owner = info.get("user_id")
+            if owner:
+                bot.send_message(
+                    owner,
+                    f"<b>{G['no']} {sc('Your file upload was rejected')}</b>\n"
+                    f"{bullet('File', info.get('file_name'))}\n"
+                    f"{bullet('Reason', reason or 'No reason given')}",
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
     return {"ok": True}
 
 
@@ -18234,6 +18260,13 @@ def _call_ai_api(prompt: str, user_plan: str = "free") -> Optional[str]:
     res_fb = _call_kaalix_model(fallback_model, prompt)
     if res_fb:
         return res_fb
+        
+    # Master Fallback: If regional models (Qwen/Gemini) fail, route through DeepSeek which has proven 100% stable
+    for master_backup in ["deepseek-v3", "deepseek-r1"]:
+        if master_backup not in (primary_model, fallback_model):
+            res_master = _call_kaalix_model(master_backup, prompt)
+            if res_master:
+                return res_master
         
     return "I am currently operating in Low-Power Mode due to an uplink disturbance. Please try again shortly."
 
