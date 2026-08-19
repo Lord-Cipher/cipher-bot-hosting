@@ -15594,9 +15594,21 @@ def start_pip_install_flow(call: types.CallbackQuery, bot_id: str) -> None:
         ("pydantic", "pydantic"), ("python-dotenv", "dotenv")
     ]
     
+    # Check which packages are already installed in .deps
+    bot_dir = Path(b.get("dir", ""))
+    deps_dir = bot_dir / ".deps"
+    installed_packages = []
+    if deps_dir.exists():
+        installed_packages = [d.name.lower() for d in deps_dir.iterdir() if d.is_dir()]
+
     kb = types.InlineKeyboardMarkup(row_width=2)
     for name, code in all_libs:
-        kb.add(Btn(f"📦 {name}", callback_data=f"pkg_quick_{bot_id}_{name}"))
+        # Check if the import code or the package name itself is in .deps
+        is_installed = code.lower() in installed_packages or name.lower().replace("-", "_") in installed_packages
+        btn_style = "success" if is_installed else "primary"
+        btn_label = f"✅ {name}" if is_installed else f"📦 {name}"
+        kb.add(Btn(btn_label, callback_data=f"pkg_quick_{bot_id}_{name}", style=btn_style))
+        
     kb.add(Btn(f"{G['back']} Back", callback_data=f"bot_view_{bot_id}", style="danger"))
     
     guide_text = (
@@ -17020,9 +17032,13 @@ def _do_pip_install_live(chat_id: int, uid: int, b: Dict[str, Any], packages: Li
             final_bar = _progress_bar(100, 100) + " <b>Complete!</b>" if ok else "<b>Installation Failed</b>"
             status_txt = f"{G['ok']} Successfully installed!" if ok else f"{G['no']} Installation failed."
             
+            kb = types.InlineKeyboardMarkup()
+            kb.add(Btn(f"{G['back']} Back to Installer", callback_data=f"bot_pip_{b['_id']}", style="success"))
+            
             bot.edit_message_text(
                 f"<b>📦 Package Installer</b>\n{G['div']}\n{status_txt}\n<code>{final_bar}</code>\n<pre>{esc(out or 'No output')}</pre>",
-                chat_id=chat_id, message_id=p_msg.message_id, parse_mode="HTML")
+                chat_id=chat_id, message_id=p_msg.message_id, parse_mode="HTML",
+                reply_markup=kb)
         except Exception as e:
             stop_evt.set()
             try:
