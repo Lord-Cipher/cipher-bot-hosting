@@ -8828,23 +8828,36 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
         except Exception:
             pass
     up_s = int(time.time() - START_TIME) if "START_TIME" in globals() else 0
+    
+    # Progress bar helper for live monitor
+    def lbar(pct: float) -> str:
+        p = min(100.0, max(0.0, pct))
+        filled = int(p / 10)
+        return '█' * filled + '░' * (10 - filled) + f" {p:.1f}%"
+
+    cpu_bar = lbar(panel_cpu)
+    mem_total = psutil.virtual_memory().total if psutil else 1
+    mem_pct = (panel_ram / mem_total) * 100 if mem_total > 0 else 0
+    ram_bar = lbar(mem_pct)
+
     cap = (
-        f"<b>📡 {sc('Live Monitor')}</b>\n"
+        f"<b>📡 {sc('Live Monitor')} (5s Live Feed)</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Panel Uptime',   fmt_dur(up_s * 1000))}\n"
-        f"{bullet('Panel RAM',      fmt_bytes(panel_ram))}\n"
-        f"{bullet('Panel CPU',      f'{panel_cpu:.1f}%')}\n"
+        f"{bullet('Panel RAM',      f'{fmt_bytes(panel_ram)} <code>{ram_bar}</code>')}\n"
+        f"{bullet('Panel CPU',      f'<code>{cpu_bar}</code>')}\n"
         f"{G['div']}\n"
         f"{bullet('▶ Running Bots',  len(running_bots))}\n"
         f"{bullet('💥 Crashed',      len(crashed_bots))}\n"
         f"{bullet('Child RAM Total', fmt_bytes(total_child_ram))}\n"
         f"{bullet('Child CPU Total', f'{total_child_cpu:.1f}%')}\n"
         f"{G['div']}\n"
-        + "\n".join(
+        f"<b>{sc('Active Instances')} (5s Auto-Sync):</b>\n"
+        + ("\n".join(
             f"  {G['bullet']} <code>{bid[:8]}</code> "
-            f"{esc(info.get('name','?')[:18])}"
-            for bid, info in running_bots[:8]
-        )
+            f"{esc(info.get('name','?')[:14])} | <code>{lbar(TELEMETRY.get(bid, {}).get('cpu', 0.0))}</code>"
+            for bid, info in running_bots[:6]
+        ) if running_bots else f"<i>{sc('No active instances')}</i>")
         + f"\n{G['div']}{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
@@ -17926,7 +17939,7 @@ def _telemetry_loop():
         except Exception as e:
             print(f"[telemetry] error: {e}", flush=True)
         
-        time.sleep(8)
+        time.sleep(5)
 
 # ─── AI SERVICES ───────────────────────────────────────────────────────────
 
