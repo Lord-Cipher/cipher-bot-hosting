@@ -7725,14 +7725,13 @@ def render_adm_pay_config(call: types.CallbackQuery) -> None:
     )
     kb.add(
         Btn("📋  Pᴀʏ Hɪꜱᴛᴏʀʏ",    callback_data="adm_payments",         style="primary"),
-        Btn(f"{G['back']}  Bᴀᴄᴋ",  callback_data="menu_admin",           style="danger"),
+        Btn("✅  Aᴘᴘʀᴏᴠᴇ Pᴀʏ",     callback_data="adm_approve",          style="success"),
     )
     kb.add(
-        Btn("✅  Aᴘᴘʀᴏᴠᴇ Pᴀʏ",     callback_data="adm_approve",          style="success"),
         Btn("📤  Exᴘᴏʀᴛ CSV",       callback_data="adm_user_export_csv",  style="primary"),
+        Btn("💳  Pᴀʏᴍᴇɴᴛ Rᴇqᴜᴇꜱᴛꜱ", callback_data="adm_payment_requests", style="primary"),
     )
-    kb.add(Btn("💳  Pᴀʏᴍᴇɴᴛ Rᴇqᴜᴇꜱᴛꜱ", callback_data="adm_payment_requests", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
+    kb.add(Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
 
