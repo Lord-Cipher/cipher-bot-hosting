@@ -10163,20 +10163,18 @@ def on_text(m: types.Message) -> None:
                 bot.reply_to(m, "URL must start with http:// or https://")
                 return
             set_setting("public_url", url)
-            set_setting("webhook_enabled", True) # Automatically switch to webhook mode when domain is provided
+            set_setting("webhook_enabled", True)
             USER_STATES.pop(uid, None)
             
-            # Live-apply webhook immediately
             try:
                 webhook_url = f"{url}/tg-webhook/{TOKEN}"
                 bot.remove_webhook()
                 bot.set_webhook(url=webhook_url, drop_pending_updates=True)
                 bot.reply_to(m, 
-                    f"<b>{G['ok']} {sc('Public URL & Webhook Activated')}</b>\n"
+                    f"<b>{G['ok']} {sc('Public URL Saved & Webhook Registered')}</b>\n"
                     f"{G['div']}\n"
                     f"{bullet('Domain', esc(url))}\n"
-                    f"{bullet('Status', 'Webhook Live')}\n"
-                    f"<i>The bot is now operating in high-speed webhook mode.</i>{FOOTER}",
+                    f"<i>Note: For full webhook event loop activation, please trigger a quick restart/redeploy on your hosting platform (Railway/VPS).</i>{FOOTER}",
                     parse_mode="HTML"
                 )
             except Exception as e:
