@@ -1333,8 +1333,22 @@ _DB_DEFAULT_KEYS: Tuple[Tuple[str, Any], ...] = (
 
 def _ensure_db_defaults(d: Dict[str, Any]) -> Dict[str, Any]:
     for k, v in _DB_DEFAULT_KEYS:
-        if k not in d:
-            d[k] = copy.deepcopy(v) if isinstance(v, (dict, list)) else v
+        expected_type = type(v)
+        if k not in d or not isinstance(d[k], expected_type):
+            if expected_type is dict and isinstance(d.get(k), list):
+                # Convert list to dict safely
+                try:
+                    d[k] = {str(item.get("id", i)): item for i, item in enumerate(d[k]) if isinstance(item, dict)}
+                except Exception:
+                    d[k] = {}
+            elif expected_type is list and isinstance(d.get(k), dict):
+                # Convert dict to list safely
+                try:
+                    d[k] = list(d[k].values())
+                except Exception:
+                    d[k] = []
+            else:
+                d[k] = copy.deepcopy(v) if isinstance(v, (dict, list)) else v
     return d
 
 
@@ -15268,12 +15282,12 @@ def action_trial_claim(call: types.CallbackQuery) -> None:
 
 def render_coupon(call: types.CallbackQuery) -> None:
     cap = (
-        f"<b>{G['key']} {sc('Coupon')}</b>\n"
+        f"<b>{sc('Coupon')}</b>\n"
         f"{G['div_eq']}\n"
         f"{sc('Have a discount code? Tap redeem and send the code')}.{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup()
-    kb.add(Btn(f"{G['plus']}  {sc('Redeem Code')}", callback_data="coupon_redeem"))
+    kb.add(Btn(f"{sc('Redeem Code')}", callback_data="coupon_redeem", style="success"))
     kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("coupon", PHOTOS["main"]), cap, kb, call=call)
 
