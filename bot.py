@@ -16420,7 +16420,7 @@ def render_adm_plans(call: types.CallbackQuery) -> None:
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
     for k, v in PLAN_LIMITS.items():
-        kb.add(Btn(f"\u270f\ufe0f  {sc(v['name'])}", callback_data=f"adm_plan_edit_{k}"))
+        kb.add(Btn(f"\u270f\ufe0f  {sc(v['name'])}", callback_data=f"adm_plan_edit_{k}", style="primary"))
     kb.add(Btn("\u21ba  Reset All Defaults", callback_data="adm_set_plans_reset", style="danger"))
     kb.add(Btn(f"{G['back']}  Settings", callback_data="adm_settings", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
