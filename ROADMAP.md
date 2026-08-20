@@ -43,3 +43,10 @@ This document outlines the elite features and future upgrades planned for the **
 *   **Status:** Wishlist (Pending Implementation)
 *   **Description:** A commercial API endpoint that allows users to query the platform's bonded AI operatives (Claude, DeepSeek, Qwen) for external applications.
 *   **Objective:** Monetize idle AI routing channels and turn the hosting platform into a multi-purpose AI service provider.
+
+---
+
+## 💳 7. "Cipher-Pay" Integrated Gateway
+*   **Status:** Wishlist (Pending Implementation)
+*   **Description:** A centralized payment processing API that allows hosted bots to accept cryptocurrency payments (BTC, LTC, TRX, USDT) through the platform's primary merchant accounts.
+*   **Objective:** Act as the "Financial Banker" for all hosted bots. Users can monetize their bots instantly without setting up their own merchant accounts. The platform handles the transaction, credits the user's internal wallet, and deducts a small processing fee (e.g., 2%) as passive revenue for the Master.
