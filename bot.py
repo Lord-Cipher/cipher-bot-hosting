@@ -2431,16 +2431,16 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
     )
     kb.add(
         Btn(f" Wᴀʟʟᴇᴛ",     callback_data="menu_wallet",   style="success"),
-        Btn(f"Tɪᴄᴋᴇᴛꜱ",    callback_data="menu_tickets",  style="primary"),
+        Btn(f"Tɪᴄᴋᴇᴛꜱ",    callback_data="menu_tickets",  style="success"),
     )
     if bool(get_setting("trial_enabled", True)):
         kb.add(
             Btn(f" Fʀᴇᴇ Tʀɪᴀʟ",    callback_data="menu_trial",    style="success"),
-            Btn(f" Cᴏᴜᴘᴏɴ",        callback_data="menu_coupon",   style="primary"),
+            Btn(f" Cᴏᴜᴘᴏɴ",        callback_data="menu_coupon",   style="success"),
         )
     else:
         kb.add(
-            Btn(f" Cᴏᴜᴘᴏɴ",        callback_data="menu_coupon",   style="primary"),
+            Btn(f" Cᴏᴜᴘᴏɴ",        callback_data="menu_coupon",   style="success"),
         )
         
     kb.add(
@@ -15068,7 +15068,7 @@ def render_payment_screen(call: types.CallbackQuery, data: str) -> None:
     )
     kb = types.InlineKeyboardMarkup()
     USER_STATES[call.from_user.id] = {"flow": "await_payment_proof", "method": method, "plan": plan}
-    kb.add(Btn(f"{G['plus']}  {sc('Send Proof')}", callback_data="pay_proof"))
+    kb.add(Btn(f"{G['plus']}  {sc('Send Proof')}", callback_data="pay_proof", style="success"))
     kb.add(Btn(f"{G['back']}  {sc('Methods')}", callback_data=f"plan_buy_{plan}" if plan else "menu_buy", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
 
@@ -15125,7 +15125,10 @@ def render_referral(call: types.CallbackQuery) -> None:
         f"{G['div']}\n"
         f"{sc('Each friend who joins via your link gives you +1 bot slot')}.\n{FOOTER}"
     )
-    show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, back_main_kb(), call=call)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn(f"📋  {sc('Copy Referral Link')}", callback_data="referral_copy", style="success"))
+    kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, kb, call=call)
 
 
 def render_wallet(call: types.CallbackQuery) -> None:
@@ -15283,7 +15286,7 @@ def render_user_stats(call: types.CallbackQuery) -> None:
     bots = list_user_bots(uid)
     running = sum(1 for b in bots if b["_id"] in RUNNING and RUNNING[b["_id"]]["proc"].poll() is None)
     pays = [x for x in d.get("payments", []) if x.get("uid") == uid and x.get("status") == "approved"]
-    tickets = d.get("tickets", {})
+    tickets = _get_tickets_dict()
     my_tickets = [t for t in tickets.values() if t.get("uid") == uid]
     plan_expires = u.get("plan_expires")
     expires_txt = fmt_ts(plan_expires) if plan_expires else ("Forever" if p["price"] == 0 else "\u2014")
@@ -15313,9 +15316,20 @@ def render_user_stats(call: types.CallbackQuery) -> None:
     show_menu(call.message.chat.id, PHOTOS["stats"], cap, back_main_kb(), call=call)
 
 
+def _get_tickets_dict() -> dict:
+    try:
+        raw = db_load().get("tickets", {})
+        if isinstance(raw, dict):
+            return raw
+        elif isinstance(raw, list):
+            return {str(t.get("id")): t for t in raw if isinstance(t, dict) and t.get("id")}
+    except Exception:
+        pass
+    return {}
+
 def render_user_tickets(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
-    d = db_load()["tickets"]
+    d = _get_tickets_dict()
     mine = [t for t in d.values() if t.get("uid") == uid][-10:]
     rows = "\n".join(
         f"{G['bullet']} <code>{t['id']}</code> {G['bullet']} {esc(t.get('status'))} {G['bullet']} {esc(t.get('subject', ''))[:40]}"
@@ -15327,7 +15341,7 @@ def render_user_tickets(call: types.CallbackQuery) -> None:
     )
     kb = types.InlineKeyboardMarkup()
     for t in mine:
-        kb.add(Btn(f"#{t['id']} {esc(t.get('subject', ''))[:25]}", callback_data=f"ticket_view_{t['id']}", style="primary"))
+        kb.add(Btn(f"#{t['id']} {esc(t.get('subject', ''))[:25]}", callback_data=f"ticket_view_{t['id']}", style="success"))
     kb.add(
         Btn(f"{G['plus']}  {sc('Open Ticket')}", callback_data="ticket_open", style="success"),
         Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"),
@@ -17658,6 +17672,19 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_buy":      render_buy_menu(call); return
     if data == "menu_profile":  render_profile(call); return
     if data == "menu_referral": render_referral(call); return
+    if data == "referral_copy":
+        uid = call.from_user.id
+        try:
+            me = bot.get_me()
+            link = f"https://t.me/{me.username}?start={uid}"
+        except Exception:
+            link = f"https://t.me/SimranRBOT?start={uid}"
+        ack(call, f"Referral Link copied: {link}", show_alert=True)
+        try:
+            bot.send_message(call.message.chat.id, f"<b>🔗 {sc('Your Referral Link')}</b>\n<code>{link}</code>", parse_mode="HTML")
+        except Exception:
+            pass
+        return
     if data == "menu_wallet":   render_wallet(call); return
     if data == "menu_help":     render_help(call); return
     if data == "menu_support":  render_support(call); return
