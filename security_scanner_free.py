@@ -54,7 +54,7 @@ WEIGHTS: Dict[str, int] = {
     "🔴 Restricted Access": 45,
     "🔴 System Integrity": 45,
     "🟡 Review Needed": 8,
-    "🔴 Credential Safety": 8,
+    "🔵 Info": 0,
 }
 
 BOT_TOKEN_RE = re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b")
@@ -82,11 +82,12 @@ def static_scan(code: str, filename: str = "") -> Dict[str, List[str]]:
         if hits:
             results[category] = _dedupe(hits)
 
+    # Bot tokens are expected in a hosting platform; they are not suspicious.
     tokens = BOT_TOKEN_RE.findall(code)
     if tokens:
-        results.setdefault("🔴 Credential Safety", [])
-        results["🔴 Credential Safety"].append(
-            f"Token-like credential present: {tokens[0][:12]}..."
+        results.setdefault("🔵 Info", [])
+        results["🔵 Info"].append(
+            f"Bot token detected (ending in ...{tokens[0][-4:]})"
         )
     return results
 
@@ -246,12 +247,15 @@ def scan_code(code: str, filename: str = "unknown.py") -> Dict[str, Any]:
     risk = calculate_risk(findings, ast_findings)
     high_confidence = _has_high_confidence_finding(findings, ast_findings)
 
+    # Ignore "🔵 Info" when determining if a project is suspicious.
+    suspicious_static = {k: v for k, v in findings.items() if not k.startswith("🔵")}
+
     # One warning is not enough to block a project. Automatic rejection requires
     # multiple points of evidence, including at least one high-confidence signal.
     critical = any(finding.startswith("CRITICAL_CONFIDENCE:") for finding in ast_findings)
     if critical or (high_confidence and risk >= 70):
         verdict = "DANGEROUS"
-    elif findings or ast_findings or risk >= 20:
+    elif suspicious_static or ast_findings or risk >= 20:
         verdict = "SUSPICIOUS"
     else:
         verdict = "SAFE"
