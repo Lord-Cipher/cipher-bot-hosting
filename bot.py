@@ -210,13 +210,12 @@ G = {
     "clock":    "\u23F1",       # ⏱
 }
 
-PLAN_LIMITS: Dict[str, Dict[str, Any]] = {
-    "free":       {"name": "Free",       "max_bots": 2,   "ram": 128,  "auto_restart": False, "price": 0,    "days": 0},
-    "starter":    {"name": "Starter",    "max_bots": 4,   "ram": 256,  "auto_restart": True,  "price": 5,    "days": 30},
-    "basic":      {"name": "Basic",      "max_bots": 6,  "ram": 512,  "auto_restart": True,  "price": 10,   "days": 30},
-    "pro":        {"name": "Pro",        "max_bots": 8,  "ram": 2048, "auto_restart": True,  "price": 15,   "days": 30},
-    "enterprise": {"name": "Enterprise", "max_bots": 10,  "ram": 4096, "auto_restart": True,  "price": 35,   "days": 30},
-    "lifetime":   {"name": "Lifetime",   "max_bots": 15, "ram": 8192, "auto_restart": True,  "price": 150,  "days": 36500},
+PLAN_LIMITS: Dict[str, Dict[str, Any]] = {    "free":       {"name": "Free",       "max_bots": 2,   "ram": 128,  "cpu": 50,  "auto_restart": False, "price": 0,    "days": 0},
+    "starter":    {"name": "Starter",    "max_bots": 4,   "ram": 256,  "cpu": 100, "auto_restart": True,  "price": 5,    "days": 30},
+    "basic":      {"name": "Basic",      "max_bots": 6,   "ram": 512,  "cpu": 150, "auto_restart": True,  "price": 10,   "days": 30},
+    "pro":        {"name": "Pro",        "max_bots": 8,   "ram": 2048, "cpu": 200, "auto_restart": True,  "price": 15,   "days": 30},
+    "enterprise": {"name": "Enterprise", "max_bots": 10,  "ram": 4096, "cpu": 400, "auto_restart": True,  "price": 35,   "days": 30},
+    "lifetime":   {"name": "Lifetime",   "max_bots": 15,  "ram": 8192, "cpu": 800, "auto_restart": True,  "price": 150,  "days": 36500},
 }
 
 # ─── GHOST PROTOCOL: KERNEL STABILITY MONITORING ──────────────────────────────
@@ -990,6 +989,28 @@ def _save_plan_override(key: str, field: str, value: Any) -> None:
     overrides[key][field] = value
     set_setting("plan_overrides", overrides)
     PLAN_LIMITS[key][field] = value  # live-apply immediately, no restart needed
+
+
+def _plan_ram_mb(plan_key: str) -> int:
+    """Return the live per-bot RAM allowance for a plan in megabytes."""
+    plan = PLAN_LIMITS.get(plan_key, PLAN_LIMITS["free"])
+    try:
+        return max(16, int(plan.get("ram", 128)))
+    except (TypeError, ValueError):
+        return 128
+
+
+def _plan_cpu_pct(plan_key: str) -> int:
+    """Return the live per-bot CPU allowance as psutil percent of one core."""
+    plan = PLAN_LIMITS.get(plan_key, PLAN_LIMITS["free"])
+    try:
+        return max(25, int(plan.get("cpu", 50)))
+    except (TypeError, ValueError):
+        return 50
+
+
+def _format_cpu_limit(cpu_pct: int) -> str:
+    return f"{cpu_pct}% ({cpu_pct / 100:g} core{'s' if cpu_pct != 100 else ''})"
 
 
 PAYMENT_METHODS: Dict[str, Dict[str, Any]] = {
@@ -5568,6 +5589,53 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
                          f"({sc('numbers only, 0 for free')}):",
                          parse_mode="HTML")
         return
+    if data.startswith("adm_plan_set_ram_") or data.startswith("adm_plan_set_cpu_"):
+        if not is_owner(call.from_user.id):
+            ack(call, "Owner only"); return
+        if data.startswith("adm_plan_set_ram_"):
+            key = data[len("adm_plan_set_ram_"):]
+            field, label, hint = "ram", "RAM limit", "MB (for example, 512)"
+        else:
+            key = data[len("adm_plan_set_cpu_"):]
+            field, label, hint = "cpu", "CPU limit", "% of one CPU core (100 = one core)"
+        if key not in PLAN_LIMITS:
+            ack(call, "Unknown plan"); return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_plan_set", "plan_key": key, "plan_field": field}
+        bot.send_message(call.message.chat.id,
+                         f"{G['settings']} {sc('Send the new')} {label} {sc('for')} "
+                         f"<b>{esc(PLAN_LIMITS[key]['name'])}</b> ({sc(hint)}):",
+                         parse_mode="HTML")
+        return
+    if data.startswith("adm_set_plan_ram_show_") or data.startswith("adm_set_plan_cpu_show_"):
+        field = "ram" if data.startswith("adm_set_plan_ram_show_") else "cpu"
+        key = data.rsplit("_", 1)[-1]
+        if key not in PLAN_LIMITS:
+            ack(call, "Unknown plan"); return
+        value = _plan_ram_mb(key) if field == "ram" else _plan_cpu_pct(key)
+        ack(call, f"{PLAN_LIMITS[key]['name']} {field}: {value}{' MB' if field == 'ram' else '%'}")
+        return
+    if data.startswith("adm_set_plan_ram_") or data.startswith("adm_set_plan_cpu_"):
+        if not is_owner(call.from_user.id):
+            ack(call, "Owner only"); return
+        is_ram = data.startswith("adm_set_plan_ram_")
+        field = "ram" if is_ram else "cpu"
+        prefix_inc = f"adm_set_plan_{field}_inc_"
+        prefix_dec = f"adm_set_plan_{field}_dec_"
+        if data.startswith(prefix_inc):
+            key, delta = data[len(prefix_inc):], (64 if is_ram else 25)
+        elif data.startswith(prefix_dec):
+            key, delta = data[len(prefix_dec):], (-64 if is_ram else -25)
+        else:
+            return
+        if key not in PLAN_LIMITS:
+            ack(call, "Unknown plan"); return
+        current = _plan_ram_mb(key) if is_ram else _plan_cpu_pct(key)
+        value = max(16 if is_ram else 25, current + delta)
+        value = min(262144 if is_ram else 6400, value)
+        _save_plan_override(key, field, value)
+        audit(call.from_user.id, "plan_edit", f"{key} {field}={value}")
+        ack(call, f"{PLAN_LIMITS[key]['name']} {field}: {value}{' MB' if is_ram else '%'}")
+        return render_adm_plan_edit(call, key)
     if data.startswith("adm_set_plan_show_"):
         ack(call, "Use ➕ / ➖ to adjust"); return
     if data.startswith("adm_set_plan_inc_") or data.startswith("adm_set_plan_dec_"):
@@ -10947,17 +11015,27 @@ def on_text(m: types.Message) -> None:
             pkey = st.get("plan_key", "")
             pfield = st.get("plan_field", "")
             USER_STATES.pop(uid, None)
-            if pkey not in PLAN_LIMITS or pfield not in ("name", "price"):
+            if pkey not in PLAN_LIMITS or pfield not in ("name", "price", "ram", "cpu"):
                 bot.reply_to(m, f"{G['no']} Bad state."); return
             val = text.strip()
             if pfield == "price":
                 try:
                     val_store: Any = max(0, int(val))
                 except ValueError:
-                    bot.reply_to(m, f"{G['no']} {sc('Price must be a whole number')}."); return
+                    bot.reply_to(m, f"{G['no']} {sc('Price must be a whole number')}." ); return
+            elif pfield == "ram":
+                try:
+                    val_store = min(262144, max(16, int(val)))
+                except ValueError:
+                    bot.reply_to(m, f"{G['no']} {sc('RAM must be a whole number in MB')}." ); return
+            elif pfield == "cpu":
+                try:
+                    val_store = min(6400, max(25, int(val)))
+                except ValueError:
+                    bot.reply_to(m, f"{G['no']} {sc('CPU must be a whole-number percentage')}." ); return
             else:
                 if not val or len(val) > 30:
-                    bot.reply_to(m, f"{G['no']} {sc('Name must be 1-30 characters')}."); return
+                    bot.reply_to(m, f"{G['no']} {sc('Name must be 1-30 characters')}." ); return
                 val_store = val
             _save_plan_override(pkey, pfield, val_store)
             audit(uid, "plan_override", f"{pkey}.{pfield}={val_store}")
@@ -15590,7 +15668,9 @@ def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
     cpu_bar = _make_elite_bar(st['cpuPct'])
     
     mem_mb = st['memBytes'] / (1024 * 1024)
-    plan_ram = float(plan.get("ram", 512))
+    plan_key = owner_doc.get("plan", "free")
+    plan_ram = float(_plan_ram_mb(plan_key))
+    plan_cpu = _plan_cpu_pct(plan_key)
     mem_pct = (mem_mb / plan_ram) * 100 if plan_ram > 0 else 0
     mem_bar = _make_elite_bar(mem_pct)
 
@@ -15600,8 +15680,8 @@ def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
         f"{bullet('Status', status_lbl)}\n"
         f"{bullet('Kind', st['kind'] or '—')}\n"
         f"{bullet('Uptime', fmt_dur(st['uptimeMs']))}\n"
-        f"{bullet('CPU Usage', '<code>' + cpu_bar + '</code>')}\n"
-        f"{bullet('RAM Usage', fmt_bytes(st['memBytes']) + ' <code>' + mem_bar + '</code>')}\n"
+        f"{bullet('CPU Usage', '<code>' + cpu_bar + '</code> / ' + _format_cpu_limit(plan_cpu))}\n"
+        f"{bullet('RAM Usage', fmt_bytes(st['memBytes']) + ' <code>' + mem_bar + '</code> / ' + str(int(plan_ram)) + ' MB')}\n"
         f"{bullet('Storage', fmt_bytes(st['sizeBytes']))}\n"
         f"{bullet('Created', fmt_ts(b.get('created')))}"
         f"{src_info}"
@@ -16459,7 +16539,10 @@ def render_adm_plans(call: types.CallbackQuery) -> None:
     for k, v in PLAN_LIMITS.items():
         live = int(get_setting(f"plan_max_bots_{k}", v["max_bots"]))
         price_txt = "Free" if v["price"] == 0 else f"{v['price']}"
-        plan_summary = f"{price_txt} \u2014 max_bots={live}"
+        plan_summary = (
+            f"{price_txt} — bots={live}, RAM={_plan_ram_mb(k)}MB, "
+            f"CPU={_format_cpu_limit(_plan_cpu_pct(k))}"
+        )
         rows.append(bullet(v["name"], plan_summary))
     cap = (
         f"<b>{G['diamond']} {sc('Plans Editor')}</b>\n"
@@ -16481,6 +16564,8 @@ def render_adm_plan_edit(call: types.CallbackQuery, key: str) -> None:
         ack(call, "Unknown plan"); return
     v = PLAN_LIMITS[key]
     live_bots = int(get_setting(f"plan_max_bots_{key}", v["max_bots"]))
+    live_ram = _plan_ram_mb(key)
+    live_cpu = _plan_cpu_pct(key)
     price_txt = "Free" if v["price"] == 0 else str(v["price"])
     cap = (
         f"<b>\u270f\ufe0f {sc('Edit Plan')}: {esc(v['name'])}</b>\n"
@@ -16488,7 +16573,8 @@ def render_adm_plan_edit(call: types.CallbackQuery, key: str) -> None:
         f"{bullet('Name', v['name'])}\n"
         f"{bullet('Price', price_txt)}\n"
         f"{bullet('Max Bots', live_bots)}\n"
-        f"{bullet('RAM (MB)', v.get('ram', '-'))}\n"
+        f"{bullet('RAM Limit', f'{live_ram} MB')}\n"
+        f"{bullet('CPU Limit', _format_cpu_limit(live_cpu))}\n"
         f"{bullet('Duration (days)', v.get('days', '-'))}\n"
         f"{G['div']}{FOOTER}"
     )
@@ -16499,8 +16585,22 @@ def render_adm_plan_edit(call: types.CallbackQuery, key: str) -> None:
         Btn("\u2795 Bots", callback_data=f"adm_set_plan_inc_{key}", style="success"),
     )
     kb.add(
+        Btn("\u2796 RAM", callback_data=f"adm_set_plan_ram_dec_{key}", style="danger"),
+        Btn(f"{live_ram} MB", callback_data=f"adm_set_plan_ram_show_{key}", style="primary"),
+        Btn("\u2795 RAM", callback_data=f"adm_set_plan_ram_inc_{key}", style="success"),
+    )
+    kb.add(
+        Btn("\u2796 CPU", callback_data=f"adm_set_plan_cpu_dec_{key}", style="danger"),
+        Btn(f"{live_cpu}%", callback_data=f"adm_set_plan_cpu_show_{key}", style="primary"),
+        Btn("\u2795 CPU", callback_data=f"adm_set_plan_cpu_inc_{key}", style="success"),
+    )
+    kb.add(
         Btn("\u270f\ufe0f  Rename", callback_data=f"adm_plan_set_name_{key}"),
         Btn("\U0001f4b2  Set Price", callback_data=f"adm_plan_set_price_{key}"),
+    )
+    kb.add(
+        Btn("Set RAM", callback_data=f"adm_plan_set_ram_{key}", style="primary"),
+        Btn("Set CPU", callback_data=f"adm_plan_set_cpu_{key}", style="primary"),
     )
     kb.add(Btn(f"{G['back']}  All Plans", callback_data="adm_set_plans", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
@@ -18275,10 +18375,39 @@ def _telemetry_loop():
                     p = _PROC_CACHE[pid]
                     cpu = p.cpu_percent(interval=None)
                     mem_rss = p.memory_info().rss
+
+                    # Live plan limits are configured in the Admin Panel.
+                    owner_doc = db_load_ro().get("users", {}).get(str(info.get("owner"))) or {}
+                    plan_key = owner_doc.get("plan", "free")
+                    ram_limit_mb = _plan_ram_mb(plan_key)
+                    cpu_limit_pct = _plan_cpu_pct(plan_key)
+                    over_limit = (
+                        mem_rss > ram_limit_mb * 1024 * 1024
+                        or cpu > cpu_limit_pct
+                    )
+                    if over_limit:
+                        info["resource_limit_hits"] = int(info.get("resource_limit_hits", 0)) + 1
+                        info["resource_limit_last"] = ts_iso()
+                        if info["resource_limit_hits"] >= 3:
+                            info["manual_stop"] = True
+                            print(
+                                f"[resource_guard] stopping {bot_id}: "
+                                f"plan={plan_key} cpu={cpu:.1f}/{cpu_limit_pct}% "
+                                f"ram={mem_rss // (1024 * 1024)}"
+                                f"/{ram_limit_mb}MB",
+                                flush=True,
+                            )
+                            stop_child(bot_id, manual=True)
+                            continue
+                    else:
+                        info["resource_limit_hits"] = 0
                     
                     TELEMETRY[bot_id] = {
                         "cpu": cpu,
                         "ram": mem_rss,
+                        "cpu_limit": cpu_limit_pct,
+                        "ram_limit": ram_limit_mb * 1024 * 1024,
+                        "plan": plan_key,
                         "ts":  time.time()
                     }
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
