@@ -440,12 +440,13 @@ def _sec_ast_scan(code: str) -> List[str]:
     for node in _ast.walk(tree):
         if isinstance(node, _ast.Constant) and isinstance(node.value, str):
             s = node.value
-            if len(s) > 60:
-                # Calculate Shannon entropy
+            # Only inspect unusually large strings; normal configuration, URLs,
+            # and Telegram messages should not be treated as hidden executable content.
+            if len(s) > 200:
                 prob = [float(s.count(c)) / len(s) for c in dict.fromkeys(list(s))]
                 entropy = -sum(p * math.log(p, 2) for p in prob)
-                if entropy > 4.8:
-                    findings.append(f"High-entropy hidden string payload detected (entropy={entropy:.2f})")
+                if entropy > 5.3:
+                    findings.append(f"Large encoded configuration block detected (entropy={entropy:.2f})")
 
     for node in _ast.walk(tree):
         if isinstance(node, _ast.Call):
@@ -524,17 +525,14 @@ def _sec_get_verdict(risk_score: int, static_findings: dict) -> Tuple[str, str]:
     )
     has_credentials = bool(static_findings.get("🔴 Credential Safety"))
 
-    # REJECT only for real attack patterns at high risk
+    # Only deterministic, high-confidence combinations may block an upload.
+    # A high score from a warning or a credential-looking string alone must
+    # never reject an otherwise valid bot.
     if has_blocking and risk_score >= 70:
         return "DANGEROUS", "REJECT"
-    if risk_score >= 85:
-        return "DANGEROUS", "REJECT"
-    # Hardcoded token alone → warn but allow (MANUAL_REVIEW)
-    if has_credentials and not has_blocking and risk_score < 40:
+    if has_credentials and not has_blocking:
         return "SUSPICIOUS", "MANUAL_REVIEW"
-    if has_blocking and risk_score >= 35:
-        return "SUSPICIOUS", "MANUAL_REVIEW"
-    if risk_score >= 55:
+    if has_blocking or risk_score >= 55:
         return "SUSPICIOUS", "MANUAL_REVIEW"
     return "SAFE", "APPROVE"
 
@@ -782,22 +780,20 @@ def _combined_scan(file_path: str) -> dict:
         return pattern_result
 
     # ── Merge AI + pattern results ────────────────────────────────
-    # Final risk = weighted average (AI 60%, pattern 40%)
+    # Deterministic checks are authoritative for blocking. AI is advisory:
+    # an uncertain model response can request manual review, but it cannot
+    # reject an upload on its own. This prevents benign scripts from being
+    # blocked because a remote model misunderstood normal bot code.
     ai_risk  = ai_result["ai_risk_score"]
     pat_risk = pattern_result.get("risk_score", 0)
-    merged_risk = int(ai_risk * 0.6 + pat_risk * 0.4)
+    merged_risk = int(pat_risk * 0.7 + ai_risk * 0.3)
 
-    # AI says DANGEROUS → always REJECT regardless of pattern score
-    # AI says SAFE but pattern is DANGEROUS → MANUAL_REVIEW (trust but verify)
-    # AI says SUSPICIOUS → at least MANUAL_REVIEW
-    ai_v  = ai_result["ai_verdict"]
+    ai_v  = str(ai_result.get("ai_verdict", "SAFE")).upper()
     pat_v = pattern_result.get("verdict", "SAFE")
 
-    if ai_v == "DANGEROUS":
+    if pat_v == "DANGEROUS":
         verdict = "DANGEROUS"; recommendation = "REJECT"
-    elif ai_v == "SUSPICIOUS" or pat_v == "DANGEROUS":
-        verdict = "SUSPICIOUS"; recommendation = "MANUAL_REVIEW"
-    elif pat_v == "SUSPICIOUS":
+    elif pat_v == "SUSPICIOUS" or ai_v in ("SUSPICIOUS", "DANGEROUS"):
         verdict = "SUSPICIOUS"; recommendation = "MANUAL_REVIEW"
     else:
         verdict = "SAFE"; recommendation = "APPROVE"
@@ -5821,6 +5817,9 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             audit(call.from_user.id, "gh_set_default_repo", repo)
             ack(call, f"Default repo set: {repo}")
         return render_adm_gh_browser(call)
+    # Security log is handled explicitly here so it cannot be swallowed by
+    # the generic advanced-panel fallback when callback maps are extended.
+    if data == "adm_security_log":        return render_adm_security_log(call)
     # Payment Config
     if data == "adm_pay_config":          return render_adm_pay_config(call)
     if data == "adm_ai_config":           return render_adm_ai_config(call)
@@ -5854,6 +5853,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         parts = data.split("_")
         if len(parts) >= 6:
             plan_key, model = parts[4], parts[5]
+            if model not in _AI_OPERATIVE_KEYS:
+                ack(call, "Unknown AI operative"); return
             set_setting(f"ai_model_{plan_key}_primary", model)
             audit(call.from_user.id, f"ai_route_pri_{plan_key}", model)
             ack(call, f"{plan_key.upper()} Primary -> {model.upper()}")
@@ -5862,6 +5863,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         parts = data.split("_")
         if len(parts) >= 6:
             plan_key, model = parts[4], parts[5]
+            if model not in _AI_OPERATIVE_KEYS:
+                ack(call, "Unknown AI operative"); return
             set_setting(f"ai_model_{plan_key}_fallback", model)
             audit(call.from_user.id, f"ai_route_fb_{plan_key}", model)
             ack(call, f"{plan_key.upper()} Fallback -> {model.upper()}")
@@ -16441,9 +16444,9 @@ def render_adm_plan_edit(call: types.CallbackQuery, key: str) -> None:
     )
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
-        Btn("\u2796 Bots", callback_data=f"adm_set_plan_dec_{key}"),
-        Btn(str(live_bots), callback_data=f"adm_set_plan_show_{key}"),
-        Btn("\u2795 Bots", callback_data=f"adm_set_plan_inc_{key}"),
+        Btn("\u2796 Bots", callback_data=f"adm_set_plan_dec_{key}", style="danger"),
+        Btn(str(live_bots), callback_data=f"adm_set_plan_show_{key}", style="primary"),
+        Btn("\u2795 Bots", callback_data=f"adm_set_plan_inc_{key}", style="success"),
     )
     kb.add(
         Btn("\u270f\ufe0f  Rename", callback_data=f"adm_plan_set_name_{key}"),
@@ -18529,19 +18532,22 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         print(f"[ai_fix] error: {e}", flush=True)
         ack(call, "Uplink to AI Doctor failed.")
 
+_AI_OPERATIVE_LABELS = {
+    "deepseek-r1": "Deepseek-R1 (Elite Reasoning)",
+    "deepseek-v3": "Deepseek-V3 (High-Speed Chat)",
+    "qwen": "Qwen (Technical Logic)",
+    "gemini": "Gemini (Broad Knowledge)",
+    "gptlogic": "Gptlogic (Logic Analysis)",
+    "cohere": "Cohere (Efficient Chat)",
+}
+_AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
+
+
 def render_adm_ai_config(call: types.CallbackQuery) -> None:
     """Admin UI to manage AI Command Center and Operatives."""
     global_on = bool(get_setting("ai_global_enabled", True))
     
-    operatives = {
-        "deepseek-r1": "Deepseek-R1 (Elite Reasoning)",
-        "deepseek-v3": "Deepseek-V3 (High-Speed Chat)",
-        "qwen": "Qwen (Technical Logic)",
-        "gemini": "Gemini (Broad Knowledge)",
-        "gptlogic": "Gptlogic (Logic Analysis)",
-        "llama-meta": "Llama-Meta (General Chat)",
-        "cohere": "Cohere (Efficient Chat)"
-    }
+    operatives = _AI_OPERATIVE_LABELS
     
     cap = (
         f"<b>🤖 {sc('AI Command Center')}</b>\n"
@@ -18598,7 +18604,7 @@ def render_adm_ai_route_edit(call: types.CallbackQuery, plan_key: str) -> None:
     if plan_key not in PLAN_LIMITS: return
     plan_name = PLAN_LIMITS[plan_key]["name"]
     
-    operatives = ["deepseek-r1", "deepseek-v3", "qwen", "gemini", "gptlogic", "llama-meta", "cohere"]
+    operatives = list(_AI_OPERATIVE_KEYS)
     
     cap = (
         f"<b>⚙️ {sc('AI Routing')}: {plan_name}</b>\n"
@@ -18698,17 +18704,19 @@ def get_plan_primary_model(plan: str) -> str:
     if plan in ["enterprise", "lifetime"]: default = "deepseek-r1"
     elif plan == "pro": default = "qwen"
     
-    return get_setting(f"ai_model_{plan}_primary", default)
+    configured = str(get_setting(f"ai_model_{plan}_primary", default)).lower()
+    return configured if configured in _AI_OPERATIVE_KEYS else default
 
 def get_plan_fallback_model(plan: str) -> str:
     """Helper to get the fallback model name for a plan tier dynamically from admin settings."""
     plan = (plan or "free").lower()
     # Dynamic lookup: ai_model_{plan}_fallback
-    # Defaults: Enterprise/Lifetime -> Gemini, Others -> Llama
-    default = "llama-meta"
+    # Defaults: Enterprise/Lifetime -> Gemini, other tiers -> Deepseek-V3.
+    default = "deepseek-v3"
     if plan in ["enterprise", "lifetime"]: default = "gemini"
-    
-    return get_setting(f"ai_model_{plan}_fallback", default)
+
+    configured = str(get_setting(f"ai_model_{plan}_fallback", default)).lower()
+    return configured if configured in _AI_OPERATIVE_KEYS else default
 
 def _handle_ai_chat_document(m: types.Message) -> None:
     """Extracts code from uploaded file or zip and sends to AI for analysis."""
