@@ -723,8 +723,10 @@ def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
                 url = f"{base_url}Chatbot"; params = {"action": "chat", "q": full_prompt}
             elif model_name == "hotbot":
                 url = f"{base_url}hotbot"; params = {"action": "chat", "message": full_prompt}
-            elif model_name == "qwen-claude":
-                url = f"{base_url}Qwen-Claude-Haiku"; params = {"message": full_prompt, "model": "claude-haiku"}
+            elif model_name == "claude-haiku":
+                url = f"{base_url}Qwen-Claude-Haiku"; params = {"message": full_prompt, "model": "claude"}
+            elif model_name == "qwen-80b":
+                url = f"{base_url}Qwen-Claude-Haiku"; params = {"message": full_prompt, "model": "qwen"}
             elif model_name == "perplexity":
                 url = f"{base_url}perplexity-ai"; params = {"prompt": full_prompt}
             elif model_name == "all-ai":
@@ -18573,7 +18575,8 @@ _AI_OPERATIVE_LABELS = {
     "qwen": "Qwen-72B (Technical)",
     "chatbot": "Elite Assistant (Claude)",
     "hotbot": "Premium AI (GPT-5)",
-    "qwen-claude": "Speed King (Haiku)",
+    "claude-haiku": "Claude Haiku 4.5",
+    "qwen-80b": "Qwen3 80B (Elite)",
     "perplexity": "Live Research (Web)",
     "gemini": "Gemini-Pro (Knowledge)",
     "gptlogic": "Logic Analysis (GPT)",
