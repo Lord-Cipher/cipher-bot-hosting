@@ -16,6 +16,7 @@ import string
 import subprocess
 import sys
 import importlib
+import logging
 import tarfile
 import tempfile
 import threading
