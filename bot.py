@@ -15117,7 +15117,7 @@ def render_referral(call: types.CallbackQuery) -> None:
     except Exception:
         link = f"https://t.me/SimranRBOT?start={uid}"
     cap = (
-        f"<b>{G['users']} {sc('Referral')}</b>\n"
+        f"<b>{sc('Referral')}</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Your link', link)}\n"
         f"{bullet('Referrals', u.get('ref_count', 0))}\n"
@@ -15126,7 +15126,7 @@ def render_referral(call: types.CallbackQuery) -> None:
         f"{sc('Each friend who joins via your link gives you +1 bot slot')}.\n{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(Btn(f"📋  {sc('Copy Referral Link')}", callback_data="referral_copy", style="success"))
+    kb.add(Btn(f"{sc('Copy Referral Link')}", callback_data="referral_copy", style="success"))
     kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, kb, call=call)
 
@@ -17681,7 +17681,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
             link = f"https://t.me/SimranRBOT?start={uid}"
         ack(call, f"Referral Link copied: {link}", show_alert=True)
         try:
-            bot.send_message(call.message.chat.id, f"<b>🔗 {sc('Your Referral Link')}</b>\n<code>{link}</code>", parse_mode="HTML")
+            bot.send_message(call.message.chat.id, f"<b>{sc('Your Referral Link')}</b>\n<code>{link}</code>", parse_mode="HTML")
         except Exception:
             pass
         return
