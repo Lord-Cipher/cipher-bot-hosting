@@ -672,8 +672,8 @@ Telegram bot patterns as malicious.
 CODE TO ANALYZE:
 """
 
-def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
-    """Calls Kaalix keyless API models with Cipher Intelligence context and Circuit Breaker."""
+def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
+    """Calls keyless API models with Cipher Intelligence context and Circuit Breaker."""
     global AI_FAILURE_COUNT, AI_LAST_FAILURE, AI_CIRCUIT_OPEN
     
     # Check circuit breaker
@@ -712,30 +712,64 @@ def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
     
     full_prompt = cipher_context + prompt
     try:
-        url = f"https://r-bots-free-apis.co08.art/api/{model_name}"
-        # Reduced timeout to 12s to fail faster and avoid hanging threads
-        r = requests.get(url, params={"q": full_prompt}, timeout=12)
+        # Determine provider and endpoint
+        if model_name in ["claude", "chatbot", "hotbot", "qwen-claude", "perplexity", "all-ai"]:
+            # OmegaTech Provider
+            base_url = "https://api.omegatech.app/api/ai/"
+            params = {}
+            if model_name == "claude":
+                url = f"{base_url}Claude"; params = {"text": full_prompt}
+            elif model_name == "chatbot":
+                url = f"{base_url}Chatbot"; params = {"action": "chat", "q": full_prompt}
+            elif model_name == "hotbot":
+                url = f"{base_url}hotbot"; params = {"action": "chat", "message": full_prompt}
+            elif model_name == "qwen-claude":
+                url = f"{base_url}Qwen-Claude-Haiku"; params = {"message": full_prompt, "model": "claude-haiku"}
+            elif model_name == "perplexity":
+                url = f"{base_url}perplexity-ai"; params = {"prompt": full_prompt}
+            elif model_name == "all-ai":
+                url = f"{base_url}All-Ai"; params = {"action": "chat", "message": full_prompt}
+        else:
+            # Kaalix Provider (Default)
+            url = f"https://r-bots-free-apis.co08.art/api/{model_name}"
+            params = {"q": full_prompt}
+
+        r = requests.get(url, params=params, timeout=15)
         if r.status_code == 200:
             data = r.json()
-            res = data.get("response") or data.get("result") or data.get("answer")
+            # Handle various response formats
+            res = (
+                data.get("result") or 
+                data.get("reply") or 
+                data.get("answer") or 
+                data.get("response") or
+                (data.get("data", {}) if isinstance(data.get("data"), dict) else {}).get("reply")
+            )
             if res:
+                # If res is a string that looks like JSON (some OmegaTech models do this), try to parse it
+                if isinstance(res, str) and res.startswith('{"reply"'):
+                    try: res = _json.loads(res).get("reply", res)
+                    except: pass
+                
                 with AI_LOCK:
-                    AI_FAILURE_COUNT = max(0, AI_FAILURE_COUNT - 1) # Success reduces failure count
+                    AI_FAILURE_COUNT = max(0, AI_FAILURE_COUNT - 1)
                 return res
         
-        # If we get here, it's a failure (status code != 200 or empty response)
         raise Exception(f"API returned status {r.status_code}")
         
     except Exception as e:
-        print(f"[kaalix] {model_name} error: {e}", flush=True)
+        print(f"[ai] {model_name} error: {e}", flush=True)
         with AI_LOCK:
             AI_FAILURE_COUNT += 1
             AI_LAST_FAILURE = time.time()
             if AI_FAILURE_COUNT >= 5:
                 AI_CIRCUIT_OPEN = True
-                print(f"[ai] circuit opened due to repeated failures", flush=True)
                 log_notification("SYSTEM", "AI Uplink is unstable. Circuit breaker opened for 5 minutes.")
     return None
+
+def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
+    """Compatibility wrapper for the old function name."""
+    return _call_ai_model(model_name, prompt)
 
 def _ai_scan_code(code: str, filename: str = "file.py") -> Optional[Dict[str, Any]]:
     """Keyless security scan using Kaalix reasoning models."""
@@ -18533,12 +18567,18 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         ack(call, "Uplink to AI Doctor failed.")
 
 _AI_OPERATIVE_LABELS = {
-    "deepseek-r1": "Deepseek-R1 (Elite Reasoning)",
-    "deepseek-v3": "Deepseek-V3 (High-Speed Chat)",
-    "qwen": "Qwen (Technical Logic)",
-    "gemini": "Gemini (Broad Knowledge)",
-    "gptlogic": "Gptlogic (Logic Analysis)",
-    "cohere": "Cohere (Efficient Chat)",
+    "claude": "Claude-3.5 (Elite Brain)",
+    "deepseek-r1": "Deepseek-R1 (Reasoning)",
+    "deepseek-v3": "Deepseek-V3 (Fast Chat)",
+    "qwen": "Qwen-72B (Technical)",
+    "chatbot": "Elite Assistant (Claude)",
+    "hotbot": "Premium AI (GPT-5)",
+    "qwen-claude": "Speed King (Haiku)",
+    "perplexity": "Live Research (Web)",
+    "gemini": "Gemini-Pro (Knowledge)",
+    "gptlogic": "Logic Analysis (GPT)",
+    "all-ai": "Universal Fallback",
+    "cohere": "Cohere (Efficient)",
 }
 _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
 
