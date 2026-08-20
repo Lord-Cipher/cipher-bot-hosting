@@ -17791,6 +17791,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_webhook_"):     render_bot_webhook(call, data.split("_", 2)[2]); return
     if data.startswith("bot_wh_regen_"):   action_bot_webhook_regen(call, data.split("_", 3)[3]); return
     if data.startswith("bot_ai_fix_"):     action_bot_ai_fix(call, data.split("_", 3)[3]); return
+    if data.startswith("bot_applyfix_"): action_bot_apply_fix(call, data.split("_", 2)[2]); return
     if data.startswith("bot_pip_"):         start_pip_install_flow(call, data.split("_", 2)[2]); return
     if data.startswith("pkg_quick_"):
         parts = data.split("_", 3)
@@ -18528,60 +18529,142 @@ def handle_ai_chat_message(m: types.Message) -> None:
                               m.chat.id, loading_msg.message_id, parse_mode="HTML")
 
 def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
-    """Uses AI to analyze crash logs and provide a solution."""
+    """Self-Healing AI Sentinel: analyzes crash logs, proposes a patch, and asks for explicit user permission before applying."""
     b = find_bot(bot_id)
     if not b: ack(call, "Bot not found"); return
     
-    # Get last logs
     st = child_status(bot_id, b)
     logs = st.get("logs", [])
     last_error = (b.get("last_error") or "").strip()
     
-    log_snippet = "\n".join(logs[-30:]) if logs else "No logs available."
+    log_snippet = "\n".join(logs[-40:]) if logs else "No logs available."
     error_context = f"Last Error: {last_error}\n\nLog Snippet:\n{log_snippet}"
     
-    loading(call, "AI is diagnosing...")
+    loading(call, "AI Sentinel analyzing logs...")
     
     try:
         if not get_setting("ai_global_enabled", True):
-            ack(call, "AI Bot Doctor is currently offline.")
+            ack(call, "AI Sentinel is currently offline.")
             return
 
-        # Ask AI for a fix
-        prompt = (
-            "Analyze the following Telegram bot crash logs and provide a concise, professional solution. "
-            "Tell the user exactly what is wrong and how to fix it (e.g., missing library, syntax error). "
-            "Use small-caps for headers and wrap code in blocks.\n\n"
-            f"{error_context}"
-        )
-        # Tiered Model Selection
-        plan = get_ai_model(call.from_user.id)
-        ai_fix = _call_ai_api(prompt, user_plan=plan)
+        # Read bot source code files for context
+        bot_dir = Path(b["dir"])
+        source_files_summary = ""
+        target_file_path = None
+        target_file_content = ""
         
-        if ai_fix:
+        if bot_dir.exists():
+            for p in bot_dir.glob("**/*.py"):
+                if ".deps" in p.parts or "venv" in p.parts: continue
+                try:
+                    content = p.read_text(errors="ignore")
+                    source_files_summary += f"\n--- File: {p.relative_to(bot_dir)} ---\n{content[:3000]}\n"
+                    if not target_file_path or p.name in ("bot.py", "main.py", "index.py"):
+                        target_file_path = p
+                        target_file_content = content
+                except Exception:
+                    pass
+
+        prompt = (
+            "You are an expert Python/Node debugging assistant. "
+            "Analyze the following crash logs and source code of a hosted Telegram bot. "
+            "Identify the bug causing the crash and provide:\n"
+            "1. A clear, elite diagnosis.\n"
+            "2. The exact corrected complete Python code for the primary file (or the fixed section), wrapped in ```python ... ``` block.\n"
+            "CRITICAL: Do not apply changes automatically. We will ask the user for permission.\n\n"
+            f"ERROR CONTEXT:\n{error_context}\n\nSOURCE FILES:\n{source_files_summary[:4000]}"
+        )
+        
+        plan = get_ai_model(call.from_user.id)
+        ai_resp = _call_ai_api(prompt, user_plan=plan)
+        
+        if ai_resp:
             primary_model = get_plan_primary_model(plan)
+            clean_resp = re.sub(r'<(think|thought)>.*?</\1>', '', ai_resp, flags=re.DOTALL | re.IGNORECASE).strip()
             
-            # Sanitize AI response
-            clean_fix = re.sub(r'<(think|thought)>.*?</\1>', '', ai_fix, flags=re.DOTALL | re.IGNORECASE)
-            clean_fix = re.sub(r'<(think|thought)>', '', clean_fix, flags=re.IGNORECASE).strip()
+            # Extract code block if present
+            code_match = re.search(r'```(?:python)?\s*(.*?)```', clean_resp, re.DOTALL)
+            extracted_code = code_match.group(1).strip() if code_match else ""
             
+            # Store proposed fix in bot doc temporarily pending user permission
+            if extracted_code and target_file_path:
+                b["pending_patch"] = {
+                    "file": str(target_file_path.relative_to(bot_dir)),
+                    "code": extracted_code,
+                    "timestamp": ts_iso(),
+                }
+                save_bot(b)
+
+            diagnosis_text = clean_resp.split("```")[0].strip() if "```" in clean_resp else clean_resp
+            if len(diagnosis_text) > 800:
+                diagnosis_text = diagnosis_text[:800] + "..."
+
             final_text = (
-                f"🩺 <b>{sc('AI Bot Doctor Report')}</b> (<code>{primary_model.upper()}</code>)\n"
+                f"🛡️ <b>{sc('AI Sentinel — Self-Healing Report')}</b> (<code>{primary_model.upper()}</code>)\n"
                 f"{G['div_eq']}\n"
                 f"🤖 <b>{sc('Diagnosis')}</b>:\n"
-                f"<blockquote>{esc(clean_fix)}</blockquote>\n"
-                f"{G['div']}{FOOTER}"
+                f"<blockquote>{esc(diagnosis_text)}</blockquote>\n"
+                f"{G['div']}\n"
+                f"⚠️ <i>{sc('AI has prepared a patch but requires your explicit permission to apply it and restart the bot')}.</i>{FOOTER}"
             )
-            try:
-                show_text(call.message.chat.id, final_text, back_kb(f"bot_view_{bot_id}", "Bot"), call=call)
-            except Exception:
-                show_text(call.message.chat.id, f"🩺 AI Bot Doctor Report ({primary_model.upper()})\n---\n{clean_fix}", back_kb(f"bot_view_{bot_id}", "Bot"), call=call)
+            
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            if extracted_code and target_file_path:
+                kb.add(Btn(f"{G['ok']}  Iᴍᴘʟᴇᴍᴇɴᴛ Fɪx", callback_data=f"bot_applyfix_{bot_id}", style="success"),
+                       Btn(f"{G['no']}  Dɪꜱᴍɪꜱꜱ",       callback_data=f"bot_view_{bot_id}",     style="danger"))
+            else:
+                kb.add(Btn(f"{G['back']}  Bᴏᴛ", callback_data=f"bot_view_{bot_id}", style="danger"))
+
+            show_text(call.message.chat.id, final_text, kb, call=call)
         else:
-            ack(call, "AI Doctor is currently unavailable.")
+            ack(call, "AI Sentinel failed to generate a diagnosis.")
             
     except Exception as e:
-        print(f"[ai_fix] error: {e}", flush=True)
-        ack(call, "Uplink to AI Doctor failed.")
+        print(f"[ai_sentinel] error: {e}", flush=True)
+        ack(call, "AI Sentinel uplink failed.")
+
+def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
+    """Applies the AI-suggested patch only after explicit user confirmation."""
+    b = find_bot(bot_id)
+    if not b: ack(call, "Bot not found"); return
+    
+    patch = b.get("pending_patch")
+    if not patch or not patch.get("code") or not patch.get("file"):
+        ack(call, "No pending patch found or expired."); return
+
+    loading(call, "Applying patch and restarting bot...")
+    
+    try:
+        bot_dir = Path(b["dir"])
+        target_file = bot_dir / patch["file"]
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Backup original file before patching
+        if target_file.exists():
+            backup_path = target_file.with_suffix(target_file.suffix + ".bak")
+            shutil.copy2(target_file, backup_path)
+            
+        # Write new patched code
+        target_file.write_text(patch["code"], encoding="utf-8")
+        
+        # Clear pending patch
+        b.pop("pending_patch", None)
+        save_bot(b)
+        
+        # Restart child process
+        stop_child(bot_id, manual=True)
+        time.sleep(1)
+        res = start_child(b)
+        
+        if res.get("ok"):
+            ack(call, "Fix applied successfully! Bot restarted.")
+        else:
+            ack(call, f"Patch applied, but start failed: {res.get('error')}")
+            
+        render_bot_view(call, bot_id)
+    except Exception as e:
+        print(f"[apply_fix] error: {e}", flush=True)
+        ack(call, f"Failed to apply patch: {e}")
 
 _AI_OPERATIVE_LABELS = {
     "claude": "Claude-3.5 (Elite Brain)",
