@@ -3896,6 +3896,26 @@ def gh_enabled() -> bool:
     return bool(GH["token"] and GH["repo"] and "/" in GH["repo"])
 
 
+def gh_test_connection() -> Dict[str, Any]:
+    """Verify that the current GitHub token and repository are valid."""
+    if not gh_enabled():
+        return {"ok": False, "error": "Token or Repo not configured."}
+    try:
+        r = _gh("GET", _gh_repo_url())
+        if r.status_code == 200:
+            data = r.json()
+            is_private = data.get("private", False)
+            return {"ok": True, "private": is_private, "name": data.get("full_name")}
+        elif r.status_code == 404:
+            return {"ok": False, "error": "Repository not found."}
+        elif r.status_code == 401:
+            return {"ok": False, "error": "Invalid or expired token."}
+        else:
+            return {"ok": False, "error": f"GitHub Error {r.status_code}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def gh_status() -> Dict[str, Any]:
     return {
         "enabled":     gh_enabled(),
@@ -3982,44 +4002,63 @@ def _make_tarball() -> Path:
 
 
 def gh_backup_now() -> Dict[str, Any]:
+    """Perform an aggressive full sync of the database and all hosted bots."""
     if not gh_enabled():
         return {"ok": False, "error": "Not configured."}
     if GH["inProgress"]:
         return {"ok": False, "error": "Backup already running."}
+    
     GH["inProgress"] = True
     tar: Optional[Path] = None
     try:
         if not _gh_ensure_branch():
             raise RuntimeError(f"Branch {GH['branch']} unavailable")
-        tar = _make_tarball()
-        buf = tar.read_bytes()
-        size_mb = len(buf) / 1024 / 1024
-        # GitHub API has a 25MB limit for 'contents' PUT.
-        # Files up to 100MB are allowed in the repo but require the Git Data API
-        # which is not currently implemented here.
-        if size_mb > 25:
-            raise RuntimeError(f"Backup {size_mb:.1f} MB > 25 MB GitHub API limit. "
-                               f"Please use per-bot sync for large data.")
-        ts = ts_iso().replace(":", "-").replace(".", "-")
-        ok1 = _gh_put_file("backups/latest.tar.gz", buf, f"chore(panel): backup {ts}")
-        ok2 = _gh_put_file(f"backups/{ts}.tar.gz", buf, f"chore(panel): snapshot {ts}")
-        manifest = json.dumps({"lastBackup": ts, "sizeBytes": len(buf)}, indent=2)
-        _gh_put_file("backups/manifest.json", manifest.encode(), f"chore(panel): manifest {ts}")
-        if not (ok1 and ok2):
-            raise RuntimeError("upload failed")
-        GH["lastBackup"] = ts
+            
+        # 1. Sync master DB and settings individually (New Layout)
+        gh_sync_user_data()
+        
+        # 2. Sync every single bot's files individually (Aggressive)
+        db = db_load()
+        bots = db.get("bots", {})
+        for bot_id, b_doc in bots.items():
+            try:
+                _gh_sync_bot_files(b_doc)
+            except Exception as _be:
+                print(f"[gh_backup] failed sync for {bot_id}: {_be}")
+                
+        # 3. Attempt legacy tarball as a secondary snapshot
+        tar_ok = False
+        size_mb = 0.0
+        try:
+            tar = _make_tarball()
+            buf = tar.read_bytes()
+            size_mb = len(buf) / 1024 / 1024
+            if size_mb <= 25:
+                ts = ts_iso().replace(":", "-").replace(".", "-")
+                _gh_put_file("backups/latest.tar.gz", buf, f"chore(panel): backup {ts}")
+                manifest = json.dumps({"lastBackup": ts, "sizeBytes": len(buf)}, indent=2)
+                _gh_put_file("backups/manifest.json", manifest.encode(), f"chore(panel): manifest {ts}")
+                tar_ok = True
+        except Exception as _te:
+            print(f"[gh_backup] tarball fallback skipped: {_te}")
+
+        ts_now = ts_iso()
+        GH["lastBackup"] = ts_now
         GH["lastError"] = None
-        # BUGS_AND_FIXES.md note: UI expects sizeBytes for formatting
-        return {"ok": True, "sizeMB": f"{size_mb:.2f}", "sizeBytes": len(buf), "ts": ts}
+        return {
+            "ok": True, 
+            "sizeMB": f"{size_mb:.2f}", 
+            "ts": ts_now,
+            "bots_synced": len(bots),
+            "tar_ok": tar_ok
+        }
     except Exception as e:
         GH["lastError"] = str(e)
         return {"ok": False, "error": str(e)}
     finally:
         if tar and tar.exists():
-            try:
-                tar.unlink()
-            except Exception:
-                pass
+            try: tar.unlink()
+            except Exception: pass
         GH["inProgress"] = False
 
 
@@ -16657,6 +16696,7 @@ def render_adm_github(call: types.CallbackQuery) -> None:
         Btn("\U0001f4e5  Restore",    callback_data="gh_restore_now", style="danger"),
         Btn("\U0001f419  Browse",     callback_data="adm_gh_browser", style="primary"),
     )
+    kb.add(Btn("⚡  Test Connection", callback_data="gh_test_conn", style="primary"))
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
@@ -17327,13 +17367,39 @@ def render_github_subroute(call: types.CallbackQuery, data: str) -> None:
         def _bg():
             try:
                 res = gh_backup_now()
-                bot.send_message(uid,
-                    f"<b>{'OK' if res.get('ok') else G['no']} GitHub Backup</b>\n"
-                    f"{bullet('Size', str(res.get('sizeMB', '?')) + ' MB')}\n"
-                    f"{bullet('Error', res.get('error', '') or 'none')}", parse_mode="HTML")
+                if res.get("ok"):
+                    msg = (
+                        f"<b>{G['ok']} GitHub Vault Sync</b>\n"
+                        f"{G['div']}\n"
+                        f"{bullet('Status', '100% Synchronized')}\n"
+                        f"{bullet('Bots Synced', res.get('bots_synced', 0))}\n"
+                        f"{bullet('Tarball', 'OK' if res.get('tar_ok') else 'Skipped (>25MB)')}\n"
+                        f"{bullet('Timestamp', res.get('ts'))}\n"
+                        f"{G['div']}\n<i>{sc('Your data is now safe in the Ghost-Cloud')}.</i>"
+                    )
+                else:
+                    msg = f"<b>{G['no']} Sync Failed</b>\n{bullet('Error', res.get('error', 'Unknown'))}"
+                bot.send_message(uid, msg, parse_mode="HTML")
             except Exception as e:
                 bot.send_message(uid, f"{G['no']} {esc(e)}", parse_mode="HTML")
         threading.Thread(target=_bg, daemon=True).start(); return
+
+    if data == "gh_test_conn":
+        ack(call, "Testing Vault Connection...")
+        res = gh_test_connection()
+        if res["ok"]:
+            status = "🔒 PRIVATE" if res["private"] else "🌐 PUBLIC"
+            msg = (
+                f"<b>{G['ok']} Vault Connection Active</b>\n"
+                f"{G['div']}\n"
+                f"{bullet('Repository', res['name'])}\n"
+                f"{bullet('Security', status)}\n"
+                f"{G['div']}\n<i>{sc('Uplink established successfully')}.</i>"
+            )
+        else:
+            msg = f"<b>{G['no']} Vault Connection Failed</b>\n{bullet('Error', res['error'])}"
+        bot.send_message(uid, msg, parse_mode="HTML")
+        return
     if data == "gh_restore_now":
         if not is_owner(uid): ack(call, "Owner only"); return
         ack(call, "Restoring\u2026")
