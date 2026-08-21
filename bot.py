@@ -3296,7 +3296,8 @@ def _drain_proc(bot_id: str, proc: subprocess.Popen, log: List[str]) -> None:
                 del log[: len(log) - LOG_RING]
     except Exception:
         pass
-    # crash-watch — auto-restart if plan supports it
+    # Crash-watch with a per-bot circuit breaker. Restarts are bounded,
+    # exponentially delayed, and never emit a message for every crash.
     try:
         rc = proc.wait()
         log.append(f"{G['div']} process exited rc={rc} {G['div']}")
@@ -3304,7 +3305,6 @@ def _drain_proc(bot_id: str, proc: subprocess.Popen, log: List[str]) -> None:
         was_manual = (info is None) or info.get("manual_stop", False)
         b_doc = find_bot(bot_id)
 
-        # capture last error lines so the bot view can surface them
         if b_doc is not None:
             tail = [ln for ln in log[-15:] if ln and not ln.startswith(G["div"])]
             err_text = "\n".join(tail[-8:])[:1500]
@@ -3318,21 +3318,82 @@ def _drain_proc(bot_id: str, proc: subprocess.Popen, log: List[str]) -> None:
             except Exception:
                 pass
 
-        if not info:
-            return
-        if not b_doc:
+        if not info or not b_doc:
             return
         owner = db_load()["users"].get(str(b_doc["owner"]))
         plan = (owner or {}).get("plan", "free")
-        if PLAN_LIMITS.get(plan, {}).get("auto_restart") and not was_manual:
-            log.append(f"[{G['refresh']}] auto-restart in 3s...")
-            time.sleep(3)
-            start_child(b_doc)
+        if not (PLAN_LIMITS.get(plan, {}).get("auto_restart") and not was_manual):
+            return
+
+        now = time.time()
+        started_at = float(info.get("started", 0) or 0) / 1000.0
+        stable_secs = max(60, int(_bc_get("crash_stable_secs") or 300))
+        window_secs = max(300, int(_bc_get("crash_window_secs") or 3600))
+        window_started = float(b_doc.get("crash_window_started", 0) or 0)
+        crash_count = int(b_doc.get("crash_count", 0) or 0)
+
+        # A bot that ran steadily is not treated as part of the previous
+        # crash loop. This prevents old failures from blocking later crashes.
+        if (started_at and now - started_at >= stable_secs) or (
+            window_started and now - window_started >= window_secs
+        ):
+            crash_count = 0
+            window_started = now
+        if not window_started:
+            window_started = now
+        crash_count += 1
+
+        max_restarts = max(4, int(_bc_get("max_crash_restarts") or 5))
+        base_delay = max(1, int(_bc_get("crash_restart_delay") or 5))
+        delay = min(base_delay * (2 ** max(0, crash_count - 1)), 300)
+        b_doc["crash_window_started"] = window_started
+        b_doc["crash_count"] = crash_count
+        b_doc["last_crash_at"] = ts_iso()
+
+        if crash_count > max_restarts:
+            b_doc["status"] = "crash_loop"
+            b_doc["auto_restart_suspended"] = True
+            b_doc["restart_blocked_reason"] = (
+                f"Crash limit reached: {max_restarts} automatic restarts in the current window."
+            )
+            if not b_doc.get("crash_loop_notified_at"):
+                b_doc["crash_loop_notified_at"] = ts_iso()
+                try:
+                    bot.send_message(
+                        b_doc["owner"],
+                        f"<b>{G['no']} {sc('Bot paused after repeated crashes')}</b>\n"
+                        f"{bullet('Bot', esc(b_doc.get('name', bot_id)))}\n"
+                        f"{bullet('Attempts', f'{max_restarts} automatic restarts') }\n"
+                        f"{sc('Open Live Logs, fix the error, then press Start to resume it.')}",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            log.append(
+                f"[{G['no']}] auto-restart paused after {max_restarts} attempts; manual Start required"
+            )
+            save_bot(b_doc)
+            return
+
+        b_doc["status"] = "restart_pending"
+        b_doc["auto_restart_suspended"] = False
+        b_doc["next_restart_at"] = (now + delay)
+        save_bot(b_doc)
+        log.append(
+            f"[{G['refresh']}] auto-restart attempt {crash_count}/{max_restarts} in {delay}s"
+        )
+        time.sleep(delay)
+        # Re-read the record so a manual stop, delete, plan change, or fix
+        # applied during the backoff cancels this restart safely.
+        latest = find_bot(bot_id)
+        if not latest or latest.get("auto_restart_suspended") or latest.get("status") == "stopped":
+            return
+        start_child(latest)
     except Exception:
         pass
 
 
-def start_child(b: Dict[str, Any]) -> Dict[str, Any]:
+def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
     bid = b["_id"]
     # Approval gate — never start a bot still waiting for admin review.
     if (b or {}).get("approval_status") == "pending":
@@ -3354,6 +3415,20 @@ def start_child(b: Dict[str, Any]) -> Dict[str, Any]:
         existing = RUNNING.get(bid)
         if existing and existing["proc"].poll() is None:
             return {"ok": False, "error": "Already running."}
+
+    # An explicit Start/Restart is the operator's acknowledgement that the
+    # error was reviewed. Clear the circuit breaker only for that action;
+    # automatic retries must retain the crash count.
+    if manual:
+        for key in (
+            "crash_count", "crash_window_started", "last_crash_at",
+            "next_restart_at", "auto_restart_suspended", "crash_loop_notified_at",
+            "restart_blocked_reason",
+        ):
+            b.pop(key, None)
+        b["status"] = "stopped"
+        save_bot(b)
+
     bot_dir = Path(b["dir"])
     if not bot_dir.exists():
         return {"ok": False, "error": "Bot folder missing."}
@@ -3729,10 +3804,10 @@ def _stop_tunnel(bot_id: str) -> bool:
     return True
 
 
-def restart_child(b: Dict[str, Any]) -> Dict[str, Any]:
-    stop_child(b["_id"], manual=False)
+def restart_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
+    stop_child(b["_id"], manual=manual)
     time.sleep(1)
-    return start_child(b)
+    return start_child(b, manual=manual)
 
 
 def child_status(bot_id: str, b_doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -6420,7 +6495,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         bid = data[len("adm_bc_restart_"):]
         b = find_bot(bid)
         if b:
-            threading.Thread(target=lambda: restart_child(b), daemon=True).start()
+            threading.Thread(target=lambda: restart_child(b, manual=True), daemon=True).start()
             ack(call, f"Restarting {b.get('name','?')[:15]}…")
         return
     if data.startswith("adm_bc_stop_"):
@@ -7561,8 +7636,10 @@ _BOT_CONFIG_DEFAULTS: Dict[str, Any] = {
     "allowed_extensions":   ".py,.js,.zip,.txt,.json,.env",
     "bot_start_timeout":    30,     # seconds to wait for bot to start
     "bot_stop_timeout":     10,     # seconds for graceful stop
-    "crash_restart_delay":  5,      # seconds before auto-restart after crash
-    "max_crash_restarts":   5,      # max auto-restarts per bot per hour
+    "crash_restart_delay":  5,      # base seconds before auto-restart after crash
+    "max_crash_restarts":   5,      # max auto-restarts per bot per hour (minimum enforced: 4)
+    "crash_stable_secs":     300,   # runtime that clears the crash-loop counter
+    "crash_window_secs":    3600,   # rolling window for automatic restart attempts
     "log_ring_size":        200,    # lines kept in memory log ring
     "zip_max_files":        50,     # max files in a zip upload
     "env_strip_secrets":    True,   # strip BOT_TOKEN etc from child env
@@ -10048,7 +10125,7 @@ def _do_restart_all_bots(admin_uid: int) -> Tuple[int, int]:
         if not b:
             continue
         try:
-            r = restart_child(b)
+            r = restart_child(b, manual=True)
             if r.get("ok"):
                 ok += 1
             else:
@@ -15784,7 +15861,7 @@ def action_bot_start(call: types.CallbackQuery, bot_id: str) -> None:
         ack(call, "Not found / not yours"); return
     loading(call, "Starting bot")
     def _bg():
-        res = start_child(b)
+        res = start_child(b, manual=True)
         ack(call, "Started" if res["ok"] else f"Err: {res.get('error')}")
         render_bot_view(call, bot_id)
     threading.Thread(target=_bg, daemon=True).start()
@@ -15808,7 +15885,7 @@ def action_bot_restart(call: types.CallbackQuery, bot_id: str) -> None:
         ack(call, "Not found / not yours"); return
     loading(call, "Restarting bot")
     def _bg():
-        res = restart_child(b)
+        res = restart_child(b, manual=True)
         ack(call, "Restarted" if res["ok"] else f"Err: {res.get('error')}")
         render_bot_view(call, bot_id)
     threading.Thread(target=_bg, daemon=True).start()
