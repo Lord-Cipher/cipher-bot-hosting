@@ -16048,15 +16048,29 @@ def _finish_bot_clone(uid: int, bot_id: str, new_token: str, chat_id: str) -> No
     d["bots"][new_id] = new_doc
     db_save(d)
     audit(uid, "bot_clone", f"src={bot_id} new={new_id} chat_id_set=true")
+
+    # A clone is a normal hosted bot, so start it through the same runner
+    # used by the Start button instead of leaving it permanently stopped.
+    start_result = start_child(new_doc)
+    started = bool(start_result.get("ok"))
+    status_title = "Bot cloned and started" if started else "Bot cloned but startup failed"
+    status_icon = G["ok"] if started else G["no"]
+    status_line = (
+        sc("The clone is now running.") if started else
+        f"{sc('Startup error')}: <code>{esc(start_result.get('error', 'unknown error'))}</code>"
+    )
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ", callback_data="menu_bots", style="primary"))
+    kb.add(
+        Btn(f"{G['eye']}  Lɪᴠᴇ Lᴏɢꜱ", callback_data=f"bot_logs_{new_id}", style="primary"),
+        Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ", callback_data="menu_bots", style="primary"),
+    )
     bot.send_message(
         uid,
-        f"<b>{G['ok']} {sc('Bot cloned')}</b>\n"
+        f"<b>{status_icon} {sc(status_title)}</b>\n"
         f"{bullet('New Bot ID', new_id)}\n"
         f"{bullet('Name', new_doc['name'])}\n"
         f"{bullet('Chat ID', chat_id)}\n"
-        f"{sc('The new token was validated and assigned only to this clone.')}",
+        f"{status_line}",
         parse_mode="HTML", reply_markup=kb,
     )
 
@@ -16091,8 +16105,14 @@ def _handle_clone_chat_id(m: types.Message, st: Dict[str, Any]) -> None:
     bot_id = str(st.get("bot_id") or "")
     token = str(st.get("clone_token") or "")
     USER_STATES.pop(uid, None)
-    bot.reply_to(m, f"⏳ {sc('Cloning with the new credentials…')}")
-    _finish_bot_clone(uid, bot_id, token, chat_id)
+    bot.reply_to(m, f"⏳ {sc('Cloning and starting with the new credentials…')}")
+    # Dependency installation and process startup can take time; keep the
+    # Telegram update loop responsive while the clone is prepared.
+    threading.Thread(
+        target=_finish_bot_clone,
+        args=(uid, bot_id, token, chat_id),
+        daemon=True,
+    ).start()
 
 
 def action_bot_clone(call: types.CallbackQuery, bot_id: str) -> None:
