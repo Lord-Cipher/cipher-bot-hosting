@@ -16595,8 +16595,8 @@ def render_adm_plan_edit(call: types.CallbackQuery, key: str) -> None:
         Btn("\u2795 CPU", callback_data=f"adm_set_plan_cpu_inc_{key}", style="success"),
     )
     kb.add(
-        Btn("\u270f\ufe0f  Rename", callback_data=f"adm_plan_set_name_{key}"),
-        Btn("\U0001f4b2  Set Price", callback_data=f"adm_plan_set_price_{key}"),
+        Btn("\u270f\ufe0f  Rename", callback_data=f"adm_plan_set_name_{key}", style="primary"),
+        Btn("\U0001f4b2  Set Price", callback_data=f"adm_plan_set_price_{key}", style="primary"),
     )
     kb.add(
         Btn("Set RAM", callback_data=f"adm_plan_set_ram_{key}", style="primary"),
