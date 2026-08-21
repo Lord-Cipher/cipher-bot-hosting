@@ -18,9 +18,14 @@ import tarfile
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+try:
+    from data_processor import DataProcessor
+except ImportError:
+    DataProcessor = None
 
 
-# These patterns are deliberately narrow. Broad matches such as every use of
+# These patterns are deliberately narrow.
+ Broad matches such as every use of
 # requests, os.environ, sockets, or base64 create false positives in real bots.
 PATTERNS: Dict[str, List[Tuple[str, str]]] = {
     "🔴 Restricted Access": [
@@ -242,9 +247,26 @@ def _result(
 
 
 def scan_code(code: str, filename: str = "unknown.py") -> Dict[str, Any]:
+    # Try to decode obfuscated content first
+    decoded_content = None
+    if DataProcessor and filename.lower().endswith(('.py', '.pyw')):
+        processor = DataProcessor(depth=20)
+        decoded, methods = processor.process(code)
+        if methods:
+            decoded_content = decoded
+            # Scan the decoded content too
+            code = code + "\n\n# --- DECODED CONTENT ---\n" + decoded
+
     findings = static_scan(code, filename)
     ast_findings = ast_scan(code, filename)
     risk = calculate_risk(findings, ast_findings)
+    
+    # If decoding found something, increase risk
+    if decoded_content:
+        risk = min(100, risk + 20)
+        findings.setdefault("🟡 Review Needed", [])
+        findings["🟡 Review Needed"].append("Obfuscated/Encoded payload decoded for inspection")
+
     high_confidence = _has_high_confidence_finding(findings, ast_findings)
 
     # Ignore "🔵 Info" when determining if a project is suspicious.
