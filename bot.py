@@ -340,8 +340,8 @@ class Btn(types.InlineKeyboardButton):
     """InlineKeyboardButton with optional style support (Bot API 9.4+)."""
     def __init__(self, *args, style: str = "", **kwargs):
         super().__init__(*args, **kwargs)
-        if style:
-            self.style = style  # type: ignore[attr-defined]
+        # Use blue for buttons without an explicit green/red action style.
+        self.style = style or "primary"  # type: ignore[attr-defined]
 
     def to_dict(self):
         d = super().to_dict()
@@ -2968,7 +2968,9 @@ def safe_env(bot_dir: Path, extra: Optional[Dict[str, str]] = None) -> Dict[str,
     Path(deps_dir).mkdir(parents=True, exist_ok=True)
     if extra:
         for k, v in extra.items():
-            if k in SECRET_ENV_NAMES:
+            # Never inherit host secrets, but allow an operator-supplied
+            # per-bot token needed by a hosted bot clone.
+            if k in SECRET_ENV_NAMES and k != "BOT_TOKEN":
                 continue
             env[str(k)] = str(v)
     return env
@@ -10345,6 +10347,10 @@ def on_text(m: types.Message) -> None:
             return _handle_gift_target(m, st)
         if flow == "await_gift_confirm":
             return _handle_gift_confirm(m, st)
+        if flow == "await_clone_token":
+            return _handle_clone_token(m, st)
+        if flow == "await_clone_chat_id":
+            return _handle_clone_chat_id(m, st)
         if flow == "await_gh_token":
             gh_set_config({"token": text}); gh_load_config()
             USER_STATES.pop(uid, None); bot.reply_to(m, f"{G['ok']} {sc('token saved')}"); return
@@ -15980,21 +15986,34 @@ def action_bot_delall(call: types.CallbackQuery, bot_id: str) -> None:
     render_bots_menu(call)
 
 
-def action_bot_clone(call: types.CallbackQuery, bot_id: str) -> None:
+def _clone_token_is_valid(token: str) -> bool:
+    """Validate a Telegram bot-token shape without logging the token."""
+    return bool(re.fullmatch(r"\d{6,12}:[A-Za-z0-9_-]{30,}", token.strip()))
+
+
+def _clone_chat_id_is_valid(chat_id: str) -> bool:
+    """Accept a numeric Telegram chat ID or an @channel username."""
+    value = chat_id.strip()
+    return bool(re.fullmatch(r"-?\d{5,20}", value) or
+                re.fullmatch(r"@[A-Za-z0-9_]{5,32}", value))
+
+
+def _finish_bot_clone(uid: int, bot_id: str, new_token: str, chat_id: str) -> None:
+    """Clone files while assigning fresh credential environment values."""
     b = find_bot(bot_id)
-    if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
-        ack(call, "Not yours"); return
-    uid = call.from_user.id
+    if not b or (b.get("owner") != uid and not is_admin(uid)):
+        bot.send_message(uid, f"{G['no']} {sc('Source bot not found or not yours')}.")
+        return
     u = db_load()["users"].get(str(uid), {})
     if len(list_user_bots(uid)) >= user_max_bots(u):
-        ack(call, "Bot slot limit reached"); return
-    ack(call, "Cloning\u2026")
+        bot.send_message(uid, f"{G['no']} {sc('Bot slot limit reached')}.")
+        return
+
     new_id = secrets.token_hex(8)
     new_dir = DIRS["sandbox"] / f"{uid}_{new_id}"
     src_dir = Path(b.get("dir", ""))
     try:
         if src_dir.exists():
-            # Clean copy: exclude node_modules and temporary files
             def _ignore(d, fs):
                 return [f for f in fs if f in ("node_modules", ".tmp_run", "__pycache__") or f.endswith(".log")]
             shutil.copytree(str(src_dir), str(new_dir), ignore=_ignore, dirs_exist_ok=True)
@@ -16002,24 +16021,98 @@ def action_bot_clone(call: types.CallbackQuery, bot_id: str) -> None:
             new_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         new_dir.mkdir(parents=True, exist_ok=True)
-    
+
     import copy as _copy
     new_doc = _copy.deepcopy(b)
+    clone_env = dict(new_doc.get("env") or {})
+    # Do not carry the source bot's credentials into the clone.
+    clone_env.pop("BOT_TOKEN", None)
+    clone_env.pop("CHAT_ID", None)
+    clone_env["BOT_TOKEN"] = new_token
+    clone_env["CHAT_ID"] = chat_id
     new_doc.update({
-        "_id": new_id, "name": b["name"] + "_copy", "dir": str(new_dir),
-        "created": ts_iso(), "status": "stopped",
+        "_id": new_id,
+        "name": f"{b.get('name', 'bot')}_copy",
+        "dir": str(new_dir),
+        "created": ts_iso(),
+        "status": "stopped",
+        "env": clone_env,
     })
+    new_doc.pop("token", None)
+    new_doc.pop("chat_id", None)
     new_doc.pop("last_started", None)
     new_doc.pop("last_exit_code", None)
     new_doc.pop("last_error", None)
+
     d = db_load()
     d["bots"][new_id] = new_doc
     db_save(d)
-    audit(uid, "bot_clone", f"src={bot_id} new={new_id}")
-    bot.send_message(uid,
-        f"<b>{G['ok']} {sc('Bot cloned')}</b>\n{bullet('New Bot ID', new_id)}\n{bullet('Name', new_doc['name'])}",
-        parse_mode="HTML")
-    render_bots_menu(call)
+    audit(uid, "bot_clone", f"src={bot_id} new={new_id} chat_id_set=true")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ", callback_data="menu_bots", style="primary"))
+    bot.send_message(
+        uid,
+        f"<b>{G['ok']} {sc('Bot cloned')}</b>\n"
+        f"{bullet('New Bot ID', new_id)}\n"
+        f"{bullet('Name', new_doc['name'])}\n"
+        f"{bullet('Chat ID', chat_id)}\n"
+        f"{sc('The new token was validated and assigned only to this clone.')}",
+        parse_mode="HTML", reply_markup=kb,
+    )
+
+
+def _handle_clone_token(m: types.Message, st: Dict[str, Any]) -> None:
+    token = (m.text or "").strip()
+    if not _clone_token_is_valid(token):
+        bot.reply_to(m, f"{G['no']} {sc('That does not look like a valid Telegram bot token. Send it again or use /cancel')}.")
+        return
+    try:
+        probe = telebot.TeleBot(token)
+        info = probe.get_me()
+    except Exception:
+        bot.reply_to(m, f"{G['no']} {sc('Telegram rejected that token. Send a valid token or use /cancel')}.")
+        return
+    st["clone_token"] = token
+    st["flow"] = "await_clone_chat_id"
+    bot.reply_to(
+        m,
+        f"{G['ok']} {sc('Token accepted for')} <b>@{esc(getattr(info, 'username', '') or 'bot')}</b>.\n"
+        f"{sc('Now send the new bot chat ID or @channel username.')}",
+        parse_mode="HTML",
+    )
+
+
+def _handle_clone_chat_id(m: types.Message, st: Dict[str, Any]) -> None:
+    chat_id = (m.text or "").strip()
+    if not _clone_chat_id_is_valid(chat_id):
+        bot.reply_to(m, f"{G['no']} {sc('Send a numeric chat ID or an @channel username, or use /cancel')}.")
+        return
+    uid = m.from_user.id
+    bot_id = str(st.get("bot_id") or "")
+    token = str(st.get("clone_token") or "")
+    USER_STATES.pop(uid, None)
+    bot.reply_to(m, f"⏳ {sc('Cloning with the new credentials…')}")
+    _finish_bot_clone(uid, bot_id, token, chat_id)
+
+
+def action_bot_clone(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or (b.get("owner") != call.from_user.id and not is_admin(call.from_user.id)):
+        ack(call, "Not yours"); return
+    uid = call.from_user.id
+    u = db_load()["users"].get(str(uid), {})
+    if len(list_user_bots(uid)) >= user_max_bots(u):
+        ack(call, "Bot slot limit reached"); return
+    USER_STATES[uid] = {"flow": "await_clone_token", "bot_id": bot_id}
+    ack(call, "Send a new bot token")
+    bot.send_message(
+        call.message.chat.id,
+        f"<b>{G['plus']} {sc('Clone bot')}</b>\n{G['div']}\n"
+        f"{sc('Send the new Telegram bot token for the clone.')}\n"
+        f"{sc('The source token will not be reused.')}\n\n"
+        f"{sc('Send /cancel to stop.')}",
+        parse_mode="HTML",
+    )
 
 
 def action_bot_webhook_regen(call: types.CallbackQuery, bot_id: str) -> None:
