@@ -24,8 +24,7 @@ except ImportError:
     DataProcessor = None
 
 
-# These patterns are deliberately narrow.
- Broad matches such as every use of
+# These patterns are deliberately narrow. Broad matches such as every use of
 # requests, os.environ, sockets, or base64 create false positives in real bots.
 PATTERNS: Dict[str, List[Tuple[str, str]]] = {
     "🔴 Restricted Access": [
