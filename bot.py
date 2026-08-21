@@ -2393,6 +2393,7 @@ def show_menu(
 
     # ── 2. Send a brand-new message FIRST, then delete the old one. ──
     new_msg_id: Optional[int] = None
+    new_content_type = "photo"
 
     try:
         m = bot.send_photo(chat_id, _resolve_photo(photo_url), caption=cap,
@@ -2403,6 +2404,7 @@ def show_menu(
         _log_err("send_photo", e)
 
     if new_msg_id is None:
+        new_content_type = "text"
         try:
             m = bot.send_message(
                 chat_id, cap, parse_mode="HTML", reply_markup=kb,
@@ -2413,6 +2415,7 @@ def show_menu(
             _log_err("send_message(html)", e)
 
     if new_msg_id is None:
+        new_content_type = "text"
         try:
             plain = re.sub(r"<[^>]+>", "", cap)
             m = bot.send_message(
@@ -2425,10 +2428,19 @@ def show_menu(
 
     # Only NOW is it safe to remove the old message.
     if new_msg_id is not None and call and call.message:
+        old_msg_id = call.message.message_id
         try:
-            bot.delete_message(chat_id, call.message.message_id)
+            bot.delete_message(chat_id, old_msg_id)
         except Exception as e:
             _log_err("delete_message", e)
+        # Keep the telemetry session pointed at the replacement message.
+        # Otherwise the 5-second live updater repeatedly sends a new page
+        # because it keeps trying to edit the deleted message.
+        sess = LIVE_UI_SESSIONS.get(chat_id)
+        if sess and sess.get("msg_id") == old_msg_id:
+            sess["msg_id"] = new_msg_id
+            sess["content_type"] = new_content_type
+            sess["ts"] = time.time()
 
 
 def show_text(
@@ -15622,15 +15634,34 @@ def render_bot_webhook(call: types.CallbackQuery, bot_id: str) -> None:
     show_menu(call.message.chat.id, PHOTOS["bot"], cap, kb, call=call)
 
 
-def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
-    # Register for live updates
+def render_bot_view(
+    call: types.CallbackQuery,
+    bot_id: str,
+    _live_refresh: bool = False,
+) -> None:
+    # Manual navigation starts a live session. A telemetry refresh must only
+    # use an existing session; it must never recreate a session that a user
+    # just cancelled by pressing Clone, Back, Start, Stop, or another button.
     if call and call.message:
-        LIVE_UI_SESSIONS[call.message.chat.id] = {
-            "type": "bot_view",
-            "bot_id": bot_id,
-            "msg_id": call.message.message_id,
-            "ts": time.time()
-        }
+        chat_id = call.message.chat.id
+        current = LIVE_UI_SESSIONS.get(chat_id)
+        if _live_refresh:
+            if (
+                not current
+                or current.get("type") != "bot_view"
+                or current.get("bot_id") != bot_id
+                or current.get("msg_id") != call.message.message_id
+            ):
+                return
+            current["ts"] = time.time()
+        else:
+            LIVE_UI_SESSIONS[chat_id] = {
+                "type": "bot_view",
+                "bot_id": bot_id,
+                "msg_id": call.message.message_id,
+                "content_type": getattr(call.message, "content_type", "photo"),
+                "ts": time.time(),
+            }
 
     b = find_bot(bot_id)
     if not b:
@@ -15698,8 +15729,14 @@ def render_bot_view(call: types.CallbackQuery, bot_id: str) -> None:
     tun = TUNNELS.get(bot_id) if "TUNNELS" in globals() else None
     if tun and tun.get("proc") and tun["proc"].poll() is None and tun.get("url"):
         cap = cap[:-len(FOOTER)] + f"\n{bullet('Public URL', tun['url'])}" + FOOTER
-    show_menu(call.message.chat.id, PHOTOS["bot"], cap,
-              bot_actions_kb(bot_id, st["running"], premium=is_premium), call=call)
+    actions_kb = bot_actions_kb(bot_id, st["running"], premium=is_premium)
+    # If the original photo menu had already fallen back to a text message,
+    # keep live telemetry updates as in-place text edits. Calling show_menu
+    # here would try to send a new photo every five seconds.
+    if _live_refresh and LIVE_UI_SESSIONS.get(call.message.chat.id, {}).get("content_type") == "text":
+        show_text(call.message.chat.id, cap, actions_kb, call=call)
+    else:
+        show_menu(call.message.chat.id, PHOTOS["bot"], cap, actions_kb, call=call)
 
 
 def action_bot_start(call: types.CallbackQuery, bot_id: str) -> None:
@@ -16116,6 +16153,11 @@ def _handle_clone_chat_id(m: types.Message, st: Dict[str, Any]) -> None:
 
 
 def action_bot_clone(call: types.CallbackQuery, bot_id: str) -> None:
+    # Clone is a navigation/action transition, not a live-monitor screen.
+    # Explicitly stop the old bot-view refresh session before sending the
+    # credential prompt so telemetry cannot redraw the previous page.
+    if call and call.message:
+        LIVE_UI_SESSIONS.pop(call.message.chat.id, None)
     b = find_bot(bot_id)
     if not b or (b.get("owner") != call.from_user.id and not is_admin(call.from_user.id)):
         ack(call, "Not yours"); return
@@ -18557,14 +18599,14 @@ def _telemetry_loop():
                         from_user=None,
                         date=int(now),
                         chat=types.Chat(id=chat_id, type="private"),
-                        content_type="photo",
+                        content_type=sess.get("content_type", "photo"),
                         options=[],
                         json_string=""
                     )
                     mock_call.message = mock_msg
                     
                     if sess["type"] == "bot_view":
-                        render_bot_view(mock_call, sess["bot_id"])
+                        render_bot_view(mock_call, sess["bot_id"], _live_refresh=True)
                     elif sess["type"] == "adm_monitor":
                         render_adm_live_monitor(mock_call)
                 except Exception:

@@ -15,19 +15,7 @@
   "public_url": "",
   "payment_auto_enabled": true,
   "auto_approve_payments": false,
-  "pending_uploads": {
-    "6c07f22b6071e83c": {
-      "user_id": 8601285274,
-      "user_name": "❄️ 𝙎𝙔𝙀𝘿",
-      "user_username": "",
-      "chat_id": 8601285274,
-      "msg_id": 2530,
-      "file_name": "helpbhjjj.py",
-      "file_count": 1,
-      "size": 186521,
-      "ts": "2026-08-19T08:15:15.624926+00:00"
-    }
-  },
+  "pending_uploads": {},
   "tg_backup_channel": "-1004399846215",
   "tg_backup_auto": true
 }
