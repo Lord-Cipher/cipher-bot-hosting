@@ -36,7 +36,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
 from vault_sync import sync_vault
-from node_manager import test_node, new_node
+from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
 
 _REQUIRED_PKGS = [
@@ -5053,7 +5053,7 @@ _ADMIN_ROUTE_ACTION: Dict[str, str] = {
     "adm_github": "github_backup",
     "adm_force_backup": "github_backup",
     "adm_vault": "full_access", "adm_vault_force": "full_access", "adm_vault_history": "full_access",
-    "adm_nodes": "full_access", "adm_node_test": "full_access", "adm_node_add": "full_access", "adm_node_edit": "full_access", "adm_node_disable": "full_access", "adm_node_remove": "full_access", "adm_sandbox_toggle": "full_access",
+    "adm_nodes": "full_access", "adm_node_test": "full_access", "adm_node_add": "full_access", "adm_node_edit": "full_access", "adm_node_disable": "full_access", "adm_node_remove": "full_access", "adm_node_cred": "full_access", "adm_sandbox_toggle": "full_access",
     # Configuration and transport controls are owner/full-access only.
     "adm_settings": "full_access",
     "adm_set_public_url": "full_access",
@@ -5615,6 +5615,14 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         audit(call.from_user.id, "sandbox_mode_toggle", f"enabled={enabled}")
         ack(call, f"Sandbox {'ON' if enabled else 'OFF'}")
         return render_admin(call)
+    if data.startswith("adm_node_cred:"):
+        if not admin_only_call(call, "full_access"): return
+        node_id = data.split(":", 1)[1]
+        if node_id not in _nodes_load(): ack(call, "Node not found"); return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_node_cred", "node_id": node_id}
+        bot.send_message(call.message.chat.id, "Send the VPS password or complete private key in this protected admin flow. It will be deleted after capture and never displayed.", protect_content=True)
+        ack(call)
+        return
     if data == "adm_node_add":
         if not admin_only_call(call, "full_access"): return
         USER_STATES[call.from_user.id] = {"flow": "await_adm_node_add"}
@@ -10506,6 +10514,29 @@ def on_text(m: types.Message) -> None:
     st = USER_STATES.get(uid) or {}
     flow = st.get("flow")
     try:
+        if flow == "await_adm_node_cred":
+            USER_STATES.pop(uid, None)
+            if not is_owner(uid) and not _admin_menu_role_ok(uid, "adm_node_cred"):
+                audit(uid, "denied", "node_credential_saved")
+                return
+            node_id = str(st.get("node_id", "")); secret = text
+            if not secret or len(secret) > 12000:
+                bot.reply_to(m, "Credential rejected.")
+                return
+            store = _node_credentials()
+            if not store:
+                bot.reply_to(m, "Credential encryption is not configured.")
+                return
+            store.put(node_id, secret)
+            nodes = _nodes_load()
+            if node_id in nodes:
+                nodes[node_id]["secret_ref"] = "encrypted"
+                _nodes_save(nodes)
+            try: bot.delete_message(m.chat.id, m.message_id)
+            except Exception: pass
+            bot.send_message(m.chat.id, "Credential saved securely. The submitted message was deleted.", protect_content=True)
+            audit(uid, "node_credential_saved", f"node={node_id}")
+            return
         if flow == "ai_chat":
             return handle_ai_chat_message(m)
         if flow == "await_env_kv":
@@ -17616,6 +17647,18 @@ def _nodes_load() -> Dict[str, Any]:
 def _nodes_save(nodes: Dict[str, Any]) -> None:
     db = db_load(); db["nodes"] = nodes; db_save(db)
 
+def _node_credentials() -> Optional[CredentialStore]:
+    try:
+        key = _vault_config().get("key", "")
+        return CredentialStore(BASE_DIR / "storage" / "node_credentials.json", key) if key else None
+    except Exception:
+        return None
+
+def _node_secret(node_id: str) -> str:
+    store = _node_credentials()
+    try: return store.get(node_id) if store else ""
+    except Exception: return ""
+
 
 def render_adm_nodes(call: types.CallbackQuery) -> None:
     if not admin_only_call(call, "full_access"):
@@ -17632,7 +17675,8 @@ def render_adm_nodes(call: types.CallbackQuery) -> None:
         kb.add(Btn(f"Test {node.get('name', nid)}", callback_data=f"adm_node_test:{nid}", style="primary"),
                Btn("Edit", callback_data=f"adm_node_edit:{nid}", style="primary"),
                Btn("Disable" if node.get('enabled', True) else "Enable", callback_data=f"adm_node_disable:{nid}", style="danger"),
-               Btn("Remove", callback_data=f"adm_node_remove:{nid}", style="danger"))
+               Btn("Remove", callback_data=f"adm_node_remove:{nid}", style="danger"),
+               Btn("Credentials", callback_data=f"adm_node_cred:{nid}", style="danger"))
     kb.add(Btn("Test Local Node", callback_data="adm_node_test:local", style="success"),
            Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("sysinfo", PHOTOS["admin"]), "\n".join(lines) + FOOTER, kb, call=call)
@@ -17647,7 +17691,7 @@ def action_adm_node_test(call: types.CallbackQuery, node_id: str) -> None:
         node = _nodes_load().get(node_id)
         if not node:
             ack(call, "Node not found"); return
-    result = test_node(node)
+    result = test_node(node, secret=_node_secret(node_id) if node_id != "local" else "")
     node["status"] = result.get("state", "OFFLINE")
     node["capabilities"] = result.get("capabilities", {})
     node["last_test"] = ts_iso()
