@@ -3512,7 +3512,7 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
         nodes = _nodes_load()
         requested_node = b.get("node_id") or b.get("assigned_node")
         candidates = [nodes.get(requested_node)] if requested_node and nodes.get(requested_node) else list(nodes.values())
-        selected_node = next((n for n in candidates if n and n.get("enabled") and n.get("status") == "ONLINE" and n.get("connection_type") == "ssh"), None)
+        selected_node = next((n for n in candidates if n and n.get("enabled") and n.get("status") in {"ONLINE", "AUTHENTICATED"} and n.get("connection_type") == "ssh"), None)
         if selected_node:
             secret = _node_secret(selected_node.get("id", ""))
             if not secret:
@@ -18787,9 +18787,24 @@ def bot_health_monitor() -> None:
             info = RUNNING.get(bid)
         
         crashed = False
-        if not info or info["proc"].poll() is not None:
+        if info and info.get("remote"):
+            remote_proc = info.get("proc")
+            remote_rc = remote_proc.poll()
+            if getattr(remote_proc, "container_id", "") and bdoc.get("remote_container_id") != remote_proc.container_id:
+                bdoc["remote_container_id"] = remote_proc.container_id
+                save_bot(bdoc)
+            if getattr(remote_proc, "last_state", "") == "offline":
+                bdoc["status"] = "unavailable"
+                bdoc["last_error"] = "Remote VPS is unreachable."
+                save_bot(bdoc)
+                continue
+            if remote_rc is not None:
+                bdoc["status"] = "crashed" if remote_proc.last_state not in {"missing", "stopped"} else "stopped"
+                bdoc["last_exit_code"] = remote_rc
+                save_bot(bdoc)
+            crashed = remote_rc is not None
+        elif not info or info["proc"].poll() is not None:
             crashed = True
-        
         if crashed:
             crashes = bdoc.get("consecutive_crashes", 0)
             last_crash = bdoc.get("last_crash_ts", 0)
@@ -19141,7 +19156,7 @@ def _telemetry_loop():
                             node_id = info.get("node_id", ""); node = _nodes_load().get(node_id)
                             probe = test_node(node or {}, secret=_node_secret(node_id), timeout=5) if node else {"state": "OFFLINE"}
                             info["last_node_probe"] = now; info["node_status"] = probe.get("state", "OFFLINE")
-                            if probe.get("state") != "ONLINE":
+                            if probe.get("state") not in {"ONLINE", "AUTHENTICATED"}:
                                 bdoc = find_bot(bot_id)
                                 if bdoc: bdoc["status"] = "unavailable_node"; save_bot(bdoc)
                                 TELEMETRY[bot_id] = {"cpu": 0.0, "ram": 0, "remote": True, "nodeStatus": probe.get("state")}

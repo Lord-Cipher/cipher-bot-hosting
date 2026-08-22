@@ -15,6 +15,7 @@ import os
 import tarfile
 import tempfile
 import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -23,6 +24,8 @@ import requests
 from cryptography.fernet import Fernet
 
 EXCLUDES = {"node_modules", ".deps", ".tmp_run", "__pycache__", ".git", "logs"}
+VAULT_SYNC_LOCK = threading.Lock()
+REQUIRED_STATE_DIRS = ("storage", "sandbox")
 
 
 def _safe_rel(path: Path, root: Path) -> str:
@@ -62,9 +65,17 @@ def _archive(base_dir: Path) -> tuple[bytes, Dict[str, Any]]:
 
 
 def _github(session: requests.Session, method: str, url: str, **kwargs: Any) -> requests.Response:
-    response = session.request(method, url, timeout=120, **kwargs)
-    response.raise_for_status()
-    return response
+    last_exc: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            response = session.request(method, url, timeout=120, **kwargs)
+            response.raise_for_status()
+            return response
+        except (requests.RequestException, KeyError, ValueError) as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+    raise last_exc or RuntimeError("GitHub request failed")
 
 
 def _api_base(repo: str) -> str:
@@ -72,7 +83,7 @@ def _api_base(repo: str) -> str:
     return f"https://api.github.com/repos/{owner}/{name}"
 
 
-def sync_vault(base_dir: str | Path, token: str, repo: str, branch: str = "main", key: str = "") -> Dict[str, Any]:
+def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: str = "main", key: str = "") -> Dict[str, Any]:
     """Create and atomically publish one encrypted snapshot to GitHub."""
     if not token or "/" not in repo:
         return {"ok": False, "error": "Vault token and owner/repository are required."}
@@ -84,7 +95,12 @@ def sync_vault(base_dir: str | Path, token: str, repo: str, branch: str = "main"
         return {"ok": False, "error": f"Invalid CIPHER_VAULT_KEY: {exc}"}
 
     base = Path(base_dir)
+    missing = [name for name in REQUIRED_STATE_DIRS if not (base / name).is_dir()]
+    if missing:
+        return {"ok": False, "error": f"Required state directories missing: {', '.join(missing)}"}
     raw_archive, stats = _archive(base)
+    if not stats.get("files"):
+        return {"ok": False, "error": "Required state is empty; refusing to publish snapshot."}
     encrypted = Fernet(key.encode()).encrypt(raw_archive)
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     snapshot_id = f"{now}-{hashlib.sha256(encrypted).hexdigest()[:12]}"
@@ -138,6 +154,16 @@ def sync_vault(base_dir: str | Path, token: str, repo: str, branch: str = "main"
         return {"ok": False, "error": f"GitHub API error: {exc}"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+def sync_vault(base_dir: str | Path, token: str, repo: str, branch: str = "main", key: str = "") -> Dict[str, Any]:
+    """Serialize concurrent syncs so a later job cannot race ref publication."""
+    if not VAULT_SYNC_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "Another Cipher Vault sync is already in progress."}
+    try:
+        return _sync_vault_unlocked(base_dir, token, repo, branch, key)
+    finally:
+        VAULT_SYNC_LOCK.release()
 
 
 def materialize_snapshot(base_dir: str | Path, encrypted_archive: bytes, key: str, overwrite: bool = False) -> Dict[str, Any]:

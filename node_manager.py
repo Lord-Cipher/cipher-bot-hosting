@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional
 
 from cryptography.fernet import Fernet
 
-STATES = {"ONLINE", "OFFLINE", "AUTHENTICATION FAILED", "UNSUPPORTED", "NEEDS SETUP"}
+STATES = {"AUTHENTICATED", "ONLINE", "OFFLINE", "AUTHENTICATION FAILED", "UNSUPPORTED", "NEEDS CREDENTIALS", "NEEDS SETUP"}
 
 
 def new_node(name: str, connection_type: str = "local", **fields: Any) -> Dict[str, Any]:
@@ -114,20 +114,25 @@ def test_ssh_node(node: Dict[str, Any], secret: str, timeout: int = 8) -> Dict[s
         return {"state": "NEEDS SETUP", "reason": "paramiko is not installed"}
     host = node.get("hostname") or node.get("ipv4") or node.get("ipv6")
     if not host or not node.get("username"):
-        return {"state": "NEEDS SETUP", "reason": "SSH host and username required"}
+        return {"state": "NEEDS CREDENTIALS", "reason": "SSH host and username required"}
+    if not secret:
+        return {"state": "NEEDS CREDENTIALS", "reason": "Encrypted SSH credential required"}
     client = paramiko.SSHClient(); client.set_missing_host_key_policy(paramiko.RejectPolicy())
     try:
         kwargs = {"hostname": host, "port": int(node.get("ssh_port", 22)), "username": node["username"], "timeout": timeout, "banner_timeout": timeout, "auth_timeout": timeout}
         if node.get("auth_method", "key") == "password":
             kwargs["password"] = secret
         else:
-            key = paramiko.RSAKey.from_private_key(__import__("io").StringIO(secret))
+            try:
+                key = paramiko.RSAKey.from_private_key(__import__("io").StringIO(secret))
+            except Exception as exc:
+                return {"state": "NEEDS CREDENTIALS", "reason": f"Invalid private key: {exc}"}
             kwargs["pkey"] = key
         client.connect(**kwargs)
         command = "uname -s; uname -m; getconf _NPROCESSORS_ONLN; awk '/MemTotal/ {print $2}' /proc/meminfo; df -Pk / | tail -1; command -v docker || true; python3 --version 2>/dev/null || true; node --version 2>/dev/null || true"
         _, stdout, _ = client.exec_command(command, timeout=timeout)
         lines = [line.strip() for line in stdout.read().decode("utf-8", "replace").splitlines()]
-        return {"state": "ONLINE", "capabilities": {"os": lines[0] if len(lines)>0 else "", "architecture": lines[1] if len(lines)>1 else "", "cpuCores": lines[2] if len(lines)>2 else "", "ramKb": lines[3] if len(lines)>3 else "", "disk": lines[4] if len(lines)>4 else "", "docker": bool(lines[5]) if len(lines)>5 else False, "python": lines[6] if len(lines)>6 else "", "node": lines[7] if len(lines)>7 else ""}}
+        return {"state": "AUTHENTICATED", "capabilities": {"os": lines[0] if len(lines)>0 else "", "architecture": lines[1] if len(lines)>1 else "", "cpuCores": lines[2] if len(lines)>2 else "", "ramKb": lines[3] if len(lines)>3 else "", "disk": lines[4] if len(lines)>4 else "", "docker": bool(lines[5]) if len(lines)>5 else False, "python": lines[6] if len(lines)>6 else "", "node": lines[7] if len(lines)>7 else ""}}
     except (paramiko.AuthenticationException, paramiko.BadAuthenticationType):
         return {"state": "AUTHENTICATION FAILED", "reason": "SSH authentication failed"}
     except (paramiko.SSHException, OSError, socket.timeout) as exc:
@@ -145,23 +150,17 @@ def test_node(node: Dict[str, Any], timeout: int = 5, secret: str = "") -> Dict[
         caps = local_capabilities()
         return {"state": "ONLINE", "capabilities": caps}
     if kind == "agent":
-        url = node.get("url") or node.get("hostname")
-        if not url or not str(url).startswith(("https://", "http://")):
-            return {"state": "UNSUPPORTED", "reason": "Documented HTTP(S) agent URL required"}
-        return {"state": "NEEDS SETUP", "reason": "Authenticated agent adapter not configured"}
+        url = str(node.get("url") or node.get("hostname") or "").strip()
+        protocol = str(node.get("agent_protocol") or "").lower()
+        if protocol not in {"api", "websocket", "agent"}:
+            return {"state": "UNSUPPORTED", "reason": "A real authenticated API, worker agent, or WebSocket terminal is required"}
+        if not url.startswith(("https://", "http://", "wss://", "ws://")) or "sshx" in url.lower():
+            return {"state": "UNSUPPORTED", "reason": "Normal webpages and sshx sharing links are not terminal interfaces"}
+        if not secret:
+            return {"state": "NEEDS CREDENTIALS", "reason": "Encrypted agent credential required"}
+        return {"state": "NEEDS SETUP", "reason": "Authenticated agent adapter is not configured"}
     if kind == "ssh":
-        if secret:
-            return test_ssh_node(node, secret, timeout=max(timeout, 8))
-        host = node.get("hostname") or node.get("ipv4") or node.get("ipv6")
-        if not host or not node.get("username"):
-            return {"state": "NEEDS SETUP", "reason": "SSH host and username required"}
-        try:
-            with socket.create_connection((host, int(node.get("ssh_port", 22))), timeout=timeout):
-                return {"state": "ONLINE", "capabilities": {"transport": "tcp-reachable"}}
-        except socket.timeout:
-            return {"state": "OFFLINE", "reason": "Connection timed out"}
-        except PermissionError:
-            return {"state": "AUTHENTICATION FAILED", "reason": "Permission denied"}
-        except OSError as exc:
-            return {"state": "OFFLINE", "reason": str(exc)[:160]}
+        if not secret:
+            return {"state": "NEEDS CREDENTIALS", "reason": "Encrypted SSH credential required; TCP reachability is not authentication"}
+        return test_ssh_node(node, secret, timeout=max(timeout, 8))
     return {"state": "UNSUPPORTED", "reason": "Unknown connection type"}
