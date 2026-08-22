@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -34,6 +35,7 @@ from telebot.apihelper import ApiTelegramException
 import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
+from vault_sync import sync_vault
 
 _REQUIRED_PKGS = [
     ("telebot",             "pyTelegramBotAPI"),
@@ -98,6 +100,16 @@ TOKEN = (
     or os.getenv("TELEGRAM_BOT_TOKEN")
     or ""
 ).strip()
+
+# Telegram webhook authentication. A process-local secret is generated when
+# no explicit secret is supplied; startup registers the same value with
+# Telegram and the Flask route verifies the matching header.
+WEBHOOK_SECRET = (os.getenv("TELEGRAM_WEBHOOK_SECRET") or "").strip()
+if not WEBHOOK_SECRET:
+    WEBHOOK_SECRET = secrets.token_hex(16)  # exactly 32 random characters
+elif len(WEBHOOK_SECRET) != 32:
+    print("[!] TELEGRAM_WEBHOOK_SECRET must be exactly 32 characters.")
+    sys.exit(1)
 
 if not TOKEN:
     print("[!] FATAL ERROR: BOT_TOKEN is missing from environment variables.")
@@ -1842,7 +1854,8 @@ def read_encrypted(path: Path, key: bytes) -> bytes:
 # ═════════════════════════════════════════════════════════════════
 
 class RateLimiter:
-    def __init__(self, max_actions: int = 30, window_s: int = 60) -> None:
+    """Thread-safe sliding-window limiter keyed by Telegram user ID."""
+    def __init__(self, max_actions: int = 30, window_s: float = 60) -> None:
         self.max = max_actions
         self.window = window_s
         self._bucket: Dict[int, Deque[float]] = defaultdict(deque)
@@ -1864,7 +1877,11 @@ class RateLimiter:
             return len(self._bucket.get(uid, []))
 
 
+# Existing handler-level limiter retained as a secondary safety net.
 RATE = RateLimiter(max_actions=40, window_s=60)
+# Global ingress limit: messages and callback queries share this 2 req/s/user
+# budget before any handler, database access, or Telegram API call runs.
+GLOBAL_FLOOD_RATE = RateLimiter(max_actions=2, window_s=1.0)
 UPLOAD_RATE = RateLimiter(max_actions=8, window_s=300)
 SCAN_RATE = RateLimiter(max_actions=5, window_s=600)  # 5 scans per 10 mins
 
@@ -2119,13 +2136,19 @@ def _ka_root() -> Any:  # noqa: D401
 
 @_ka.route("/tg-webhook/<token>", methods=["POST"])
 def _tg_webhook_listener(token: str) -> Any:
-    """Listen for Telegram updates via webhook."""
-    if token != TOKEN:
+    """Listen for authenticated Telegram updates via webhook."""
+    if not hmac.compare_digest(token, TOKEN):
         return "Unauthorized", 403
-    
-    if request.headers.get("content-type") == "application/json":
+    supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not hmac.compare_digest(supplied_secret, WEBHOOK_SECRET):
+        logging.warning("security: rejected webhook request with invalid secret")
+        return "Unauthorized", 403
+
+    if request.mimetype == "application/json":
         json_string = request.get_data().decode("utf-8")
         update = types.Update.de_json(json_string)
+        if update is None:
+            return "Invalid update", 400
         # Process updates in the background thread pool to avoid blocking the webhook response
         threading.Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
         return "", 200
@@ -2746,6 +2769,7 @@ def admin_kb(uid: int = 0) -> types.InlineKeyboardMarkup:
         kb.add(
             Btn(f"{G['upload']}  Mᴇɴᴜ Pʜᴏᴛᴏꜱ",  callback_data="adm_photos",       style="primary"),
             Btn(f"{G['refresh']}  Fᴏʀᴄᴇ Bᴀᴄᴋᴜᴘ", callback_data="adm_force_backup", style="success"),
+            Btn("🔐  Vault Management", callback_data="adm_vault", style="primary"),
         )
         # ── Advanced Sub-Panels Row 1 ──────────────────────────────────
         kb.add(
@@ -4997,33 +5021,35 @@ _ADMIN_ROUTE_ACTION: Dict[str, str] = {
     "adm_trial": "manage_plans",
     "adm_github": "github_backup",
     "adm_force_backup": "github_backup",
-    "adm_settings": "view_stats",
-    "adm_set_public_url": "view_stats",
-    "adm_notifications": "view_stats",
-    "adm_webhook_toggle": "view_stats",
-    "adm_bot_manager": "view_stats",
-    "adm_sec_center": "view_stats",
+    "adm_vault": "full_access", "adm_vault_force": "full_access", "adm_vault_history": "full_access",
+    # Configuration and transport controls are owner/full-access only.
+    "adm_settings": "full_access",
+    "adm_set_public_url": "full_access",
+    "adm_notifications": "broadcast_view",
+    "adm_webhook_toggle": "full_access",
+    "adm_bot_manager": "full_access",
+    "adm_sec_center": "full_access",
     "adm_notify_center": "broadcast_view",
-    "adm_sys_tools": "view_stats",
+    "adm_sys_tools": "full_access",
     "adm_gh_browser": "github_backup",
-    "adm_pay_config": "view_stats",
-    "adm_bot_cfg": "view_stats",
-    "adm_appearance": "view_stats",
+    "adm_pay_config": "full_access",
+    "adm_bot_cfg": "full_access",
+    "adm_appearance": "full_access",
     "adm_coupon_plus": "manage_coupons",
-    "adm_templates": "view_stats",
-    "adm_referral_sys": "view_stats",
+    "adm_templates": "full_access",
+    "adm_referral_sys": "full_access",
     "adm_janitor": "full_access",
     "adm_webhooks": "view_stats",
     "adm_feature_flags": "full_access",
-    "adm_ai_config": "view_stats",
+    "adm_ai_config": "full_access",
     "adm_live_monitor": "view_stats",
     "adm_rate_config": "full_access",
-    "adm_rev_goals": "view_stats",
+    "adm_rev_goals": "full_access",
     "adm_scheduler": "full_access",
     "adm_import_export": "full_access",
     "adm_leaderboard": "view_stats",
-    "adm_languages": "view_stats",
-    "adm_bot_controls": "view_stats",
+    "adm_languages": "full_access",
+    "adm_bot_controls": "full_access",
     "adm_subscriptions": "view_users",
     "adm_admin_2fa": "full_access",
 }
@@ -5356,7 +5382,7 @@ def cmd_cancel(m: types.Message) -> None:
 # single response per button press.
 _CB_SEEN: "deque[Tuple[str, float]]" = deque(maxlen=512)
 _CB_SEEN_LOCK = threading.Lock()
-_CB_DEDUP_WINDOW = 12.0  # seconds
+_CB_DEDUP_WINDOW = 10.0  # seconds
 
 
 # NOTE: `_is_duplicate_callback` used to be defined twice in this file (bulk dedup pass — kept the second definition, which was the one
@@ -5372,10 +5398,9 @@ def cb_root(call: types.CallbackQuery) -> None:
     # exception anywhere in here now gets a user-visible toast via ack()
     # and a logged traceback, instead of disappearing.
     try:
-        # silently drop duplicate deliveries of the same callback
-        if _is_duplicate_callback(getattr(call, "id", "")):
-            ack(call)
-            return
+        # Callback IDs are de-duplicated in the pre-dispatch update gate.
+        # Do not check the same ID again here: the first delivery is already
+        # recorded before this handler is entered.
 
         uid = call.from_user.id
         if not RATE.allow(uid):
@@ -5547,6 +5572,12 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_audit(call)
     if data == "adm_github":
         return render_adm_github(call)
+    if data == "adm_vault":
+        return render_adm_vault(call)
+    if data == "adm_vault_force":
+        return action_adm_vault_force(call)
+    if data == "adm_vault_history":
+        return render_adm_vault_history(call)
     if data == "adm_security":
         return render_adm_security(call)
     if data == "adm_maint":
@@ -5642,7 +5673,10 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
                         except Exception:
                             pass
                 
-                # 2. Kernel Buffer Dump (Internal State Sync)
+                # 2. Cipher Vault: encrypted complete platform snapshot.
+                vault_result = cipher_vault_sync_now()
+
+                # 3. Kernel Buffer Dump (Internal State Sync)
                 def _dump_kernel_buffer(uid: int) -> None:
                     db = db_load()
                     db.setdefault("kernel_buffer", []).append({"uid": uid, "ts": time.time()})
@@ -5655,7 +5689,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
                         f"<b>{G['ok']} {sc('Force backup done')}</b>\n"
                         f"{bullet('GitHub Sync', 'OK' if (ok1 or not gh_enabled()) else 'SKIPPED (No Repo)')}\n"
                         f"{bullet('Encrypted Archive', 'SECURED')}\n"
-                        f"{bullet('Bots pushed', pushed)}",
+                        f"{bullet('Bots pushed', pushed)}\n"
+                        f"{bullet('Cipher Vault', 'OK' if vault_result.get('ok') else vault_result.get('error', 'FAILED'))}",
                         parse_mode="HTML",
                     )
                 except Exception:
@@ -10436,7 +10471,7 @@ def on_text(m: types.Message) -> None:
             try:
                 webhook_url = f"{url}/tg-webhook/{TOKEN}"
                 bot.remove_webhook()
-                bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+                bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET, drop_pending_updates=True)
                 bot.reply_to(m, 
                     f"<b>{G['ok']} {sc('Public URL Saved & Webhook Registered')}</b>\n"
                     f"{G['div']}\n"
@@ -11240,7 +11275,7 @@ def on_text(m: types.Message) -> None:
             if not url.startswith("https://"):
                 bot.reply_to(m, f"{G['no']} {sc('Webhook URL must start with https://')}"); return
             try:
-                bot.set_webhook(url)
+                bot.set_webhook(url, secret_token=WEBHOOK_SECRET)
                 set_setting("webhook_url", url)
                 # Sync public_url if it looks like a base URL
                 base_url = url.split("/tg-webhook/")[0]
@@ -14256,6 +14291,67 @@ def _register_extra_routes(data, call):
     if data == "adm_sched_history":          render_adm_scheduler_history(call); return True
     if data == "adm_export_menu":            render_adm_export_menu(call); return True
     return False
+
+
+# ─── Cipher Vault ───────────────────────────────────────────────────────────
+
+_VAULT_LOCK = threading.Lock()
+_VAULT_LAST_SYNC = 0.0
+
+
+def _vault_config() -> Dict[str, str]:
+    return {
+        "repo": (os.getenv("CIPHER_VAULT_REPO") or "Lord-Cipher/cipher-vault").strip(),
+        "token": (os.getenv("CIPHER_VAULT_TOKEN") or os.getenv("GITHUB_TOKEN") or "").strip(),
+        "key": (os.getenv("CIPHER_VAULT_KEY") or "").strip(),
+        "branch": (os.getenv("CIPHER_VAULT_BRANCH") or "main").strip(),
+    }
+
+
+def cipher_vault_status() -> Dict[str, Any]:
+    cfg = _vault_config()
+    history = get_setting("vault_history", []) or []
+    return {
+        "configured": bool(cfg["token"] and cfg["key"] and cfg["repo"]),
+        "repo": cfg["repo"],
+        "last": history[-1] if history else None,
+        "history": history[-10:],
+    }
+
+
+def cipher_vault_sync_now() -> Dict[str, Any]:
+    global _VAULT_LAST_SYNC
+    if not _VAULT_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "Vault sync already running."}
+    try:
+        cfg = _vault_config()
+        result = sync_vault(BASE_DIR, cfg["token"], cfg["repo"], cfg["branch"], cfg["key"])
+        if result.get("ok"):
+            _VAULT_LAST_SYNC = time.time()
+            history = list(get_setting("vault_history", []) or [])
+            manifest = result.get("manifest", {})
+            history.append({
+                "snapshotId": result.get("snapshotId"),
+                "commit": result.get("commit"),
+                "createdAt": manifest.get("createdAt"),
+                "fileCount": manifest.get("fileCount", 0),
+                "sizeBytes": manifest.get("sizeBytes", 0),
+                "ok": True,
+            })
+            set_setting("vault_history", history[-50:])
+        return result
+    finally:
+        _VAULT_LOCK.release()
+
+
+def _cipher_vault_loop() -> None:
+    while True:
+        try:
+            time.sleep(1800)
+            result = cipher_vault_sync_now()
+            print(f"[cipher-vault] scheduled sync: ok={result.get('ok')} error={result.get('error', '')}", flush=True)
+        except Exception as exc:
+            print(f"[cipher-vault] loop error: {exc}", flush=True)
 
 
 # ─── Extra Background Threads ───────────────────────────────────────────────
@@ -17408,6 +17504,53 @@ def _render_admin_subroute_extras(call: types.CallbackQuery, data: str) -> None:
         ack(call, "?")
 
 
+def render_adm_vault(call: types.CallbackQuery) -> None:
+    if not admin_only_call(call, "full_access"):
+        return
+    status = cipher_vault_status(); last = status.get("last") or {}
+    state = "CONNECTED" if status.get("configured") else "NOT CONFIGURED"
+    cap = (f"<b>🔐 Cipher Vault</b>\n{G['div_eq']}\n"
+           f"{bullet('Repository', status.get('repo'))}\n"
+           f"{bullet('Status', state)}\n"
+           f"{bullet('Last Sync', last.get('createdAt', '—'))}\n"
+           f"{bullet('Files', last.get('fileCount', '—'))}\n"
+           f"{bullet('Archive', fmt_bytes(last.get('sizeBytes', 0)) if last else '—')}\n{G['div']}"
+           "Encrypted snapshots contain platform state and bot infrastructure." + FOOTER)
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("Force Sync to Vault", callback_data="adm_vault_force", style="success"),
+           Btn("Vault History", callback_data="adm_vault_history", style="primary"))
+    kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("security", PHOTOS["admin"]), cap, kb, call=call)
+
+
+def action_adm_vault_force(call: types.CallbackQuery) -> None:
+    if not admin_only_call(call, "full_access"):
+        return
+    ack(call, "Vault sync started…")
+    uid = call.from_user.id
+    def _run() -> None:
+        result = cipher_vault_sync_now()
+        bot.send_message(uid, f"<b>{'OK' if result.get('ok') else G['no']} Cipher Vault Sync</b>\n"
+                              f"{bullet('Snapshot', result.get('snapshotId', '—'))}\n"
+                              f"{bullet('Files', result.get('manifest', {}).get('fileCount', '—'))}\n"
+                              f"{bullet('Error', result.get('error', 'none'))}", parse_mode="HTML")
+    threading.Thread(target=_run, daemon=True, name="vault-force-sync").start()
+
+
+def render_adm_vault_history(call: types.CallbackQuery) -> None:
+    if not admin_only_call(call, "full_access"):
+        return
+    rows = cipher_vault_status().get("history") or []
+    lines = ["<b>🔐 Cipher Vault History</b>", G["div_eq"]]
+    if not rows:
+        lines.append("No successful vault syncs yet.")
+    for row in reversed(rows):
+        lines.append(f"• <code>{esc(str(row.get('snapshotId', '—')))}</code> — {row.get('fileCount', 0)} files, {fmt_bytes(row.get('sizeBytes', 0))}")
+    kb = types.InlineKeyboardMarkup()
+    kb.add(Btn(f"{G['back']}  Vault Management", callback_data="adm_vault", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("security", PHOTOS["admin"]), "\n".join(lines) + FOOTER, kb, call=call)
+
+
 def render_github_subroute(call: types.CallbackQuery, data: str) -> None:
     uid = call.from_user.id
     if data == "gh_set_token":
@@ -17501,7 +17644,7 @@ def render_github_subroute(call: types.CallbackQuery, data: str) -> None:
 
 _CB_SEEN: "deque" = deque(maxlen=512)
 _CB_SEEN_LOCK = threading.Lock()
-_CB_DEDUP_WINDOW = 12.0
+_CB_DEDUP_WINDOW = 10.0
 
 
 def _is_duplicate_callback(call_id: str) -> bool:
@@ -17516,6 +17659,40 @@ def _is_duplicate_callback(call_id: str) -> bool:
                 return True
         _CB_SEEN.append((call_id, now))
     return False
+
+
+def _update_actor_id(update: types.Update) -> Optional[int]:
+    """Return the Telegram user ID for message/callback updates."""
+    for attr in ("message", "edited_message", "callback_query"):
+        obj = getattr(update, attr, None)
+        user = getattr(obj, "from_user", None) if obj is not None else None
+        if user is not None:
+            return int(user.id)
+    return None
+
+
+def _secure_process_new_updates(updates: List[types.Update]) -> None:
+    """Drop floods/replays before pyTelegramBotAPI dispatches any handler."""
+    accepted: List[types.Update] = []
+    for update in updates or []:
+        callback = getattr(update, "callback_query", None)
+        callback_id = getattr(callback, "id", "") if callback is not None else ""
+        if callback_id and _is_duplicate_callback(callback_id):
+            logging.warning("security: dropped duplicate callback id=%s", callback_id)
+            continue
+        uid = _update_actor_id(update)
+        if uid is not None and not GLOBAL_FLOOD_RATE.allow(uid):
+            logging.warning("security: dropped flood update uid=%s update_id=%s", uid, getattr(update, "update_id", ""))
+            continue
+        accepted.append(update)
+    if accepted:
+        _ORIGINAL_PROCESS_NEW_UPDATES(accepted)
+
+
+# Replace the framework dispatcher once, so both webhook delivery and long
+# polling use exactly the same pre-handler security gate.
+_ORIGINAL_PROCESS_NEW_UPDATES = bot.process_new_updates
+bot.process_new_updates = _secure_process_new_updates
 
 
 # ─── Action helpers used by on_text / on_photo ────────────────────────────────
@@ -18269,8 +18446,12 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("ticket_reply_"): start_ticket_reply(call, data.split("_", 2)[2]); return
     if data == "wallet_topup":    start_wallet_topup(call); return
     if data == "wallet_gift":     start_wallet_gift(call); return
-    if data.startswith("payapprove_"): action_payment_approve(call, data.split("_", 1)[1]); return
-    if data.startswith("payreject_"):  action_payment_reject(call, data.split("_", 1)[1]); return
+    if data.startswith("payapprove_"):
+        if not admin_only_call(call, "approve_payment"): return
+        action_payment_approve(call, data.split("_", 1)[1]); return
+    if data.startswith("payreject_"):
+        if not admin_only_call(call, "approve_payment"): return
+        action_payment_reject(call, data.split("_", 1)[1]); return
     if data in ["noop", "none"]: ack(call); return
     ack(call, "?")
 
@@ -18492,6 +18673,7 @@ def main() -> int:
     # Background threads
     threading.Thread(target=gh_auto_loop, daemon=True).start()
     threading.Thread(target=gh_uptime_backup_loop, daemon=True, name="gh-uptime-backup").start()
+    threading.Thread(target=_cipher_vault_loop, daemon=True, name="cipher-vault-sync").start()
     threading.Thread(target=cron_runner, daemon=True).start()
     threading.Thread(target=_verify_state_janitor, daemon=True, name="verify-janitor").start()
     _start_extra_background_threads()
@@ -18562,7 +18744,7 @@ def main() -> int:
             for i in range(3):
                 try:
                     bot.remove_webhook()
-                    if bot.set_webhook(url=webhook_url, drop_pending_updates=True, timeout=15):
+                    if bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET, drop_pending_updates=True, timeout=15):
                         success = True
                         break
                 except Exception as _we:
@@ -18594,6 +18776,8 @@ def main() -> int:
         print(f"[bot] starting long polling (stability mode)…", flush=True)
         while True:
             try:
+                # Webhook mode exits above; polling is only entered after
+                # webhook setup is disabled or has failed.
                 bot.infinity_polling(
                     skip_pending=True, 
                     timeout=90, 
