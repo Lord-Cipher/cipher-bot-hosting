@@ -36,7 +36,8 @@ def install_dependencies_command(workdir: str | Path, plan: str = "free", runtim
         image, script = "python:3.11-slim", "python -m pip install --disable-pip-version-check --no-input --target /app/.deps -r /app/requirements.txt"
     else:
         raise ValueError("unsupported runtime")
-    return ["docker", "run", "--rm", "--network", "bridge", "--cpus", lim["cpus"], "--memory", lim["memory"], "--pids-limit", str(lim["pids"]), "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "65532:65532", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "-v", f"{root}:/app:rw", image, "sh", "-lc", script]
+    deps = root / ".deps"; deps.mkdir(parents=True, exist_ok=True)
+    return ["docker", "run", "--rm", "--network", "bridge", "--cpus", lim["cpus"], "--memory", lim["memory"], "--pids-limit", str(lim["pids"]), "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "65532:65532", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "-v", f"{root}:/app:ro", "-v", f"{deps}:/app/.deps:rw", image, "sh", "-lc", script]
 
 
 def build_run_command(bot_id: str, workdir: str | Path, entrypoint: str, plan: str = "free", network: bool = False, runtime: str = "python", env_file: str | Path | None = None) -> list[str]:
@@ -58,5 +59,7 @@ def build_run_command(bot_id: str, workdir: str | Path, entrypoint: str, plan: s
     if runtime not in {"python", "node"}:
         raise ValueError("unsupported runtime")
     image, executable = ("node:22-slim", "node") if runtime == "node" else ("python:3.11-slim", "python")
-    cmd += ["-v", f"{root}:/app:rw", "-w", "/app", image, executable, str(entry)]
+    tmp = root / ".tmp_run"; tmp.mkdir(parents=True, exist_ok=True)
+    deps = root / ".deps"; deps.mkdir(parents=True, exist_ok=True)
+    cmd += ["-v", f"{root}:/app:ro", "-v", f"{deps}:/app/.deps:rw", "-v", f"{tmp}:/app/.tmp_run:rw", "-w", "/app", image, executable, str(entry)]
     return cmd
