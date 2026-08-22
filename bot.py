@@ -39,6 +39,7 @@ from vault_sync import sync_vault
 from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
 from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle
+from ai_preflight import run_preflight
 
 _REQUIRED_PKGS = [
     ("telebot",             "pyTelegramBotAPI"),
@@ -3425,6 +3426,15 @@ def _drain_proc(bot_id: str, proc: subprocess.Popen, log: List[str]) -> None:
         pass
 
 
+def _start_failure(b: Dict[str, Any], error: str) -> Dict[str, Any]:
+    """Restore a stopped, auditable state after a failed deployment attempt."""
+    b["status"] = "stopped"
+    b["last_error"] = str(error)[:1000]
+    b["last_exit_code"] = None
+    b["deployment_rollback_at"] = ts_iso()
+    save_bot(b)
+    return {"ok": False, "error": str(error)[:240]}
+
 def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
     bid = b["_id"]
     # Approval gate — never start a bot still waiting for admin review.
@@ -3490,6 +3500,12 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
 
     extra_env = b.get("env") or {}
     sandbox_on = bool(get_setting("sandbox_mode", False))
+    if sandbox_on:
+        preflight = run_preflight(bot_dir, kind, entry)
+        b["preflight"] = {"verdict": preflight.get("verdict"), "reason": preflight.get("reason", ""), "checked": ts_iso()}
+        save_bot(b)
+        if not preflight.get("ok"):
+            return _start_failure(b, f"Preflight {preflight.get('verdict')}: {preflight.get('reason', 'source rejected')}")
     trusted = bool(b.get("trusted_execution") or b.get("trusted") or b.get("approval_status") == "approved" and b.get("admin_trusted"))
     selected_node = None
     if sandbox_on:
@@ -3500,20 +3516,20 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
         if selected_node:
             secret = _node_secret(selected_node.get("id", ""))
             if not secret:
-                return {"ok": False, "error": "Selected VPS has no stored credential."}
+                return _start_failure(b, "Selected VPS has no stored credential.")
             try:
                 remote_result = remote_deploy(selected_node, secret, bid, bot_dir, kind, entry, str((owner or {}).get("plan", "free")), extra_env)
             except Exception as exc:
                 remote_result = {"ok": False, "error": str(exc)[:240]}
             if not remote_result.get("ok"):
-                return {"ok": False, "error": f"Remote deployment failed: {remote_result.get('error', 'unknown error')}"}
+                return _start_failure(b, f"Remote deployment failed: {remote_result.get('error', 'unknown error')}")
             b["remote_node_id"] = selected_node.get("id"); b["remote_container_id"] = remote_result.get("container_id", ""); b["status"] = "running"; save_bot(b)
             with _runner_lock:
                 RUNNING[bid] = {"proc": RemoteHandle(selected_node, secret, bid, remote_result.get("container_id", "")), "remote": True, "node_id": selected_node.get("id"), "log_ring": deque(maxlen=200), "started": time.time(), "manual_stop": False}
             return {"ok": True, "pid": 0, "kind": kind, "remote": True, "node_id": selected_node.get("id")}
     if sandbox_on:
         if not docker_available():
-            return {"ok": False, "error": "Sandbox mode requires Docker on the selected node."}
+            return _start_failure(b, "Sandbox mode requires Docker on the selected node.")
         plan_key = str((owner or {}).get("plan", "free")).lower()
         allow_network = bool(get_setting("sandbox_network", False) and b.get("allow_network", False))
         runtime_env_file = bot_dir / ".cipher-runtime.env"
@@ -3522,16 +3538,16 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             try: runtime_env_file.chmod(0o600)
             except OSError: pass
         except Exception as exc:
-            return {"ok": False, "error": f"sandbox environment setup failed: {exc}"}
+            return _start_failure(b, f"sandbox environment setup failed: {exc}")
         dep_cmd = install_dependencies_command(bot_dir, plan_key, runtime=kind)
         dep = subprocess.run(dep_cmd, cwd=str(bot_dir), capture_output=True, text=True, timeout=900)
         log.extend((dep.stdout or "").splitlines()[-20:])
         log.extend((dep.stderr or "").splitlines()[-20:])
         if dep.returncode != 0:
-            return {"ok": False, "error": "Sandbox dependency installation failed."}
+            return _start_failure(b, "Sandbox dependency installation failed.")
         cmd = build_run_command(bid, bot_dir, entry, plan_key, network=allow_network, runtime=kind, env_file=runtime_env_file)
     elif not trusted:
-        return {"ok": False, "error": "Untrusted bots cannot run with Sandbox Mode OFF."}
+        return _start_failure(b, "Untrusted bots cannot run with Sandbox Mode OFF.")
     else:
         install_deps(bot_dir, kind, log)
     try:
@@ -3541,7 +3557,7 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             preexec_fn=os.setsid if os.name == "posix" else None,
         )
     except Exception as e:
-        return {"ok": False, "error": f"spawn: {e}"}
+        return _start_failure(b, f"spawn: {e}")
 
     info = {
         "proc": proc, "kind": kind, "started": time.time() * 1000,
