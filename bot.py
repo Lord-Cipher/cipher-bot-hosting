@@ -36,6 +36,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
 from vault_sync import sync_vault
+from node_manager import test_node
 
 _REQUIRED_PKGS = [
     ("telebot",             "pyTelegramBotAPI"),
@@ -5024,6 +5025,7 @@ _ADMIN_ROUTE_ACTION: Dict[str, str] = {
     "adm_github": "github_backup",
     "adm_force_backup": "github_backup",
     "adm_vault": "full_access", "adm_vault_force": "full_access", "adm_vault_history": "full_access",
+    "adm_nodes": "full_access", "adm_node_test": "full_access",
     # Configuration and transport controls are owner/full-access only.
     "adm_settings": "full_access",
     "adm_set_public_url": "full_access",
@@ -5576,6 +5578,10 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_github(call)
     if data == "adm_vault":
         return render_adm_vault(call)
+    if data == "adm_nodes":
+        return render_adm_nodes(call)
+    if data.startswith("adm_node_test:"):
+        return action_adm_node_test(call, data.split(":", 1)[1])
     if data == "adm_vault_force":
         return action_adm_vault_force(call)
     if data == "adm_vault_history":
@@ -17518,6 +17524,51 @@ def _render_admin_subroute_extras(call: types.CallbackQuery, data: str) -> None:
     # delegate to _register_extra_routes from new file
     if not _register_extra_routes(data, call):
         ack(call, "?")
+
+
+def _nodes_load() -> Dict[str, Any]:
+    return dict(db_load().get("nodes", {}) or {})
+
+
+def _nodes_save(nodes: Dict[str, Any]) -> None:
+    db = db_load(); db["nodes"] = nodes; db_save(db)
+
+
+def render_adm_nodes(call: types.CallbackQuery) -> None:
+    if not admin_only_call(call, "full_access"):
+        return
+    nodes = _nodes_load()
+    lines = ["<b>🖥 Infrastructure Nodes</b>", G["div_eq"]]
+    if not nodes:
+        lines.append("No nodes configured. The local node can be tested automatically.")
+    for nid, node in nodes.items():
+        lines.append(f"• <b>{esc(node.get('name', nid))}</b> — {esc(node.get('status', 'NEEDS SETUP'))} ({esc(node.get('connection_type', 'unknown'))})")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for nid, node in list(nodes.items())[:12]:
+        kb.add(Btn(f"Test {node.get('name', nid)}", callback_data=f"adm_node_test:{nid}", style="primary"))
+    kb.add(Btn("Test Local Node", callback_data="adm_node_test:local", style="success"),
+           Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("sysinfo", PHOTOS["admin"]), "\n".join(lines) + FOOTER, kb, call=call)
+
+
+def action_adm_node_test(call: types.CallbackQuery, node_id: str) -> None:
+    if not admin_only_call(call, "full_access"):
+        return
+    if node_id == "local":
+        node = {"name": "Local node", "connection_type": "local", "enabled": True}
+    else:
+        node = _nodes_load().get(node_id)
+        if not node:
+            ack(call, "Node not found"); return
+    result = test_node(node)
+    node["status"] = result.get("state", "OFFLINE")
+    node["capabilities"] = result.get("capabilities", {})
+    node["last_test"] = ts_iso()
+    if node_id != "local":
+        nodes = _nodes_load(); nodes[node_id] = node; _nodes_save(nodes)
+    audit(call.from_user.id, "node_test", f"node={node_id} state={node['status']}")
+    ack(call, node["status"])
+    render_adm_nodes(call)
 
 
 def render_adm_vault(call: types.CallbackQuery) -> None:
