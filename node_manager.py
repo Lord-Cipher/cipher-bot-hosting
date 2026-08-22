@@ -11,6 +11,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -42,6 +43,36 @@ def new_node(name: str, connection_type: str = "local", **fields: Any) -> Dict[s
         "last_test": None,
         "secret_ref": fields.get("secret_ref", ""),
     }
+
+
+class CredentialStore:
+    """Encrypt node credentials at rest; plaintext exists only in memory."""
+    def __init__(self, path: str | Path, key: str):
+        self.path = Path(path); self.key = key; self._lock = threading.Lock()
+        if not key: raise ValueError("credential encryption key is required")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _load(self) -> Dict[str, str]:
+        if not self.path.exists(): return {}
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+
+    def put(self, node_id: str, secret: str) -> None:
+        with self._lock:
+            data = self._load(); data[str(node_id)] = encrypt_secret(secret, self.key)
+            self.path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+            try: self.path.chmod(0o600)
+            except OSError: pass
+
+    def get(self, node_id: str) -> str:
+        with self._lock:
+            value = self._load().get(str(node_id), "")
+        return decrypt_secret(value, self.key) if value else ""
+
+    def delete(self, node_id: str) -> None:
+        with self._lock:
+            data = self._load(); data.pop(str(node_id), None)
+            self.path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
 
 
 def encrypt_secret(value: str, key: str) -> str:
