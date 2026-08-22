@@ -38,6 +38,7 @@ from flask import Flask, jsonify, request
 from vault_sync import sync_vault
 from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
+from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle
 
 _REQUIRED_PKGS = [
     ("telebot",             "pyTelegramBotAPI"),
@@ -3489,6 +3490,26 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
     extra_env = b.get("env") or {}
     sandbox_on = bool(get_setting("sandbox_mode", False))
     trusted = bool(b.get("trusted_execution") or b.get("trusted") or b.get("approval_status") == "approved" and b.get("admin_trusted"))
+    selected_node = None
+    if sandbox_on:
+        nodes = _nodes_load()
+        requested_node = b.get("node_id") or b.get("assigned_node")
+        candidates = [nodes.get(requested_node)] if requested_node and nodes.get(requested_node) else list(nodes.values())
+        selected_node = next((n for n in candidates if n and n.get("enabled") and n.get("status") == "ONLINE" and n.get("connection_type") == "ssh"), None)
+        if selected_node:
+            secret = _node_secret(selected_node.get("id", ""))
+            if not secret:
+                return {"ok": False, "error": "Selected VPS has no stored credential."}
+            try:
+                remote_result = remote_deploy(selected_node, secret, bid, bot_dir, kind, entry, str((owner or {}).get("plan", "free")), extra_env)
+            except Exception as exc:
+                remote_result = {"ok": False, "error": str(exc)[:240]}
+            if not remote_result.get("ok"):
+                return {"ok": False, "error": f"Remote deployment failed: {remote_result.get('error', 'unknown error')}"}
+            b["remote_node_id"] = selected_node.get("id"); b["remote_container_id"] = remote_result.get("container_id", ""); b["status"] = "running"; save_bot(b)
+            with _runner_lock:
+                RUNNING[bid] = {"proc": RemoteHandle(selected_node, secret, bid, remote_result.get("container_id", "")), "remote": True, "node_id": selected_node.get("id"), "log_ring": deque(maxlen=200), "started": time.time(), "manual_stop": False}
+            return {"ok": True, "pid": 0, "kind": kind, "remote": True, "node_id": selected_node.get("id")}
     if sandbox_on:
         if not docker_available():
             return {"ok": False, "error": "Sandbox mode requires Docker on the selected node."}
@@ -3574,6 +3595,13 @@ def stop_child(bot_id: str, manual: bool = True) -> Dict[str, Any]:
             save_bot(b)
         return {"ok": True}
     info["manual_stop"] = manual
+    if info.get("remote"):
+        node = _nodes_load().get(info.get("node_id"))
+        result = remote_control(node or {}, _node_secret(info.get("node_id", "")), bot_id, "stop") if node else {"ok": False, "error": "Node not found"}
+        with _runner_lock: RUNNING.pop(bot_id, None)
+        b = find_bot(bot_id)
+        if b: b["status"] = "stopped"; b.pop("remote_container_id", None); save_bot(b)
+        return result
     proc = info["proc"]
 
     # Collect every descendant PID *before* we start signalling so a

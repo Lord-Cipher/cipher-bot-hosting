@@ -3,6 +3,7 @@ from __future__ import annotations
 import os, posixpath, shlex
 from pathlib import Path
 from typing import Any, Dict, Iterable
+from sandbox_runtime import limits_for_plan
 
 
 def _client(node: Dict[str, Any], secret: str, timeout: int = 10):
@@ -18,6 +19,15 @@ def _run(c, command: str, timeout: int = 60):
     stdin, stdout, stderr = c.exec_command(command, timeout=timeout)
     out, err = stdout.read().decode("utf-8", "replace"), stderr.read().decode("utf-8", "replace")
     return stdout.channel.recv_exit_status(), out, err
+
+
+class RemoteHandle:
+    def __init__(self, node: Dict[str, Any], secret: str, bot_id: str, container_id: str):
+        self.node, self.secret, self.bot_id, self.container_id = node, secret, bot_id, container_id
+        self.pid = 0
+        self.returncode = None
+    def poll(self): return self.returncode
+    def wait(self, timeout=None): return self.returncode
 
 
 def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path, runtime: str, entry: str, plan: str, env: Dict[str, str]) -> Dict[str, Any]:
@@ -37,7 +47,8 @@ def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path
             for k, v in env.items():
                 if k.isidentifier(): f.write(f"{k}={str(v).replace(chr(10), '')}\n")
         sftp.chmod(env_path, 0o600)
-        cmd = f"docker run -d --rm --name cipher-bot-{shlex.quote(bot_id)} --cpus 1 --memory 512m --pids-limit 256 --read-only --cap-drop ALL --security-opt no-new-privileges:true --user 65532:65532 --network none --env-file {shlex.quote(env_path)} -v {shlex.quote(remote)}:/app:ro -v {shlex.quote(remote+'/.deps')}:/app/.deps:rw -v {shlex.quote(remote+'/.tmp_run')}:/app/.tmp_run:rw -w /app {'node:22-slim node' if runtime == 'node' else 'python:3.11-slim python'} {shlex.quote(entry)}"
+        lim = limits_for_plan(plan)
+        cmd = f"docker run -d --rm --name cipher-bot-{shlex.quote(bot_id)} --cpus {shlex.quote(lim['cpus'])} --memory {shlex.quote(lim['memory'])} --pids-limit {int(lim['pids'])} --read-only --cap-drop ALL --security-opt no-new-privileges:true --user 65532:65532 --network none --env-file {shlex.quote(env_path)} -v {shlex.quote(remote)}:/app:ro -v {shlex.quote(remote+'/.deps')}:/app/.deps:rw -v {shlex.quote(remote+'/.tmp_run')}:/app/.tmp_run:rw -w /app {'node:22-slim node' if runtime == 'node' else 'python:3.11-slim python'} {shlex.quote(entry)}"
         code, out, err = _run(c, cmd)
         return {"ok": code == 0, "container_id": out.strip()[-128:] if code == 0 else "", "error": err[-300:] if code else "", "node_id": node.get("id")}
     finally:
