@@ -36,7 +36,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
 from vault_sync import sync_vault
-from node_manager import test_node
+from node_manager import test_node, new_node
 
 _REQUIRED_PKGS = [
     ("telebot",             "pyTelegramBotAPI"),
@@ -5026,7 +5026,7 @@ _ADMIN_ROUTE_ACTION: Dict[str, str] = {
     "adm_github": "github_backup",
     "adm_force_backup": "github_backup",
     "adm_vault": "full_access", "adm_vault_force": "full_access", "adm_vault_history": "full_access",
-    "adm_nodes": "full_access", "adm_node_test": "full_access",
+    "adm_nodes": "full_access", "adm_node_test": "full_access", "adm_node_add": "full_access",
     # Configuration and transport controls are owner/full-access only.
     "adm_settings": "full_access",
     "adm_set_public_url": "full_access",
@@ -5581,6 +5581,12 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_vault(call)
     if data == "adm_nodes":
         return render_adm_nodes(call)
+    if data == "adm_node_add":
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_node_add"}
+        bot.send_message(call.message.chat.id, "Send node JSON: name, connection_type (local/ssh/agent), provider, hostname or IP, port, and username. No passwords or private keys in chat.")
+        ack(call)
+        return
     if data.startswith("adm_node_test:"):
         return action_adm_node_test(call, data.split(":", 1)[1])
     if data == "adm_vault_force":
@@ -10296,6 +10302,20 @@ def on_document(m: types.Message) -> None:
         return _handle_payment_proof(m, st)
     if st.get("flow") == "await_topup_proof":
         return _handle_topup_proof(m)
+    if st.get("flow") == "await_adm_node_add":
+        USER_STATES.pop(uid, None)
+        if not is_admin(uid):
+            audit(uid, "denied", "node_add")
+            return
+        try:
+            payload = json.loads((m.text or "").strip())
+            node = new_node(str(payload["name"]), str(payload.get("connection_type", "local")), **payload)
+            nodes = _nodes_load(); nodes[node["id"]] = node; _nodes_save(nodes)
+            audit(uid, "node_add", f"node={node['id']} type={node['connection_type']}")
+            bot.reply_to(m, f"{G['ok']} Node added: <b>{esc(node['name'])}</b>", parse_mode="HTML")
+        except Exception as exc:
+            bot.reply_to(m, f"{G['no']} Invalid node JSON: <code>{esc(exc)}</code>", parse_mode="HTML")
+        return
     if st.get("flow") == "await_adm_import_cfg":
         USER_STATES.pop(uid, None)
         if not is_owner(uid):
@@ -17545,6 +17565,7 @@ def render_adm_nodes(call: types.CallbackQuery) -> None:
     for nid, node in nodes.items():
         lines.append(f"• <b>{esc(node.get('name', nid))}</b> — {esc(node.get('status', 'NEEDS SETUP'))} ({esc(node.get('connection_type', 'unknown'))})")
     kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("Add Node", callback_data="adm_node_add", style="success"))
     for nid, node in list(nodes.items())[:12]:
         kb.add(Btn(f"Test {node.get('name', nid)}", callback_data=f"adm_node_test:{nid}", style="primary"))
     kb.add(Btn("Test Local Node", callback_data="adm_node_test:local", style="success"),
