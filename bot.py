@@ -16156,11 +16156,15 @@ def action_bot_logs(call: types.CallbackQuery, bot_id: str) -> None:
     if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
         ack(call, "Not found"); return
     ack(call, "Fetching logs\u2026")
-    # `tail_log(bot_id, lines=60)` was never defined anywhere in this file —
-    # this button crashed with NameError on every tap. Fixed using the same
-    # log_ring pattern that already works correctly in render_adm_bc_logs.
-    ring: Deque = RUNNING.get(bot_id, {}).get("log_ring") or deque(maxlen=200)
-    logs = "\n".join(list(ring)[-60:])
+    # Remote workers use authenticated Docker logs; local workers use the ring buffer.
+    info = RUNNING.get(bot_id, {})
+    if info.get("remote"):
+        node_id = info.get("node_id", ""); node = _nodes_load().get(node_id)
+        result = remote_control(node or {}, _node_secret(node_id), bot_id, "logs") if node else {"ok": False, "error": "Node not found"}
+        logs = result.get("output", "") if result.get("ok") else f"remote logs unavailable: {result.get('error', 'unknown error')}"
+    else:
+        ring: Deque = info.get("log_ring") or deque(maxlen=200)
+        logs = "\n".join(list(ring)[-60:])
     if not logs:
         logs = "(no output yet)"
     cap = (
@@ -16327,7 +16331,13 @@ def action_bot_delete(call: types.CallbackQuery, bot_id: str) -> None:
     b = find_bot(bot_id)
     if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
         ack(call, "Not yours"); return
-    stop_child(bot_id, manual=True)
+    info = RUNNING.get(bot_id, {})
+    if info.get("remote"):
+        node_id = info.get("node_id", ""); node = _nodes_load().get(node_id)
+        remote_control(node or {}, _node_secret(node_id), bot_id, "delete") if node else None
+        with _runner_lock: RUNNING.pop(bot_id, None)
+    else:
+        stop_child(bot_id, manual=True)
     delete_bot_doc(bot_id)
     audit(call.from_user.id, "bot_delete", f"bot={bot_id}")
     ack(call, "Deleted")
