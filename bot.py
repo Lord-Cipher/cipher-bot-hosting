@@ -37,6 +37,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
 from vault_sync import sync_vault
 from node_manager import test_node, new_node
+from sandbox_runtime import build_run_command, docker_available
 
 _REQUIRED_PKGS = [
     ("telebot",             "pyTelegramBotAPI"),
@@ -3486,6 +3487,23 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
     cmd = ["node", entry] if kind == "node" else [sys.executable, "-u", entry]
 
     extra_env = b.get("env") or {}
+    sandbox_on = bool(get_setting("sandbox_mode", False))
+    trusted = bool(b.get("trusted_execution") or b.get("trusted") or b.get("approval_status") == "approved" and b.get("admin_trusted"))
+    if sandbox_on:
+        if not docker_available():
+            return {"ok": False, "error": "Sandbox mode requires Docker on the selected node."}
+        plan_key = str((owner or {}).get("plan", "free")).lower()
+        allow_network = bool(get_setting("sandbox_network", False) and b.get("allow_network", False))
+        runtime_env_file = bot_dir / ".cipher-runtime.env"
+        try:
+            runtime_env_file.write_text("".join(f"{k}={str(v).replace(chr(10), '')}\n" for k, v in extra_env.items() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k))), encoding="utf-8")
+            try: runtime_env_file.chmod(0o600)
+            except OSError: pass
+        except Exception as exc:
+            return {"ok": False, "error": f"sandbox environment setup failed: {exc}"}
+        cmd = build_run_command(bid, bot_dir, entry, plan_key, network=allow_network, runtime=kind, env_file=runtime_env_file)
+    elif not trusted:
+        return {"ok": False, "error": "Untrusted bots cannot run with Sandbox Mode OFF."}
     try:
         proc = subprocess.Popen(
             cmd, cwd=str(bot_dir), env=safe_env(bot_dir, extra_env),
@@ -3522,9 +3540,10 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             except Exception:
                 pass
 
-    threading.Thread(
-        target=_wipe_source_files, args=(bot_dir,), daemon=True
-    ).start()
+    if bool(get_setting("file_wipe", True)):
+        threading.Thread(
+            target=_wipe_source_files, args=(bot_dir,), daemon=True
+        ).start()
     # ─────────────────────────────────────────────────────────────────────
 
     # update doc — clear any prior crash so bot view shows clean state

@@ -26,7 +26,7 @@ def limits_for_plan(plan: str) -> Dict[str, Any]:
     return dict(PLAN_LIMITS.get(plan, PLAN_LIMITS["free"]))
 
 
-def build_run_command(bot_id: str, workdir: str | Path, entrypoint: str, plan: str = "free", network: bool = False) -> list[str]:
+def build_run_command(bot_id: str, workdir: str | Path, entrypoint: str, plan: str = "free", network: bool = False, runtime: str = "python", env_file: str | Path | None = None) -> list[str]:
     if not bot_id or "/" in bot_id or ".." in bot_id:
         raise ValueError("invalid bot id")
     root = Path(workdir).resolve()
@@ -40,5 +40,10 @@ def build_run_command(bot_id: str, workdir: str | Path, entrypoint: str, plan: s
            "--user", "65532:65532", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
     if not network:
         cmd += ["--network", "none"]
-    cmd += ["-v", f"{root}:/app:rw", "-w", "/app", "python:3.11-slim", "python", str(entry)]
+    if env_file:
+        cmd += ["--env-file", str(Path(env_file).resolve())]
+    if runtime not in {"python", "node"}:
+        raise ValueError("unsupported runtime")
+    image, executable = ("node:22-slim", "node") if runtime == "node" else ("python:3.11-slim", "python")
+    cmd += ["-v", f"{root}:/app:rw", "-w", "/app", image, executable, str(entry)]
     return cmd
