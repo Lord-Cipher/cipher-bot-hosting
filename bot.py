@@ -5026,7 +5026,7 @@ _ADMIN_ROUTE_ACTION: Dict[str, str] = {
     "adm_github": "github_backup",
     "adm_force_backup": "github_backup",
     "adm_vault": "full_access", "adm_vault_force": "full_access", "adm_vault_history": "full_access",
-    "adm_nodes": "full_access", "adm_node_test": "full_access", "adm_node_add": "full_access",
+    "adm_nodes": "full_access", "adm_node_test": "full_access", "adm_node_add": "full_access", "adm_node_edit": "full_access", "adm_node_disable": "full_access", "adm_node_remove": "full_access",
     # Configuration and transport controls are owner/full-access only.
     "adm_settings": "full_access",
     "adm_set_public_url": "full_access",
@@ -5589,6 +5589,23 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return
     if data.startswith("adm_node_test:"):
         return action_adm_node_test(call, data.split(":", 1)[1])
+    if data.startswith("adm_node_edit:"):
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_node_edit", "node_id": data.split(":", 1)[1]}
+        bot.send_message(call.message.chat.id, "Send replacement JSON for this node. Secrets are not accepted in chat.")
+        ack(call); return
+    if data.startswith("adm_node_disable:"):
+        if not admin_only_call(call, "full_access"): return
+        nid = data.split(":", 1)[1]; nodes = _nodes_load()
+        if nid in nodes:
+            nodes[nid]["enabled"] = not bool(nodes[nid].get("enabled", True)); nodes[nid]["status"] = "OFFLINE" if not nodes[nid]["enabled"] else "NEEDS SETUP"; _nodes_save(nodes); audit(call.from_user.id, "node_toggle", f"node={nid}")
+        return render_adm_nodes(call)
+    if data.startswith("adm_node_remove:"):
+        if not admin_only_call(call, "full_access"): return
+        nid = data.split(":", 1)[1]; nodes = _nodes_load()
+        if nid in nodes:
+            nodes.pop(nid); _nodes_save(nodes); audit(call.from_user.id, "node_remove", f"node={nid}")
+        return render_adm_nodes(call)
     if data == "adm_vault_force":
         return action_adm_vault_force(call)
     if data == "adm_vault_history":
@@ -10302,6 +10319,17 @@ def on_document(m: types.Message) -> None:
         return _handle_payment_proof(m, st)
     if st.get("flow") == "await_topup_proof":
         return _handle_topup_proof(m)
+    if st.get("flow") == "await_adm_node_edit":
+        node_id = st.get("node_id", ""); USER_STATES.pop(uid, None)
+        if not is_admin(uid): audit(uid, "denied", "node_edit"); return
+        try:
+            payload = json.loads((m.text or "").strip()); nodes = _nodes_load()
+            if node_id not in nodes: raise ValueError("node not found")
+            old = nodes[node_id]; allowed = {"name", "provider", "connection_type", "ipv4", "ipv6", "hostname", "url", "ssh_port", "username", "auth_method", "enabled"}
+            old.update({k: v for k, v in payload.items() if k in allowed}); nodes[node_id] = old; _nodes_save(nodes); audit(uid, "node_edit", f"node={node_id}")
+            bot.reply_to(m, f"{G['ok']} Node updated: <b>{esc(old.get('name', node_id))}</b>", parse_mode="HTML")
+        except Exception as exc: bot.reply_to(m, f"{G['no']} Invalid node JSON: <code>{esc(exc)}</code>", parse_mode="HTML")
+        return
     if st.get("flow") == "await_adm_node_add":
         USER_STATES.pop(uid, None)
         if not is_admin(uid):
@@ -17567,7 +17595,10 @@ def render_adm_nodes(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn("Add Node", callback_data="adm_node_add", style="success"))
     for nid, node in list(nodes.items())[:12]:
-        kb.add(Btn(f"Test {node.get('name', nid)}", callback_data=f"adm_node_test:{nid}", style="primary"))
+        kb.add(Btn(f"Test {node.get('name', nid)}", callback_data=f"adm_node_test:{nid}", style="primary"),
+               Btn("Edit", callback_data=f"adm_node_edit:{nid}", style="primary"),
+               Btn("Disable" if node.get('enabled', True) else "Enable", callback_data=f"adm_node_disable:{nid}", style="danger"),
+               Btn("Remove", callback_data=f"adm_node_remove:{nid}", style="danger"))
     kb.add(Btn("Test Local Node", callback_data="adm_node_test:local", style="success"),
            Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("sysinfo", PHOTOS["admin"]), "\n".join(lines) + FOOTER, kb, call=call)
