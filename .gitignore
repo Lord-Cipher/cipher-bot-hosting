@@ -1,4 +1,5 @@
 cipher_vault.json
+.env
 cipher_vault.env
 __pycache__/
 *.pyc
