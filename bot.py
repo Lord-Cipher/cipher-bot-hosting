@@ -19079,6 +19079,19 @@ def _telemetry_loop():
             active_pids = set()
             for bot_id, info in list(RUNNING.items()):
                 try:
+                    if info.get("remote"):
+                        now = time.time()
+                        if now - float(info.get("last_node_probe", 0)) >= 60:
+                            node_id = info.get("node_id", ""); node = _nodes_load().get(node_id)
+                            probe = test_node(node or {}, secret=_node_secret(node_id), timeout=5) if node else {"state": "OFFLINE"}
+                            info["last_node_probe"] = now; info["node_status"] = probe.get("state", "OFFLINE")
+                            if probe.get("state") != "ONLINE":
+                                bdoc = find_bot(bot_id)
+                                if bdoc: bdoc["status"] = "unavailable_node"; save_bot(bdoc)
+                                TELEMETRY[bot_id] = {"cpu": 0.0, "ram": 0, "remote": True, "nodeStatus": probe.get("state")}
+                                continue
+                        TELEMETRY.setdefault(bot_id, {"cpu": 0.0, "ram": 0, "remote": True})["nodeStatus"] = info.get("node_status", "ONLINE")
+                        continue
                     proc = info.get("proc")
                     if not proc or proc.poll() is not None:
                         TELEMETRY.pop(bot_id, None); continue
