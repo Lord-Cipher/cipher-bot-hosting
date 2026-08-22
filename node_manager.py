@@ -75,7 +75,37 @@ def _ram_bytes() -> Optional[int]:
     return None
 
 
-def test_node(node: Dict[str, Any], timeout: int = 5) -> Dict[str, Any]:
+def test_ssh_node(node: Dict[str, Any], secret: str, timeout: int = 8) -> Dict[str, Any]:
+    """Authenticate with SSH and run read-only capability probes."""
+    try:
+        import paramiko
+    except ImportError:
+        return {"state": "NEEDS SETUP", "reason": "paramiko is not installed"}
+    host = node.get("hostname") or node.get("ipv4") or node.get("ipv6")
+    if not host or not node.get("username"):
+        return {"state": "NEEDS SETUP", "reason": "SSH host and username required"}
+    client = paramiko.SSHClient(); client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    try:
+        kwargs = {"hostname": host, "port": int(node.get("ssh_port", 22)), "username": node["username"], "timeout": timeout, "banner_timeout": timeout, "auth_timeout": timeout}
+        if node.get("auth_method", "key") == "password":
+            kwargs["password"] = secret
+        else:
+            key = paramiko.RSAKey.from_private_key(__import__("io").StringIO(secret))
+            kwargs["pkey"] = key
+        client.connect(**kwargs)
+        command = "uname -s; uname -m; getconf _NPROCESSORS_ONLN; awk '/MemTotal/ {print $2}' /proc/meminfo; df -Pk / | tail -1; command -v docker || true; python3 --version 2>/dev/null || true; node --version 2>/dev/null || true"
+        _, stdout, _ = client.exec_command(command, timeout=timeout)
+        lines = [line.strip() for line in stdout.read().decode("utf-8", "replace").splitlines()]
+        return {"state": "ONLINE", "capabilities": {"os": lines[0] if len(lines)>0 else "", "architecture": lines[1] if len(lines)>1 else "", "cpuCores": lines[2] if len(lines)>2 else "", "ramKb": lines[3] if len(lines)>3 else "", "disk": lines[4] if len(lines)>4 else "", "docker": bool(lines[5]) if len(lines)>5 else False, "python": lines[6] if len(lines)>6 else "", "node": lines[7] if len(lines)>7 else ""}}
+    except (paramiko.AuthenticationException, paramiko.BadAuthenticationType):
+        return {"state": "AUTHENTICATION FAILED", "reason": "SSH authentication failed"}
+    except (paramiko.SSHException, OSError, socket.timeout) as exc:
+        return {"state": "OFFLINE", "reason": str(exc)[:160]}
+    finally:
+        client.close()
+
+
+def test_node(node: Dict[str, Any], timeout: int = 5, secret: str = "") -> Dict[str, Any]:
     """Test connectivity without changing the node or running remote commands."""
     if not node.get("enabled"):
         return {"state": "OFFLINE", "reason": "Node disabled"}
@@ -89,6 +119,8 @@ def test_node(node: Dict[str, Any], timeout: int = 5) -> Dict[str, Any]:
             return {"state": "UNSUPPORTED", "reason": "Documented HTTP(S) agent URL required"}
         return {"state": "NEEDS SETUP", "reason": "Authenticated agent adapter not configured"}
     if kind == "ssh":
+        if secret:
+            return test_ssh_node(node, secret, timeout=max(timeout, 8))
         host = node.get("hostname") or node.get("ipv4") or node.get("ipv6")
         if not host or not node.get("username"):
             return {"state": "NEEDS SETUP", "reason": "SSH host and username required"}

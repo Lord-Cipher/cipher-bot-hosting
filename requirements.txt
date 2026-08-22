@@ -8,3 +8,4 @@ psutil
 Pillow
 curl_cffi
 python-dotenv
+paramiko
