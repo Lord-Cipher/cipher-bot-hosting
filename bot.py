@@ -10337,7 +10337,7 @@ def on_document(m: types.Message) -> None:
             return
         try:
             payload = json.loads((m.text or "").strip())
-            node = new_node(str(payload["name"]), str(payload.get("connection_type", "local")), **payload)
+            node = new_node(str(payload["name"]), str(payload.get("connection_type", "local")), **{k: v for k, v in payload.items() if k not in {"name", "connection_type"}})
             nodes = _nodes_load(); nodes[node["id"]] = node; _nodes_save(nodes)
             audit(uid, "node_add", f"node={node['id']} type={node['connection_type']}")
             bot.reply_to(m, f"{G['ok']} Node added: <b>{esc(node['name'])}</b>", parse_mode="HTML")
