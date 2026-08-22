@@ -37,7 +37,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
 from vault_sync import sync_vault
 from node_manager import test_node, new_node
-from sandbox_runtime import build_run_command, docker_available
+from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
 
 _REQUIRED_PKGS = [
     ("telebot",             "pyTelegramBotAPI"),
@@ -3484,7 +3484,6 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
         return {"ok": False, "error": "No entry file (index.js / bot.py)."}
 
     log: List[str] = [f"{G['div_eq']} START {ts_iso()} {G['div_eq']}"]
-    install_deps(bot_dir, kind, log)
     cmd = ["node", entry] if kind == "node" else [sys.executable, "-u", entry]
 
     extra_env = b.get("env") or {}
@@ -3502,9 +3501,17 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             except OSError: pass
         except Exception as exc:
             return {"ok": False, "error": f"sandbox environment setup failed: {exc}"}
+        dep_cmd = install_dependencies_command(bot_dir, plan_key, runtime=kind)
+        dep = subprocess.run(dep_cmd, cwd=str(bot_dir), capture_output=True, text=True, timeout=900)
+        log.extend((dep.stdout or "").splitlines()[-20:])
+        log.extend((dep.stderr or "").splitlines()[-20:])
+        if dep.returncode != 0:
+            return {"ok": False, "error": "Sandbox dependency installation failed."}
         cmd = build_run_command(bid, bot_dir, entry, plan_key, network=allow_network, runtime=kind, env_file=runtime_env_file)
     elif not trusted:
         return {"ok": False, "error": "Untrusted bots cannot run with Sandbox Mode OFF."}
+    else:
+        install_deps(bot_dir, kind, log)
     try:
         proc = subprocess.Popen(
             cmd, cwd=str(bot_dir), env=safe_env(bot_dir, extra_env),

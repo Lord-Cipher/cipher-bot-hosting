@@ -7,6 +7,7 @@ automatic path.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Dict
 
@@ -24,6 +25,18 @@ def docker_available() -> bool:
 
 def limits_for_plan(plan: str) -> Dict[str, Any]:
     return dict(PLAN_LIMITS.get(plan, PLAN_LIMITS["free"]))
+
+
+def install_dependencies_command(workdir: str | Path, plan: str = "free", runtime: str = "python") -> list[str]:
+    root = Path(workdir).resolve()
+    lim = limits_for_plan(plan)
+    if runtime == "node":
+        image, script = "node:22-slim", "npm install --ignore-scripts --prefix /app"
+    elif runtime == "python":
+        image, script = "python:3.11-slim", "python -m pip install --disable-pip-version-check --no-input --target /app/.deps -r /app/requirements.txt"
+    else:
+        raise ValueError("unsupported runtime")
+    return ["docker", "run", "--rm", "--network", "bridge", "--cpus", lim["cpus"], "--memory", lim["memory"], "--pids-limit", str(lim["pids"]), "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "65532:65532", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "-v", f"{root}:/app:rw", image, "sh", "-lc", script]
 
 
 def build_run_command(bot_id: str, workdir: str | Path, entrypoint: str, plan: str = "free", network: bool = False, runtime: str = "python", env_file: str | Path | None = None) -> list[str]:
