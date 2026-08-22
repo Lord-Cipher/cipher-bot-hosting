@@ -91,6 +91,8 @@ _auto_install_missing()
 try:
     from dotenv import load_dotenv
     load_dotenv()
+    # Optional host-independent vault file; normal .env values take precedence.
+    load_dotenv(Path(__file__).resolve().parent / "cipher_vault.env", override=False)
 except ImportError:
     pass
 
