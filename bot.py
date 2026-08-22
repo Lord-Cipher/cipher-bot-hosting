@@ -2773,6 +2773,7 @@ def admin_kb(uid: int = 0) -> types.InlineKeyboardMarkup:
             Btn(f"{G['upload']}  Mᴇɴᴜ Pʜᴏᴛᴏꜱ",  callback_data="adm_photos",       style="primary"),
             Btn(f"{G['refresh']}  Fᴏʀᴄᴇ Bᴀᴄᴋᴜᴘ", callback_data="adm_force_backup", style="success"),
             Btn("🔐  Vault Management", callback_data="adm_vault", style="primary"),
+            Btn("🖥  Infrastructure Nodes", callback_data="adm_nodes", style="primary"),
         )
         # ── Advanced Sub-Panels Row 1 ──────────────────────────────────
         kb.add(
