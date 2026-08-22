@@ -2887,6 +2887,7 @@ def bot_actions_kb(bot_id: str, running: bool, premium: bool = False) -> types.I
         Btn(f"{G['eye']}  Iɴꜰᴏ",       callback_data=f"bot_info_{bot_id}", style="primary"),
         Btn(f"{G['settings']}  Eɴᴠ Vᴀʀꜱ", callback_data=f"bot_env_{bot_id}",  style="primary"),
     )
+    kb.add(Btn("🖥  Nᴏᴅᴇ", callback_data=f"bot_node_{bot_id}", style="primary"))
     kb.add(
         Btn(f"{G['cog']}  Cʀᴏɴ",          callback_data=f"bot_cron_{bot_id}", style="primary"),
         Btn(f"{G['download']}  Iɴꜱᴛᴀʟʟ Pᴋɢ", callback_data=f"bot_pip_{bot_id}",   style="primary"),
@@ -16183,6 +16184,35 @@ def action_bot_info(call: types.CallbackQuery, bot_id: str) -> None:
     render_bot_view(call, bot_id)
 
 
+def render_bot_node_assign(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
+        ack(call, "Not yours"); return
+    nodes = _nodes_load(); current = b.get("node_id") or "auto"
+    cap = f"<b>🖥 Node Assignment</b>\n{G['div_eq']}\nCurrent: <code>{esc(str(current))}</code>\nSelect where this bot should run.{FOOTER}"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("Auto-select enabled node", callback_data=f"bot_node_set_{bot_id}_auto", style="primary"))
+    kb.add(Btn("Local host", callback_data=f"bot_node_set_{bot_id}_local", style="success"))
+    for nid, node in list(nodes.items())[:12]:
+        if node.get("enabled"):
+            kb.add(Btn(f"{node.get('name', nid)} ({node.get('status', 'NEEDS SETUP')})", callback_data=f"bot_node_set_{bot_id}_{nid}", style="primary"))
+    kb.add(Btn(f"{G['back']} Bot", callback_data=f"bot_view_{bot_id}", style="danger"))
+    show_text(call.message.chat.id, cap, kb, call=call)
+
+def action_bot_node_assign(call: types.CallbackQuery, bot_id: str, node_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
+        ack(call, "Not yours"); return
+    nodes = _nodes_load()
+    if node_id not in {"auto", "local"} and node_id not in nodes:
+        ack(call, "Node not found", show_alert=True); return
+    if node_id not in {"auto", "local"} and not nodes[node_id].get("enabled"):
+        ack(call, "Node is disabled", show_alert=True); return
+    b["node_id"] = "" if node_id in {"auto", "local"} else node_id
+    b["node_assignment"] = node_id; save_bot(b)
+    audit(call.from_user.id, "bot_node_assign", f"bot={bot_id} node={node_id}")
+    ack(call, f"Assigned to {node_id}"); render_bot_view(call, bot_id)
+
 def render_env_menu(call: types.CallbackQuery, bot_id: str) -> None:
     b = find_bot(bot_id)
     if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
@@ -18585,6 +18615,10 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "pay_proof": start_proof_flow(call); return
     # Bot actions
     if data.startswith("bot_view_"):        render_bot_view(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_node_set_"):
+        parts = data.split("_", 4)
+        if len(parts) >= 5: action_bot_node_assign(call, parts[3], parts[4]); return
+    if data.startswith("bot_node_"):        render_bot_node_assign(call, data.split("_", 2)[2]); return
     if data.startswith("bot_start_"):       action_bot_start(call, data.split("_", 2)[2]); return
     if data.startswith("bot_stop_"):        action_bot_stop(call, data.split("_", 2)[2]); return
     if data.startswith("bot_restart_"):     action_bot_restart(call, data.split("_", 2)[2]); return
@@ -19059,6 +19093,12 @@ def render_adm_pay_modes(call: types.CallbackQuery) -> None:
 # Stores real-time CPU/RAM stats for all running bots and the system itself.
 TELEMETRY:     Dict[str, Dict[str, Any]] = {}
 SYS_TELEMETRY: Dict[str, Any] = {"cpu": 0.0, "ram_used": 0, "ram_total": 0}
+def _parse_size_bytes(value: str) -> int:
+    m = re.match(r"^\\s*([0-9.]+)\\s*([kmgtpe]?i?b)?\\s*$", str(value), re.I)
+    if not m: return 0
+    n, unit = float(m.group(1)), (m.group(2) or "b").lower()
+    units = {"b": 0, "kb": 1, "kib": 1, "mb": 2, "mib": 2, "gb": 3, "gib": 3, "tb": 4, "tib": 4}
+    return int(n * (1024 ** units.get(unit, 0)))
 _PROC_CACHE:   Dict[int, psutil.Process] = {}
 LIVE_UI_SESSIONS: Dict[int, Dict[str, Any]] = {}
 
@@ -19090,7 +19130,19 @@ def _telemetry_loop():
                                 if bdoc: bdoc["status"] = "unavailable_node"; save_bot(bdoc)
                                 TELEMETRY[bot_id] = {"cpu": 0.0, "ram": 0, "remote": True, "nodeStatus": probe.get("state")}
                                 continue
-                        TELEMETRY.setdefault(bot_id, {"cpu": 0.0, "ram": 0, "remote": True})["nodeStatus"] = info.get("node_status", "ONLINE")
+                        telemetry = TELEMETRY.setdefault(bot_id, {"cpu": 0.0, "ram": 0, "remote": True})
+                        telemetry["nodeStatus"] = info.get("node_status", "ONLINE")
+                        if time.time() - float(info.get("last_stats_probe", 0)) >= 30:
+                            node_id = info.get("node_id", ""); node = _nodes_load().get(node_id)
+                            stats = remote_control(node or {}, _node_secret(node_id), bot_id, "stats") if node else {"ok": False}
+                            info["last_stats_probe"] = time.time()
+                            if stats.get("ok"):
+                                try:
+                                    raw = json.loads((stats.get("output") or "").strip().splitlines()[0])
+                                    telemetry["cpu"] = float(str(raw.get("CPUPerc", "0")).replace("%", ""))
+                                    mem = str(raw.get("MemUsage", "0B")).split("/")[0].strip()
+                                    telemetry["ram"] = _parse_size_bytes(mem)
+                                except Exception: pass
                         continue
                     proc = info.get("proc")
                     if not proc or proc.poll() is not None:

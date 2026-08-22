@@ -57,10 +57,10 @@ def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path
 
 def control(node: Dict[str, Any], secret: str, bot_id: str, action: str) -> Dict[str, Any]:
     if not node.get("enabled") or node.get("status") != "ONLINE": return {"ok": False, "error": "Node is disabled or unverified."}
-    if action not in {"stop", "restart", "delete", "logs"}: return {"ok": False, "error": "Unsupported action"}
+    if action not in {"stop", "restart", "delete", "logs", "stats"}: return {"ok": False, "error": "Unsupported action"}
     c = _client(node, secret)
     try:
-        command = {"stop": f"docker stop cipher-bot-{shlex.quote(bot_id)}", "restart": f"docker restart cipher-bot-{shlex.quote(bot_id)}", "delete": f"docker rm -f cipher-bot-{shlex.quote(bot_id)}", "logs": f"docker logs --tail 200 cipher-bot-{shlex.quote(bot_id)}"}[action]
+        command = {"stop": f"docker stop cipher-bot-{shlex.quote(bot_id)}", "restart": f"docker restart cipher-bot-{shlex.quote(bot_id)}", "delete": f"docker rm -f cipher-bot-{shlex.quote(bot_id)}", "logs": f"docker logs --tail 200 cipher-bot-{shlex.quote(bot_id)}", "stats": f"docker stats --no-stream --format '{{{{json .}}}}' cipher-bot-{shlex.quote(bot_id)}"}[action]
         code, out, err = _run(c, command)
         return {"ok": code == 0, "output": out[-6000:], "error": err[-500:]}
     finally: c.close()
