@@ -19161,7 +19161,7 @@ def get_ai_seal_url(plan_name: str) -> Optional[str]:
 def send_elite_receipt(uid: int, tx_id: str, plan_key: str) -> None:
     """Sends a high-end receipt with an AI Digital Seal and dynamic template support."""
     p = PLAN_LIMITS.get(plan_key, PLAN_LIMITS["pro"])
-    u = get_user(uid)
+    u = (db_load_ro().get("users", {}) or {}).get(str(uid), {})
     name = u.get("name", "Commander")
     
     # Load and process template
