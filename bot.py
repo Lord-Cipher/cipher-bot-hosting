@@ -14300,11 +14300,25 @@ _VAULT_LAST_SYNC = 0.0
 
 
 def _vault_config() -> Dict[str, str]:
+    """Load vault settings from a portable file, with env overrides."""
+    config_path = Path(os.getenv("CIPHER_VAULT_CONFIG", str(BASE_DIR / "cipher_vault.json")))
+    file_config: Dict[str, Any] = {}
+    try:
+        if config_path.exists():
+            loaded = json.loads(config_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                file_config = loaded
+    except Exception as exc:
+        print(f"[cipher-vault] config read failed: {exc}", flush=True)
+
+    def value(name: str, default: str = "") -> str:
+        return (os.getenv(name) or str(file_config.get(name, default) or "")).strip()
+
     return {
-        "repo": (os.getenv("CIPHER_VAULT_REPO") or "Lord-Cipher/cipher-vault").strip(),
-        "token": (os.getenv("CIPHER_VAULT_TOKEN") or os.getenv("GITHUB_TOKEN") or "").strip(),
-        "key": (os.getenv("CIPHER_VAULT_KEY") or "").strip(),
-        "branch": (os.getenv("CIPHER_VAULT_BRANCH") or "main").strip(),
+        "repo": value("CIPHER_VAULT_REPO", "Lord-Cipher/cipher-vault"),
+        "token": value("CIPHER_VAULT_TOKEN") or os.getenv("GITHUB_TOKEN", "").strip(),
+        "key": value("CIPHER_VAULT_KEY"),
+        "branch": value("CIPHER_VAULT_BRANCH", "main"),
     }
 
 
