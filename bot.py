@@ -2775,6 +2775,7 @@ def admin_kb(uid: int = 0) -> types.InlineKeyboardMarkup:
             Btn(f"{G['refresh']}  Fᴏʀᴄᴇ Bᴀᴄᴋᴜᴘ", callback_data="adm_force_backup", style="success"),
             Btn("🔐  Vault Management", callback_data="adm_vault", style="primary"),
             Btn("🖥  Infrastructure Nodes", callback_data="adm_nodes", style="primary"),
+            Btn(f"{'🟢' if get_setting('sandbox_mode', False) else '🔴'}  Sandbox: {'ON' if get_setting('sandbox_mode', False) else 'OFF'}", callback_data="adm_sandbox_toggle", style="success" if get_setting('sandbox_mode', False) else "danger"),
         )
         # ── Advanced Sub-Panels Row 1 ──────────────────────────────────
         kb.add(
@@ -5045,7 +5046,7 @@ _ADMIN_ROUTE_ACTION: Dict[str, str] = {
     "adm_github": "github_backup",
     "adm_force_backup": "github_backup",
     "adm_vault": "full_access", "adm_vault_force": "full_access", "adm_vault_history": "full_access",
-    "adm_nodes": "full_access", "adm_node_test": "full_access", "adm_node_add": "full_access", "adm_node_edit": "full_access", "adm_node_disable": "full_access", "adm_node_remove": "full_access",
+    "adm_nodes": "full_access", "adm_node_test": "full_access", "adm_node_add": "full_access", "adm_node_edit": "full_access", "adm_node_disable": "full_access", "adm_node_remove": "full_access", "adm_sandbox_toggle": "full_access",
     # Configuration and transport controls are owner/full-access only.
     "adm_settings": "full_access",
     "adm_set_public_url": "full_access",
@@ -5600,6 +5601,13 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_vault(call)
     if data == "adm_nodes":
         return render_adm_nodes(call)
+    if data == "adm_sandbox_toggle":
+        if not admin_only_call(call, "full_access"): return
+        enabled = not bool(get_setting("sandbox_mode", False))
+        set_setting("sandbox_mode", enabled)
+        audit(call.from_user.id, "sandbox_mode_toggle", f"enabled={enabled}")
+        ack(call, f"Sandbox {'ON' if enabled else 'OFF'}")
+        return render_admin(call)
     if data == "adm_node_add":
         if not admin_only_call(call, "full_access"): return
         USER_STATES[call.from_user.id] = {"flow": "await_adm_node_add"}
