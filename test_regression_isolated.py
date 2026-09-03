@@ -6,6 +6,7 @@ from vault_sync import sync_vault
 import ai_preflight
 import remote_worker
 import sandbox_runtime
+import security_scanner_free
 
 # Report, but do not require, host Docker availability; live image pulls are avoided.
 print("docker available:", sandbox_runtime.docker_available())
@@ -52,6 +53,52 @@ for marker in ("approval_status"):
 assert "def _start_failure" in BOT
 assert "deployment_rollback_at" in BOT
 assert "compare_digest(supplied_secret, WEBHOOK_SECRET)" in BOT
+assert "SANDBOX_TEST_TTL_SECONDS = 60" in BOT
+assert 'threading.Timer(SANDBOX_TEST_TTL_SECONDS, _expire_sandbox_run' in BOT
+assert 'remote_control(node or {}, _node_secret(info.get("node_id", "")), bot_id, "cleanup")' in BOT
+assert '"cleanup"' in (ROOT / "remote_worker.py").read_text(encoding="utf-8")
+assert "adm_vault_token" in BOT
+assert "await_vault_token" in BOT
+assert "_store_vault_runtime_token" in BOT
+assert "Authorization" in BOT
+assert "CIPHER_VAULT_TOKEN" in BOT
+assert "def _local_amount_to_usd" in BOT
+assert "open.er-api.com/v6/latest/USD" in BOT
+assert '"amount": usd_price' in BOT
+assert '"currency": "USD"' in BOT
+assert "final_price_local" in BOT
+assert 'b.get("approval_status") == "approved"' in BOT
+assert 'doc_db["trusted_execution"] = True' in BOT
+assert "progress_cb" in BOT
+assert "Analyzing {index}/{total_scan_files}" in BOT
+assert 'fname.lower().endswith(".zip")' in BOT
+assert "allowed_exts" in BOT
+assert "raw[:128 * 1024]" in BOT
+assert "AI File Analysis" in BOT
+assert "Could not read file" in BOT
+assert "File is empty or contains no readable text code." in BOT
+assert "Connection to AI uplink lost." in BOT
+assert "_LORD_CIPHER_BRAGS" in BOT
+assert "ai_lord_cipher_brags_recent" in BOT
+assert "never repeat the same brag consecutively" in BOT
+assert "_append_lord_cipher_brag(clean_res, m.from_user.id)" in BOT
+assert "operator_owned" in BOT
+assert 'b["trusted_execution"] = True' in BOT
+assert 'GIT_CONFIG_KEY_0' in BOT
+assert "_download_gh_archive" in BOT
+assert "default_branch" in BOT
+assert "archive fallback failed" in BOT
+assert 'scan.get("recommendation") == "MANUAL_REVIEW"' in BOT
+assert "Sandbox mode auto-approves non-dangerous manual-review results" in BOT
+assert "clone_needs_approval" in BOT
+assert "not sandbox_on" in BOT
+assert 'member.filename.replace("\\\\", "/")' in BOT
+
+# Sandbox scanning must block high-confidence dynamic execution and must not
+# treat an unavailable scanner as proof of safety.
+dangerous = security_scanner_free.scan_code("import subprocess\nsubprocess.run(user_input, shell=True, input=user_input)\n", "main.py")
+assert dangerous["recommendation"] == "REJECT"
+assert "Security scanner unavailable" in BOT
 
 # Vault refuses plaintext operation when the encryption key is absent/invalid.
 vault_result = sync_vault(tmp, token="", repo="owner/private", key="")
