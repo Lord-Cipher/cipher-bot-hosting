@@ -2195,14 +2195,15 @@ def _oxapay_webhook_listener() -> Any:
             print("[oxapay] webhook received with no data", flush=True)
             return "No data", 400
         
-        status = data.get("status")
-        track_id = data.get("trackId")
-        order_id = data.get("orderId", "")
-        uid_str = data.get("description")
+        nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+        status = str(data.get("status") or data.get("payment_status") or nested.get("status") or "").lower()
+        track_id = data.get("trackId") or data.get("track_id") or nested.get("track_id") or nested.get("trackId")
+        order_id = data.get("orderId") or data.get("order_id") or nested.get("order_id") or ""
+        uid_str = data.get("description") or nested.get("description") or ""
         
         print(f"[oxapay] webhook: status={status}, track={track_id}, order={order_id}, uid={uid_str}", flush=True)
         
-        if status == "paid":
+        if status in {"paid", "pay", "completed", "success"}:
             try:
                 uid = int(uid_str)
                 # Extract plan from order_id (format: plan_uid_timestamp)
@@ -2663,6 +2664,41 @@ def render_manual_payment_methods_for(call: types.CallbackQuery, plan: str) -> N
     show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
 
 
+def _create_oxapay_invoice(usd_amount: float, uid: int, plan: str) -> Tuple[Optional[str], Optional[str], str]:
+    """Create a USD OxaPay invoice using the current Merchant API contract."""
+    public_url = str(get_setting("public_url", "") or "").rstrip("/")
+    order_id = f"{plan}_{uid}_{int(time.time())}"
+    payload = {
+        "amount": float(usd_amount),
+        "currency": "USD",
+        "lifetime": 30,
+        "callback_url": f"{public_url}/oxapay-webhook" if public_url else "",
+        "return_url": f"https://t.me/{(bot.get_me()).username}",
+        "description": str(uid),
+        "order_id": order_id,
+    }
+    response = requests.post(
+        "https://api.oxapay.com/v1/payment/invoice",
+        headers={
+            "merchant_api_key": OXAPAY_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json=payload,
+        timeout=30,
+    )
+    try:
+        body = response.json()
+    except Exception:
+        body = {}
+    if response.status_code != 200 or body.get("status") != 200:
+        error = body.get("error") or body.get("message") or f"OxaPay returned HTTP {response.status_code}"
+        if isinstance(error, dict): error = error.get("message") or str(error)
+        return None, None, str(error)[:300]
+    data = body.get("data") or {}
+    return data.get("payment_url"), data.get("track_id"), ""
+
+
 def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
     p = PLAN_LIMITS.get(plan)
     if not p: ack(call, "Unknown plan"); return
@@ -2695,22 +2731,8 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
 
     ack(call, "Generating invoice...")
     try:
-        payload = {
-            "merchant": OXAPAY_KEY,
-            "amount": usd_price,
-            "currency": "USD",
-            "lifeTime": 30,
-            "callbackUrl": f"{get_setting('public_url', '').rstrip('/')}/oxapay-webhook",
-            "returnUrl": f"https://t.me/{(bot.get_me()).username}",
-            "description": str(call.from_user.id),
-            "orderId": f"{plan}_{call.from_user.id}_{int(time.time())}"
-        }
-        r = requests.post("https://api.oxapay.com/merchants/request", json=payload, timeout=30)
-        res = r.json()
-        
-        if res.get("result") == 100:
-            pay_url = res.get("payLink") or res.get("payUrl")
-            track_id = res.get("trackId")
+        pay_url, track_id, invoice_error = _create_oxapay_invoice(usd_price, call.from_user.id, plan)
+        if pay_url and track_id:
             
             cap = (
                 f"<b>🟢 {sc('Automatic Payment')}</b>\n"
@@ -2730,7 +2752,7 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
             kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="danger"))
             show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
         else:
-            bot.answer_callback_query(call.id, f"❌ Error: {res.get('message', 'Failed to create invoice')}", show_alert=True)
+            bot.answer_callback_query(call.id, f"❌ Error: {invoice_error or 'Failed to create invoice'}", show_alert=True)
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ System Error: {str(e)}", show_alert=True)
 

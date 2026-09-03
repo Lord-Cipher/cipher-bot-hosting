@@ -63,8 +63,14 @@ assert "_store_vault_runtime_token" in BOT
 assert "Authorization" in BOT
 assert "CIPHER_VAULT_TOKEN" in BOT
 assert "def _local_amount_to_usd" in BOT
+assert "https://api.oxapay.com/v1/payment/invoice" in BOT
+assert '"merchant_api_key": OXAPAY_KEY' in BOT
+assert '"amount": float(usd_amount)' in BOT
+assert '"currency": "USD"' in BOT
+assert '"callback_url"' in BOT
+assert '"order_id"' in BOT
+assert 'data.get("track_id")' in BOT
 assert "open.er-api.com/v6/latest/USD" in BOT
-assert '"amount": usd_price' in BOT
 assert '"currency": "USD"' in BOT
 assert "final_price_local" in BOT
 assert 'b.get("approval_status") == "approved"' in BOT
