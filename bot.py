@@ -22,6 +22,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import uuid
 import traceback
 import zipfile
 from collections import defaultdict, deque
@@ -2183,44 +2184,60 @@ def _tg_webhook_listener(token: str) -> Any:
         # Process updates in the background thread pool to avoid blocking the webhook response
         threading.Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
         return "", 200
-    return "Invalid Content-Type", 400
-
-
+        return "Invalid Content-Type", 400
 @_ka.route("/oxapay-webhook", methods=["POST"])
 def _oxapay_webhook_listener() -> Any:
-    """Listen for OxaPay payment notifications."""
+    """Handle OxaPay payment and payout callbacks."""
     try:
-        data = request.get_json() if request.is_json else request.form.to_dict()
+        raw_body = request.get_data()
+        data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
         if not data:
-            print("[oxapay] webhook received with no data", flush=True)
             return "No data", 400
-        
         nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+        event_type = str(data.get("type") or nested.get("type") or "").lower()
         status = str(data.get("status") or data.get("payment_status") or nested.get("status") or "").lower()
         track_id = data.get("trackId") or data.get("track_id") or nested.get("track_id") or nested.get("trackId")
+
+        if event_type == "payout":
+            supplied_hmac = request.headers.get("HMAC", "")
+            payout_key = _oxapay_payout_key()
+            expected_hmac = hmac.new(
+                payout_key.encode(), raw_body, hashlib.sha512
+            ).hexdigest() if payout_key else ""
+            if not payout_key or not supplied_hmac or not hmac.compare_digest(supplied_hmac, expected_hmac):
+                return "Invalid HMAC signature", 403
+            d = db_load()
+            withdrawal = next((w for w in d.get("withdrawals", [])
+                               if str(w.get("track_id")) == str(track_id)), None)
+            if withdrawal:
+                old_status = str(withdrawal.get("status", "")).lower()
+                withdrawal["status"] = data.get("status") or nested.get("status") or "Unknown"
+                withdrawal["tx_hash"] = data.get("tx_hash") or nested.get("tx_hash") or ""
+                withdrawal["updated_at"] = ts_iso()
+                db_save(d)
+                uid = int(withdrawal["uid"])
+                new_status = str(withdrawal["status"]).lower()
+                if new_status in {"confirmed", "failed"} and new_status != old_status:
+                    bot.send_message(uid,
+                        f"<b>Withdrawal {esc(withdrawal['status'])}</b>\n"
+                        f"Track ID: <code>{esc(track_id)}</code>\n"
+                        f"Amount: <code>{float(withdrawal.get('amount', 0)):.8f} USDT</code>",
+                        parse_mode="HTML")
+            return "OK", 200
+
+        # Existing merchant-payment callback behavior.
         order_id = data.get("orderId") or data.get("order_id") or nested.get("order_id") or ""
         uid_str = data.get("description") or nested.get("description") or ""
-        
-        print(f"[oxapay] webhook: status={status}, track={track_id}, order={order_id}, uid={uid_str}", flush=True)
-        
         if status in {"paid", "pay", "completed", "success"}:
             try:
                 uid = int(uid_str)
-                # Extract plan from order_id (format: plan_uid_timestamp)
                 plan_key = order_id.split("_")[0] if "_" in order_id else "pro"
-                
-                # Grant the plan
                 grant_plan(uid, plan_key)
                 log_notification("PAYMENT", f"OxaPay auto-payment successful for UID {uid} (Plan: {plan_key})", uid=uid)
-                
-                # Send elite receipt
                 send_elite_receipt(uid, str(track_id), plan_key)
-                
                 _flush_map_buffer(uid)
-                return "OK", 200
             except Exception as e:
-                print(f"[oxapay] processing error: {e}", flush=True)
-        
+                print(f"[oxapay] payment processing error: {e}", flush=True)
         return "OK", 200
     except Exception as e:
         print(f"[oxapay] webhook error: {e}", flush=True)
@@ -8467,6 +8484,7 @@ def render_adm_pay_config(call: types.CallbackQuery) -> None:
         Btn("📤  Exᴘᴏʀᴛ CSV",       callback_data="adm_user_export_csv",  style="primary"),
         Btn("💳  Pᴀʏᴍᴇɴᴛ Rᴇqᴜᴇꜱᴛꜱ", callback_data="adm_payment_requests", style="primary"),
     )
+    kb.add(Btn("💸  Wɪᴛʜᴅʀᴀᴡᴀʟ Sᴇᴛᴛɪɴɢꜱ", callback_data="adm_withdraw_config", style="primary"))
     kb.add(Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
@@ -10736,6 +10754,12 @@ def on_text(m: types.Message) -> None:
     st = USER_STATES.get(uid) or {}
     flow = st.get("flow")
     try:
+        if flow == "await_withdraw_amount":
+            return _handle_withdraw_amount(m, st)
+        if flow == "await_withdraw_address":
+            return _submit_oxapay_withdrawal(m, st)
+        if flow in ("await_withdraw_min", "await_oxapay_key"):
+            return _handle_withdraw_admin_input(m, flow)
         if flow == "await_adm_node_cred":
             USER_STATES.pop(uid, None)
             if not is_owner(uid) and not _admin_menu_role_ok(uid, "adm_node_cred"):
@@ -16096,6 +16120,235 @@ def render_referral(call: types.CallbackQuery) -> None:
     show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, kb, call=call)
 
 
+# ─── OxaPay withdrawals ───────────────────────────────────────────────────────
+OXAPAY_PAYOUT_URL = "https://api.oxapay.com/v1/payout"
+DEFAULT_OXAPAY_WITHDRAW_OPTIONS = [
+    {"key": "usdt_tron", "label": "USDT TRC20", "currency": "USDT", "network": "TRON"},
+    {"key": "usdt_erc20", "label": "USDT ERC20", "currency": "USDT", "network": "Ethereum"},
+]
+
+
+def _oxapay_options() -> list:
+    configured = get_setting("oxapay_withdraw_options", None)
+    if isinstance(configured, list) and configured:
+        return configured
+    return DEFAULT_OXAPAY_WITHDRAW_OPTIONS
+
+
+def _oxapay_payout_key() -> str:
+    # Prefer the host environment. The admin setting is retained for hosts that
+    # do not provide an environment-variable editor.
+    return (os.getenv("OXAPAY_PAYOUT_API_KEY") or
+            str(get_setting("oxapay_payout_api_key", "") or "")).strip()
+
+
+def _withdraw_minimum() -> float:
+    try:
+        return max(0.0, float(get_setting("withdraw_minimum", 10)))
+    except Exception:
+        return 10.0
+
+
+def _withdrawals() -> list:
+    d = db_load()
+    return d.setdefault("withdrawals", [])
+
+
+def render_withdraw_options(call: types.CallbackQuery) -> None:
+    uid = call.from_user.id
+    u = db_load()["users"].get(str(uid), {})
+    balance = float(u.get("wallet", 0) or 0)
+    minimum = _withdraw_minimum()
+    if not bool(get_setting("withdrawals_enabled", True)):
+        ack(call, "Withdrawals are currently disabled.", show_alert=True)
+        return
+    if balance < minimum:
+        bot.send_message(call.message.chat.id,
+            f"<b>{G['no']} Withdrawal unavailable</b>\n"
+            f"Balance: <code>{balance:.2f} USDT</code>\n"
+            f"Minimum withdrawal: <code>{minimum:.2f} USDT</code>",
+            parse_mode="HTML")
+        return
+    cap = (f"<b>💸 Withdraw</b>\n{G['div_eq']}\n"
+           f"Balance: <code>{balance:.2f} USDT</code>\n"
+           f"Minimum: <code>{minimum:.2f} USDT</code>\n\n"
+           "Choose the cryptocurrency and network for your payout.")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for opt in _oxapay_options():
+        kb.add(Btn(str(opt.get("label", opt.get("key", "Crypto"))),
+                   callback_data=f"wd_method_{opt.get('key')}", style="primary"))
+    kb.add(Btn(f"{G['back']}  Wallet", callback_data="menu_wallet", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("wallet", PHOTOS["main"]), cap, kb, call=call)
+
+
+def select_withdraw_method(call: types.CallbackQuery, key: str) -> None:
+    option = next((x for x in _oxapay_options() if str(x.get("key")) == key), None)
+    if not option:
+        ack(call, "Unknown withdrawal method.", show_alert=True)
+        return
+    uid = call.from_user.id
+    u = db_load()["users"].get(str(uid), {})
+    balance = float(u.get("wallet", 0) or 0)
+    minimum = _withdraw_minimum()
+    if balance < minimum:
+        render_wallet(call)
+        return
+    USER_STATES[uid] = {"flow": "await_withdraw_amount", "withdraw_option": option}
+    bot.send_message(call.message.chat.id,
+        f"<b>Withdrawal amount</b>\n"
+        f"Available: <code>{balance:.2f} USDT</code>\n"
+        f"Minimum: <code>{minimum:.2f} USDT</code>\n\n"
+        "Send the amount to withdraw.", parse_mode="HTML")
+    ack(call)
+
+
+def _submit_oxapay_withdrawal(m: types.Message, st: dict) -> None:
+    uid = m.from_user.id
+    try:
+        amount = round(float(st.get("withdraw_amount", 0)), 8)
+    except Exception:
+        bot.reply_to(m, "Invalid withdrawal amount.")
+        return
+    option = st.get("withdraw_option") or {}
+    address = (m.text or "").strip()
+    minimum = _withdraw_minimum()
+    if not address or len(address) > 256 or any(ord(c) < 32 for c in address):
+        bot.reply_to(m, "Invalid wallet address. Please send only the address.")
+        return
+    if amount < minimum:
+        bot.reply_to(m, f"The minimum withdrawal is {minimum:.2f} USDT.")
+        return
+    d = db_load()
+    u = d["users"].get(str(uid))
+    if not u:
+        USER_STATES.pop(uid, None)
+        bot.reply_to(m, "User account not found.")
+        return
+    balance = float(u.get("wallet", 0) or 0)
+    if amount > balance:
+        bot.reply_to(m, f"Insufficient balance. Available: {balance:.2f} USDT.")
+        return
+    api_key = _oxapay_payout_key()
+    if not api_key:
+        USER_STATES.pop(uid, None)
+        bot.reply_to(m, "Withdrawals are not configured yet. Please contact support.")
+        return
+    payload = {
+        "address": address,
+        "currency": str(option.get("currency", "")).upper(),
+        "amount": amount,
+        "description": f"Bot withdrawal {uid}",
+    }
+    if option.get("network"):
+        payload["network"] = option["network"]
+    try:
+        response = requests.post(
+            OXAPAY_PAYOUT_URL,
+            headers={"payout_api_key": api_key, "Content-Type": "application/json"},
+            json=payload,
+            timeout=30,
+        )
+        result = response.json()
+    except Exception as exc:
+        bot.reply_to(m, f"Withdrawal request failed: {esc(exc)}")
+        return
+    status_code = result.get("status")
+    data = result.get("data") or {}
+    track_id = data.get("track_id")
+    if response.ok and status_code in (200, "200") and track_id:
+        # Debit only after OxaPay accepts the payout request.
+        u["wallet"] = round(balance - amount, 8)
+        d.setdefault("withdrawals", []).append({
+            "id": uuid.uuid4().hex[:12], "uid": uid, "amount": amount,
+            "currency": payload["currency"], "network": payload.get("network", ""),
+            "address": address, "track_id": str(track_id),
+            "status": data.get("status", "Pending"), "created_at": ts_iso(),
+        })
+        db_save(d)
+        USER_STATES.pop(uid, None)
+        bot.reply_to(m,
+            f"<b>{G['ok']} Withdrawal submitted</b>\n"
+            f"Amount: <code>{amount:.8f} {payload['currency']}</code>\n"
+            f"Track ID: <code>{esc(track_id)}</code>\n"
+            "Your payout is now being processed.", parse_mode="HTML")
+        amount_label = f"{amount:.8f} {payload['currency']}"
+        notify_owner(
+            f"<b>New OxaPay Withdrawal</b>\n"
+            f"{bullet('User', uid)}\n{bullet('Amount', amount_label)}\n"
+            f"{bullet('Network', payload.get('network') or '—')}\n"
+            f"{bullet('Track ID', track_id)}"
+        )
+    else:
+        err = result.get("message") or (result.get("error") or {}).get("message") or "OxaPay rejected the request"
+        bot.reply_to(m, f"Withdrawal was not submitted: {esc(err)}")
+
+
+def render_adm_withdraw_config(call: types.CallbackQuery) -> None:
+    enabled = bool(get_setting("withdrawals_enabled", True))
+    minimum = _withdraw_minimum()
+    key_configured = bool(_oxapay_payout_key())
+    cap = ("<b>💸 Withdrawal Configuration</b>\n" + G['div_eq'] +
+           f"\n{bullet('Status', 'Enabled' if enabled else 'Disabled')}" +
+           f"\n{bullet('Minimum', f'{minimum:.2f} USDT')}" +
+           f"\n{bullet('OxaPay API key', 'Configured' if key_configured else 'Not configured')}" +
+           f"\n{G['div']}\nSet the minimum balance and OxaPay payout key here.")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn(f"{'✅' if enabled else '❌'}  Toggle Withdrawals", callback_data="adm_withdraw_toggle", style="success" if enabled else "danger"))
+    kb.add(Btn("💰  Set Minimum Withdrawal", callback_data="adm_withdraw_min", style="primary"))
+    kb.add(Btn("🔐  Set OxaPay Payout API Key", callback_data="adm_withdraw_key", style="primary"))
+    kb.add(Btn(f"{G['back']}  Payment Configuration", callback_data="adm_pay_config", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
+
+
+def _handle_withdraw_amount(m: types.Message, st: dict) -> None:
+    try:
+        amount = round(float((m.text or "").strip()), 8)
+    except Exception:
+        bot.reply_to(m, "Send a valid numeric amount.")
+        return
+    uid = m.from_user.id
+    u = db_load()["users"].get(str(uid), {})
+    balance = float(u.get("wallet", 0) or 0)
+    minimum = _withdraw_minimum()
+    if amount < minimum:
+        bot.reply_to(m, f"The minimum withdrawal is {minimum:.2f} USDT.")
+        return
+    if amount > balance:
+        bot.reply_to(m, f"Insufficient balance. Available: {balance:.2f} USDT.")
+        return
+    st["withdraw_amount"] = amount
+    st["flow"] = "await_withdraw_address"
+    USER_STATES[uid] = st
+    option = st.get("withdraw_option") or {}
+    bot.reply_to(m,
+        f"Send your <b>{esc(option.get('label', 'crypto'))}</b> wallet address now.\n"
+        "Double-check the address and network before sending it.", parse_mode="HTML")
+
+
+def _handle_withdraw_admin_input(m: types.Message, flow: str) -> None:
+    if not is_admin(m.from_user.id):
+        USER_STATES.pop(m.from_user.id, None)
+        return
+    value = (m.text or "").strip()
+    if flow == "await_withdraw_min":
+        try:
+            minimum = float(value)
+            if minimum < 0: raise ValueError
+        except Exception:
+            bot.reply_to(m, "Send a valid non-negative number.")
+            return
+        set_setting("withdraw_minimum", minimum)
+        USER_STATES.pop(m.from_user.id, None)
+        bot.reply_to(m, f"Minimum withdrawal saved: {minimum:.2f} USDT.")
+        return
+    if flow == "await_oxapay_key":
+        if len(value) < 10 or len(value) > 200:
+            bot.reply_to(m, "That does not look like a valid OxaPay payout API key.")
+            return
+        set_setting("oxapay_payout_api_key", value)
+        USER_STATES.pop(m.from_user.id, None)
+        bot.reply_to(m, "OxaPay payout API key saved.")
+
 def render_wallet(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
     u = db_load()["users"][str(uid)]
@@ -16109,6 +16362,7 @@ def render_wallet(call: types.CallbackQuery) -> None:
     )
     kb = types.InlineKeyboardMarkup()
     kb.add(Btn(f"{G['plus']}  {sc('Top Up')}", callback_data="wallet_topup", style="success"))
+    kb.add(Btn("💸  Withdraw", callback_data="wallet_withdraw", style="primary"))
     if u.get("plan") not in ("free", None):
         kb.add(Btn(f"{G['spark']}  {sc('Gift Plan')}", callback_data="wallet_gift", style="success"))
     kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
@@ -19020,6 +19274,25 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
             pass
         return
     if data == "menu_wallet":   render_wallet(call); return
+    if data == "wallet_withdraw": render_withdraw_options(call); return
+    if data.startswith("wd_method_"): select_withdraw_method(call, data[len("wd_method_"):]); return
+    if data == "adm_withdraw_config":
+        if not admin_only_call(call, "approve_payment"): return
+        render_adm_withdraw_config(call); return
+    if data == "adm_withdraw_toggle":
+        if not admin_only_call(call, "approve_payment"): return
+        set_setting("withdrawals_enabled", not bool(get_setting("withdrawals_enabled", True)))
+        render_adm_withdraw_config(call); return
+    if data == "adm_withdraw_min":
+        if not admin_only_call(call, "approve_payment"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_withdraw_min"}
+        bot.send_message(call.message.chat.id, "Send the new minimum withdrawal amount.")
+        ack(call); return
+    if data == "adm_withdraw_key":
+        if not admin_only_call(call, "approve_payment"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_oxapay_key"}
+        bot.send_message(call.message.chat.id, "Send the OxaPay payout API key. The message will be deleted after saving.")
+        ack(call); return
     if data == "menu_help":     render_help(call); return
     if data == "menu_support":  render_support(call); return
     if data == "menu_tickets":  render_user_tickets(call); return
