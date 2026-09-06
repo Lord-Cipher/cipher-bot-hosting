@@ -2629,7 +2629,7 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f"Sᴜᴘᴘᴏʀᴛ", callback_data="menu_support",  style="primary"),
     )
     kb.add(
-        Btn(f" AI Assɪsᴛᴀɴᴛ", callback_data="menu_ai_chat",  style="success"),
+        Btn(f" AI Aɢᴇɴᴛ", callback_data="menu_ai_chat",  style="success"),
         Btn(f" Mʏ Sᴛᴀᴛꜱ",    callback_data="menu_stats",    style="primary"),
     )
     if admin:
@@ -19861,7 +19861,7 @@ def send_elite_receipt(uid: int, tx_id: str, plan_key: str) -> None:
 def render_ai_chat(call: types.CallbackQuery) -> None:
     """Entry screen for the AI Assistant."""
     cap = (
-        f"<b>{sc('AI Assistant')}</b>\n"
+        f"<b>{sc('AI Agent')}</b>\n"
         f"{G['div_eq']}\n"
         f"<i>{sc('Welcome, Commander. I am your elite AI operative')}.</i>\n\n"
         f"<b>{sc('Capabilities')}:</b>\n"
@@ -19874,13 +19874,9 @@ def render_ai_chat(call: types.CallbackQuery) -> None:
         f"{sc('Just send your message or code below and I will analyze it instantly')}.\n"
         f"{G['div']}{FOOTER}"
     )
-    USER_STATES[call.from_user.id] = {"flow": "ai_chat"}
-    chain = get_user_ai_models(call.from_user.id)
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(Btn(f"🧠  My AI: {(' → '.join(ai_label(m).split(' (')[0] for m in chain) or 'none available')[:48]}",
-               callback_data="menu_ai_models", style="success"))
-    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
-    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
+    # The first screen after pressing AI Agent is always the live model list.
+    # This makes admin model-pool updates visible immediately to the user.
+    render_ai_models(call)
 
 _LORD_CIPHER_BRAG_LOCK = threading.Lock()
 _LORD_CIPHER_BRAGS = (
@@ -20243,71 +20239,49 @@ def set_user_ai_models(uid: int, models: List[str]) -> None:
 
 
 def render_ai_models(call: types.CallbackQuery) -> None:
-    """User panel: pick up to AI_USER_MAX_MODELS operatives from the plan's pool."""
+    """Show the current admin-configured model pool as a vertical user picker."""
     uid = call.from_user.id
     plan = get_ai_model(uid)
     pool = get_plan_ai_models(plan)
-    picked = get_user_ai_models(uid, plan)
     plan_name = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])["name"]
-
     cap = (
-        f"<b>🧠 {sc('My AI Operatives')}</b>\n"
+        f"<b>🤖 {sc('AI Agent')}</b>\n"
         f"{G['div_eq']}\n"
-        f"💎 <b>{sc('Plan')}</b>: <code>{esc(plan_name)}</code>\n"
-        f"🎯 <b>{sc('Slots')}</b>: <code>{len(picked)}/{AI_USER_MAX_MODELS}</code>\n\n"
-        f"<b>{sc('Active chain')}</b> ({sc('tried in order')}):\n"
+        f"💎 <b>{sc('Plan')}</b>: <code>{esc(plan_name)}</code>\n\n"
+        f"<i>{sc('Choose one model to start chatting. The list is controlled by the administrator')}.</i>\n"
     )
-    for i, m in enumerate(picked, 1):
-        cap += f"{i}. <code>{esc(ai_label(m))}</code>\n"
-    if not picked:
-        cap += f"<i>{sc('No operatives are currently enabled for your plan. AI chat is unavailable until an admin enables one')}.</i>\n"
-    cap += (
-        f"\n<i>{sc('Tap an operative to add or remove it. Your plan unlocks')} {len(pool)} "
-        f"{sc('operative(s); upgrade for more')}.</i>{G['div']}{FOOTER}"
-    )
-
+    if not pool:
+        cap += f"\n⚠️ {sc('No models are currently assigned to this plan')}."
+    cap += f"\n{G['div']}{FOOTER}"
+    USER_STATES.pop(uid, None)
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for m in pool:
-        sel = m in picked
-        slot = f"#{picked.index(m) + 1} " if sel else ""
-        kb.add(Btn(f"{'✅' if sel else '▫️'} {slot}{ai_label(m)}", callback_data=f"ai_pick_{m}",
-                   style="success" if sel else "primary"))
-    kb.add(Btn("↺  Reset to plan default", callback_data="ai_pick_reset", style="primary"))
-    kb.add(Btn(f"{G['back']}  AI Assɪsᴛᴀɴᴛ", callback_data="menu_ai_chat", style="danger"))
+    for model in pool:
+        kb.add(Btn(f"🤖 {ai_label(model)}", callback_data=f"ai_pick_{model}", style="success"))
+    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
 
-
 def action_ai_pick(call: types.CallbackQuery, model: str) -> None:
-    """Toggle an operative in the user's chain, enforcing plan pool + slot limit."""
+    """Select exactly one live plan-eligible model and open the chat session."""
     uid = call.from_user.id
     plan = get_ai_model(uid)
     pool = get_plan_ai_models(plan)
-    if model == "reset":
-        set_user_ai_models(uid, [])
-        ack(call, "AI operatives reset to plan default.")
-        return render_ai_models(call)
     if model not in pool:
-        ack(call, "That operative is not available on your plan.")
+        ack(call, "That model is not available on your current plan.")
         return render_ai_models(call)
-    u = (db_load_ro().get("users", {}) or {}).get(str(uid), {})
-    current = [str(m).lower() for m in (u.get("ai_models") or []) if str(m).lower() in pool]
-    if not current:
-        current = list(get_user_ai_models(uid, plan))
-    if model in current:
-        if len(current) == 1:
-            ack(call, "Keep at least one operative active.")
-            return render_ai_models(call)
-        current.remove(model)
-        ack(call, f"{ai_label(model)} removed.")
-    else:
-        if len(current) >= AI_USER_MAX_MODELS:
-            ack(call, f"Limit reached: you can keep {AI_USER_MAX_MODELS} operatives. Remove one first.")
-            return render_ai_models(call)
-        current.append(model)
-        ack(call, f"{ai_label(model)} added as #{len(current)}.")
-    set_user_ai_models(uid, current)
-    render_ai_models(call)
-
+    set_user_ai_models(uid, [model])
+    USER_STATES[uid] = {"flow": "ai_chat", "ai_model": model, "ai_plan": plan}
+    ack(call, f"Selected {ai_label(model)}")
+    cap = (
+        f"<b>🤖 {sc('AI Agent')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"<i>{sc('Active model')}:</i> <b>{esc(ai_label(model))}</b>\n\n"
+        f"{sc('Send a message or code below to start chatting')} ."
+        f"\n\n{G['div']}{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🔁  Cʜᴏᴏsᴇ Aɴᴏᴛʜᴇʀ Mᴏᴅᴇʟ", callback_data="menu_ai_models", style="primary"))
+    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
 
 def render_adm_ai_config(call: types.CallbackQuery) -> None:
     """Admin UI to manage AI Command Center and Operatives."""
