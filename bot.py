@@ -20182,8 +20182,8 @@ _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
 # Default operative pool per plan (admin can override from the AI Command Center).
 _AI_PLAN_DEFAULT_MODELS = {
     "free":       ["deepseek-v3", "gpt-4o-mini", "mistral"],
-    "starter":    ["deepseek-v32", "gpt-4o-mini", "chatgpt", "mistral"],
-    "basic":      ["claude", "deepseek-v32", "chatgpt", "gpt-4o-mini"],
+    "starter":    ["deepseek-v3", "gpt-4o-mini", "chatgpt", "mistral"],
+    "basic":      ["claude", "deepseek-cli", "chatgpt", "gpt-4o-mini"],
     "pro":        ["claude", "hotbot", "deepseek-cli", "chatgpt", "code-assistant"],
     "enterprise": ["claude", "claude-sonnet", "hotbot", "deepseek-r1", "code-assistant", "deepseek-cli"],
     "lifetime":   ["claude", "claude-sonnet", "hotbot", "deepseek-r1", "code-assistant", "deepseek-cli"],
@@ -20260,7 +20260,7 @@ def render_ai_models(call: types.CallbackQuery) -> None:
     for i, m in enumerate(picked, 1):
         cap += f"{i}. <code>{esc(ai_label(m))}</code>\n"
     if not picked:
-        cap += f"<i>{sc('No operatives are currently enabled for your plan; the master fallback will answer')}.</i>\n"
+        cap += f"<i>{sc('No operatives are currently enabled for your plan. AI chat is unavailable until an admin enables one')}.</i>\n"
     cap += (
         f"\n<i>{sc('Tap an operative to add or remove it. Your plan unlocks')} {len(pool)} "
         f"{sc('operative(s); upgrade for more')}.</i>{G['div']}{FOOTER}"
