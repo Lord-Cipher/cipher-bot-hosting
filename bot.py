@@ -784,7 +784,7 @@ def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
         "PROMOTION: When a promotional note is appropriate, praise Lord Cipher with a fresh angle and different wording; never repeat the same brag consecutively. Do not add promotion to security verdicts unless asked.]\n\n"
     )
     
-    full_prompt = cipher_context + prompt
+    full_prompt = cipher_context + "USER REQUEST (answer this directly, code first when code is asked):\n" + prompt
     try:
         spec = _OMEGATECH_MODELS.get(model_name)
         if spec:
@@ -19877,7 +19877,7 @@ def render_ai_chat(call: types.CallbackQuery) -> None:
     USER_STATES[call.from_user.id] = {"flow": "ai_chat"}
     chain = get_user_ai_models(call.from_user.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(Btn(f"🧠  My AI: {' → '.join(ai_label(m).split(' (')[0] for m in chain)[:48]}",
+    kb.add(Btn(f"🧠  My AI: {(' → '.join(ai_label(m).split(' (')[0] for m in chain) or 'none available')[:48]}",
                callback_data="menu_ai_models", style="success"))
     kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
@@ -19942,7 +19942,7 @@ def handle_ai_chat_message(m: types.Message) -> None:
         ai_response = _call_ai_api(m.text, user_plan=plan, uid=m.from_user.id)
         
         if ai_response:
-            primary_model = AI_LAST_MODEL_USED.get(m.from_user.id) or get_user_ai_models(m.from_user.id, plan)[0]
+            primary_model = AI_LAST_MODEL_USED.get(m.from_user.id) or get_plan_primary_model(plan)
             
             # Sanitize AI response: remove unsupported tags like <think>
             clean_res = re.sub(r'<(think|thought)>.*?</\1>', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
@@ -20038,7 +20038,7 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         ai_resp = _call_ai_api(prompt, user_plan=plan, uid=call.from_user.id)
         
         if ai_resp:
-            primary_model = AI_LAST_MODEL_USED.get(call.from_user.id) or get_user_ai_models(call.from_user.id, plan)[0]
+            primary_model = AI_LAST_MODEL_USED.get(call.from_user.id) or get_plan_primary_model(plan)
             clean_resp = re.sub(r'<(think|thought)>.*?</\1>', '', ai_resp, flags=re.DOTALL | re.IGNORECASE).strip()
             
             # Extract code block if present
@@ -20210,8 +20210,6 @@ def get_plan_ai_models(plan: str, include_disabled: bool = False) -> List[str]:
         m = str(m).lower()
         if m in _AI_OPERATIVE_KEYS and m not in pool and (include_disabled or _ai_operative_enabled(m)):
             pool.append(m)
-    if not pool and not include_disabled:
-        pool = [m for m in ("deepseek-v3", "claude") if _ai_operative_enabled(m)] or ["deepseek-v3"]
     return pool
 
 
@@ -20261,6 +20259,8 @@ def render_ai_models(call: types.CallbackQuery) -> None:
     )
     for i, m in enumerate(picked, 1):
         cap += f"{i}. <code>{esc(ai_label(m))}</code>\n"
+    if not picked:
+        cap += f"<i>{sc('No operatives are currently enabled for your plan; the master fallback will answer')}.</i>\n"
     cap += (
         f"\n<i>{sc('Tap an operative to add or remove it. Your plan unlocks')} {len(pool)} "
         f"{sc('operative(s); upgrade for more')}.</i>{G['div']}{FOOTER}"
@@ -20462,12 +20462,13 @@ def get_ai_model(uid: int) -> str:
 
 def get_plan_primary_model(plan: str) -> str:
     """First operative in the plan pool."""
-    return get_plan_ai_models(plan)[0]
+    pool = get_plan_ai_models(plan)
+    return pool[0] if pool else "deepseek-v3"
 
 def get_plan_fallback_model(plan: str) -> str:
     """Second operative in the plan pool (or the primary when the pool has one entry)."""
     pool = get_plan_ai_models(plan)
-    return pool[1] if len(pool) > 1 else pool[0]
+    return pool[1] if len(pool) > 1 else get_plan_primary_model(plan)
 
 def _handle_ai_chat_document(m: types.Message) -> None:
     """Extracts code from uploaded file or zip and sends to AI for analysis."""
@@ -20516,7 +20517,7 @@ def _handle_ai_chat_document(m: types.Message) -> None:
         ai_response = _call_ai_api(prompt, user_plan=plan, uid=m.from_user.id)
         
         if ai_response:
-            primary_model = AI_LAST_MODEL_USED.get(m.from_user.id) or get_user_ai_models(m.from_user.id, plan)[0]
+            primary_model = AI_LAST_MODEL_USED.get(m.from_user.id) or get_plan_primary_model(plan)
             clean_res = re.sub(r'<(think|thought)>.*?</\1>', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
             clean_res = re.sub(r'<(think|thought)>', '', clean_res, flags=re.IGNORECASE)
             
