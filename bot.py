@@ -145,6 +145,7 @@ AI_CIRCUIT_OPEN = False
 AI_LOCK = threading.Lock()
 AI_USER_MAX_MODELS = 3          # operatives a user may keep active at once
 AI_LAST_MODEL_USED: Dict[int, str] = {}   # uid -> operative that answered the last request
+AI_LAST_MODEL_FALLBACK: Dict[int, str] = {}   # uid -> operative the user chose when a fallback had to answer instead
 
 # ─── glyphs (smart contextual symbols + emojis for the UI) ──────
 G = {
@@ -19749,10 +19750,33 @@ def _telemetry_loop():
 
 # ─── AI SERVICES ───────────────────────────────────────────────────────────
 
+def _ai_selected_model(uid: int, user_plan: str) -> Optional[str]:
+    """The operative the user expects to answer: the session pick, else the first stored choice."""
+    pool = get_plan_ai_models(user_plan)
+    session_pick = str((USER_STATES.get(uid) or {}).get("ai_model") or "").lower()
+    if session_pick and session_pick in pool:
+        return session_pick
+    chain = get_user_ai_models(uid, user_plan)
+    return chain[0] if chain else None
+
+
+def ai_model_tag(uid: int, plan: str) -> str:
+    """Label for the operative that answered; shows the requested one too when a fallback stepped in."""
+    used = AI_LAST_MODEL_USED.get(uid) or get_plan_primary_model(plan) or "unknown"
+    wanted = AI_LAST_MODEL_FALLBACK.get(uid)
+    if wanted and wanted != used:
+        return f"{wanted.upper()} ✗ → {used.upper()} (fallback)"
+    return used.upper()
+
+
 def _call_ai_chain(prompt: str, user_plan: str, uid: Optional[int] = None) -> Tuple[Optional[str], Optional[str]]:
     """Try the user's selected operatives in order, then the master fallbacks.
     Returns (reply, model_key) so callers can label the response with the model that answered."""
     chain = get_user_ai_models(uid, user_plan) if uid is not None else get_plan_ai_models(user_plan)[:AI_USER_MAX_MODELS]
+    if uid is not None:
+        session_pick = str((USER_STATES.get(uid) or {}).get("ai_model") or "").lower()
+        if session_pick and session_pick in get_plan_ai_models(user_plan):
+            chain = [session_pick] + [m for m in chain if m != session_pick]
     tried: List[str] = []
     for model in chain:
         if model in tried:
@@ -19783,12 +19807,22 @@ def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None
     # Instant local greetings for speed
     greetings = ["hello", "hi", "hey", "sup", "yo", "morning", "evening"]
     if any(p_low.startswith(g) for g in greetings) or len(p_low) < 4:
+        if uid is not None:
+            wanted = _ai_selected_model(uid, user_plan)
+            if wanted:
+                AI_LAST_MODEL_USED[uid] = wanted
+            AI_LAST_MODEL_FALLBACK.pop(uid, None)
         return f"Hello, Commander! How may I assist you with your elite bot hosting today?"
 
     res, used = _call_ai_chain(prompt, user_plan, uid)
-    if res:
-        if uid is not None and used:
+    if uid is not None:
+        AI_LAST_MODEL_FALLBACK.pop(uid, None)
+        if res and used:
             AI_LAST_MODEL_USED[uid] = used
+            wanted = _ai_selected_model(uid, user_plan)
+            if wanted and wanted != used:
+                AI_LAST_MODEL_FALLBACK[uid] = wanted
+    if res:
         return res
     return None
 
@@ -19972,7 +20006,7 @@ def handle_ai_chat_message(m: types.Message) -> None:
         ai_response = _call_ai_api(m.text, user_plan=plan, uid=m.from_user.id)
         
         if ai_response:
-            primary_model = AI_LAST_MODEL_USED.get(m.from_user.id) or get_plan_primary_model(plan)
+            primary_model = ai_model_tag(m.from_user.id, plan)
             
             # Sanitize AI response: remove unsupported tags like <think>
             clean_res = re.sub(r'<(think|thought)>.*?</\1>', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
@@ -20069,7 +20103,7 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         ai_resp = _call_ai_api(prompt, user_plan=plan, uid=call.from_user.id)
         
         if ai_resp:
-            primary_model = AI_LAST_MODEL_USED.get(call.from_user.id) or get_plan_primary_model(plan)
+            primary_model = ai_model_tag(call.from_user.id, plan)
             clean_resp = re.sub(r'<(think|thought)>.*?</\1>', '', ai_resp, flags=re.DOTALL | re.IGNORECASE).strip()
             
             # Extract code block if present
@@ -20266,9 +20300,7 @@ def get_user_ai_models(uid: Optional[int], plan: Optional[str] = None) -> List[s
 
 def set_user_ai_models(uid: int, models: List[str]) -> None:
     d = db_load()
-    u = d["users"].get(str(uid))
-    if u is None:
-        return
+    u = d["users"].setdefault(str(uid), {"id": uid, "plan": "free"})
     u["ai_models"] = models[:AI_USER_MAX_MODELS]
     db_save(d)
 
@@ -20526,7 +20558,7 @@ def _handle_ai_chat_document(m: types.Message) -> None:
         ai_response = _call_ai_api(prompt, user_plan=plan, uid=m.from_user.id)
         
         if ai_response:
-            primary_model = AI_LAST_MODEL_USED.get(m.from_user.id) or get_plan_primary_model(plan)
+            primary_model = ai_model_tag(m.from_user.id, plan)
             clean_res = re.sub(r'<(think|thought)>.*?</\1>', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
             clean_res = re.sub(r'<(think|thought)>', '', clean_res, flags=re.IGNORECASE)
             
