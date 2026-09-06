@@ -66,6 +66,11 @@ assert "def _local_amount_to_usd" in BOT
 assert "https://api.oxapay.com/v1/payment/invoice" in BOT
 assert '"merchant_api_key": OXAPAY_KEY' in BOT
 assert '"amount": float(usd_amount)' in BOT
+assert 'def _create_oxapay_invoice(local_amount: float, currency_code: str' in BOT
+assert '_local_amount_to_usd(local_amount, currency_code)' in BOT
+assert 'return None\n\ndef _ai_vision_verify' in BOT
+assert 'allowed_source_exts = {".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx"}' in BOT
+assert 'AI diagnosis is temporarily unavailable.' in BOT
 assert '"currency": "USD"' in BOT
 assert '"callback_url"' in BOT
 assert '"order_id"' in BOT

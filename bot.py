@@ -2664,8 +2664,11 @@ def render_manual_payment_methods_for(call: types.CallbackQuery, plan: str) -> N
     show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
 
 
-def _create_oxapay_invoice(usd_amount: float, uid: int, plan: str) -> Tuple[Optional[str], Optional[str], str]:
-    """Create a USD OxaPay invoice using the current Merchant API contract."""
+def _create_oxapay_invoice(local_amount: float, currency_code: str, uid: int, plan: str) -> Tuple[Optional[str], Optional[str], str, Optional[float]]:
+    """Convert the configured local amount at the provider boundary and create a USD invoice."""
+    usd_amount, fx_error = _local_amount_to_usd(local_amount, currency_code)
+    if usd_amount is None:
+        return None, None, fx_error, None
     public_url = str(get_setting("public_url", "") or "").rstrip("/")
     order_id = f"{plan}_{uid}_{int(time.time())}"
     payload = {
@@ -2694,9 +2697,9 @@ def _create_oxapay_invoice(usd_amount: float, uid: int, plan: str) -> Tuple[Opti
     if response.status_code != 200 or body.get("status") != 200:
         error = body.get("error") or body.get("message") or f"OxaPay returned HTTP {response.status_code}"
         if isinstance(error, dict): error = error.get("message") or str(error)
-        return None, None, str(error)[:300]
+        return None, None, str(error)[:300], None
     data = body.get("data") or {}
-    return data.get("payment_url"), data.get("track_id"), ""
+    return data.get("payment_url"), data.get("track_id"), "", usd_amount
 
 
 def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
@@ -2724,14 +2727,11 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
             if flat: final_price_local = max(0, round(final_price_local - flat, 2))
             discount_txt = f" (Promo: {active_coupon} applied)"
 
-    usd_price, fx_error = _local_amount_to_usd(final_price_local, currency_code)
-    if usd_price is None:
-        bot.answer_callback_query(call.id, f"⚠️ {fx_error}", show_alert=True)
-        return
-
     ack(call, "Generating invoice...")
     try:
-        pay_url, track_id, invoice_error = _create_oxapay_invoice(usd_price, call.from_user.id, plan)
+        pay_url, track_id, invoice_error, usd_price = _create_oxapay_invoice(
+            final_price_local, currency_code, call.from_user.id, plan
+        )
         if pay_url and track_id:
             
             cap = (
@@ -19717,7 +19717,7 @@ def _call_ai_api(prompt: str, user_plan: str = "free") -> Optional[str]:
             if res_master:
                 return res_master
         
-    return "I am currently operating in Low-Power Mode due to an uplink disturbance. Please try again shortly."
+    return None
 
 def _ai_vision_verify(file_path: str, expected_amt: float) -> Dict[str, Any]:
     """
@@ -19944,16 +19944,23 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         target_file_content = ""
         
         if bot_dir.exists():
-            for p in bot_dir.glob("**/*.py"):
-                if ".deps" in p.parts or "venv" in p.parts: continue
+            allowed_source_exts = {".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx"}
+            source_files = [
+                p for p in bot_dir.rglob("*")
+                if p.is_file() and p.suffix.lower() in allowed_source_exts
+                and ".deps" not in p.parts and "venv" not in p.parts and "node_modules" not in p.parts
+            ]
+            for p in source_files[:20]:
                 try:
                     content = p.read_text(errors="ignore")
                     source_files_summary += f"\n--- File: {p.relative_to(bot_dir)} ---\n{content[:3000]}\n"
-                    if not target_file_path or p.name in ("bot.py", "main.py", "index.py"):
+                    if not target_file_path or p.name.lower() in ("bot.py", "main.py", "index.py", "bot.js", "index.js"):
                         target_file_path = p
                         target_file_content = content
                 except Exception:
                     pass
+        if not source_files_summary:
+            source_files_summary = "No readable Python or JavaScript source files were found in the bot workspace."
 
         prompt = (
             "You are an expert Python/Node debugging assistant. "
@@ -20007,11 +20014,16 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
 
             show_text(call.message.chat.id, final_text, kb, call=call)
         else:
-            ack(call, "AI Sentinel failed to generate a diagnosis.")
+            msg = "AI diagnosis is temporarily unavailable. Check the AI service configuration and try again."
+            try: bot.send_message(call.message.chat.id, msg)
+            except Exception: pass
+            ack(call, "AI diagnosis unavailable.")
             
     except Exception as e:
         print(f"[ai_sentinel] error: {e}", flush=True)
-        ack(call, "AI Sentinel uplink failed.")
+        try: bot.send_message(call.message.chat.id, "AI diagnosis failed while reading the bot files or contacting the AI service. Try again after checking the bot workspace.")
+        except Exception: pass
+        ack(call, "AI diagnosis failed.")
 
 def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
     """Applies the AI-suggested patch only after explicit user confirmation."""
