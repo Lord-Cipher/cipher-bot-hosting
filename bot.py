@@ -28,7 +28,7 @@ from collections import defaultdict, deque
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import telebot
 from telebot import types
@@ -143,6 +143,8 @@ AI_FAILURE_COUNT = 0
 AI_LAST_FAILURE = 0
 AI_CIRCUIT_OPEN = False
 AI_LOCK = threading.Lock()
+AI_USER_MAX_MODELS = 3          # operatives a user may keep active at once
+AI_LAST_MODEL_USED: Dict[int, str] = {}   # uid -> operative that answered the last request
 
 # ─── glyphs (smart contextual symbols + emojis for the UI) ──────
 G = {
@@ -699,6 +701,50 @@ Telegram bot patterns as malicious.
 CODE TO ANALYZE:
 """
 
+# OmegaTech (keyless) chat models — verified working for code generation.
+# key -> (endpoint, params builder). Keys must stay free of "_" (callback_data splits on it).
+_OMEGATECH_HOSTS = ("https://omegatech-api.dixonomega.tech", "https://api.omegatech.app")
+_OMEGATECH_MODELS: Dict[str, Tuple[str, Callable[[str], Dict[str, Any]]]] = {
+    "claude":         ("Claude",            lambda p: {"text": p}),
+    "claude-sonnet":  ("hotbot",            lambda p: {"action": "chat", "message": p, "model": "claude-3.5-sonnet"}),
+    "claude-cli":     ("Aicli",             lambda p: {"action": "chat", "model": "claude", "query": p}),
+    "claude-haiku":   ("Qwen-Claude-Haiku", lambda p: {"message": p, "model": "claude"}),
+    "chatbot":        ("Chatbot",           lambda p: {"action": "chat", "message": p}),
+    "hotbot":         ("hotbot",            lambda p: {"action": "chat", "message": p, "model": "gpt-5"}),
+    "gpt-4o-mini":    ("Gpt-4-mini",        lambda p: {"message": p}),
+    "chatgpt":        ("Chatgpt-v2",        lambda p: {"action": "chat", "message": p}),
+    "deepseek-v32":   ("Deep-ai",           lambda p: {"action": "chat", "message": p, "model": "deepseek-v3.2"}),
+    "deepseek-cli":   ("Aicli",             lambda p: {"action": "chat", "model": "deepseek_r1", "query": p}),
+    "code-assistant": ("Claude-pro",        lambda p: {"action": "chat", "prompt": p, "model": "code_assistant"}),
+    "mistral":        ("Mistral",           lambda p: {"action": "chat", "message": p}),
+    "qwen-80b":       ("Qwen-Claude-Haiku", lambda p: {"message": p, "model": "qwen"}),
+    "qwen3-coder":    ("Qwen3-coder",       lambda p: {"action": "chat", "message": p}),
+    "perplexity":     ("perplexity-ai",     lambda p: {"prompt": p}),
+    "all-ai":         ("All-Ai",            lambda p: {"action": "chat", "message": p}),
+}
+
+
+def _extract_ai_reply(data: Dict[str, Any]) -> Optional[str]:
+    """Normalise the many reply shapes returned by the keyless providers."""
+    inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+    res = (
+        data.get("result") or data.get("reply") or data.get("answer") or
+        data.get("response") or inner.get("reply") or inner.get("response") or
+        (data.get("message") if data.get("status") is True else None)
+    )
+    if not isinstance(res, str):
+        return None
+    if res.startswith('{"reply"'):
+        try: res = _json.loads(res).get("reply", res)
+        except Exception: pass
+    # Gpt-4-mini encodes newlines as "-=-n--"
+    res = res.replace("-=-n--", "\n")
+    res = res.strip()
+    if not res or res.lower().startswith(("maaf,", "sign up and repeat")):
+        return None
+    return res
+
+
 def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
     """Calls keyless API models with Cipher Intelligence context and Circuit Breaker."""
     global AI_FAILURE_COUNT, AI_LAST_FAILURE, AI_CIRCUIT_OPEN
@@ -740,52 +786,43 @@ def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
     
     full_prompt = cipher_context + prompt
     try:
-        # Determine provider and endpoint
-        if model_name in ["claude", "chatbot", "hotbot", "qwen-claude", "perplexity", "all-ai"]:
-            # OmegaTech Provider
-            base_url = "https://api.omegatech.app/api/ai/"
-            params = {}
-            if model_name == "claude":
-                url = f"{base_url}Claude"; params = {"text": full_prompt}
-            elif model_name == "chatbot":
-                url = f"{base_url}Chatbot"; params = {"action": "chat", "q": full_prompt}
-            elif model_name == "hotbot":
-                url = f"{base_url}hotbot"; params = {"action": "chat", "message": full_prompt}
-            elif model_name == "claude-haiku":
-                url = f"{base_url}Qwen-Claude-Haiku"; params = {"message": full_prompt, "model": "claude"}
-            elif model_name == "qwen-80b":
-                url = f"{base_url}Qwen-Claude-Haiku"; params = {"message": full_prompt, "model": "qwen"}
-            elif model_name == "perplexity":
-                url = f"{base_url}perplexity-ai"; params = {"prompt": full_prompt}
-            elif model_name == "all-ai":
-                url = f"{base_url}All-Ai"; params = {"action": "chat", "message": full_prompt}
+        spec = _OMEGATECH_MODELS.get(model_name)
+        if spec:
+            endpoint, build_params = spec
+            hosts = [f"{h}/api/ai/{endpoint}" for h in _OMEGATECH_HOSTS]
+            params = build_params(full_prompt)
+            timeout = 30
         else:
             # Kaalix Provider (Default)
-            url = f"https://r-bots-free-apis.co08.art/api/{model_name}"
+            hosts = [f"https://r-bots-free-apis.co08.art/api/{model_name}"]
             params = {"q": full_prompt}
+            timeout = 15
 
-        r = requests.get(url, params=params, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            # Handle various response formats
-            res = (
-                data.get("result") or 
-                data.get("reply") or 
-                data.get("answer") or 
-                data.get("response") or
-                (data.get("data", {}) if isinstance(data.get("data"), dict) else {}).get("reply")
-            )
-            if res:
-                # If res is a string that looks like JSON (some OmegaTech models do this), try to parse it
-                if isinstance(res, str) and res.startswith('{"reply"'):
-                    try: res = _json.loads(res).get("reply", res)
-                    except: pass
-                
-                with AI_LOCK:
-                    AI_FAILURE_COUNT = max(0, AI_FAILURE_COUNT - 1)
-                return res
-        
-        raise Exception(f"API returned status {r.status_code}")
+        # Mirror hosts share one backend: only fall through to the next
+        # host on a transport failure, never on a provider-level error.
+        last_err = "no hosts"
+        for url in hosts:
+            try:
+                r = requests.get(url, params=params, timeout=timeout)
+            except Exception as req_err:
+                last_err = str(req_err)[:120]; continue
+            if r.status_code != 200:
+                raise Exception(f"API returned status {r.status_code}")
+            try:
+                data = r.json()
+            except Exception:
+                raise Exception("non-JSON response")
+            if not isinstance(data, dict):
+                raise Exception("unexpected response shape")
+            if data.get("success") is False or data.get("status") is False:
+                raise Exception(str(data.get("error") or data.get("message") or "provider error")[:120])
+            res = _extract_ai_reply(data)
+            if not res:
+                raise Exception("empty reply")
+            with AI_LOCK:
+                AI_FAILURE_COUNT = max(0, AI_FAILURE_COUNT - 1)
+            return res
+        raise Exception(last_err)
         
     except Exception as e:
         print(f"[ai] {model_name} error: {e}", flush=True)
@@ -6421,25 +6458,32 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_ai_routing_menu(call)
     if data.startswith("adm_ai_route_edit_"):
         return render_adm_ai_route_edit(call, data[len("adm_ai_route_edit_"):])
-    if data.startswith("adm_ai_set_pri_"):
-        parts = data.split("_")
-        if len(parts) >= 6:
-            plan_key, model = parts[4], parts[5]
+    if data.startswith("adm_ai_pool_"):
+        parts = data[len("adm_ai_pool_"):].split("_", 1)
+        if len(parts) == 2:
+            plan_key, model = parts
+            if plan_key not in PLAN_LIMITS:
+                ack(call, "Unknown plan"); return
+            if model == "reset":
+                s = settings_load()
+                for k in (f"ai_plan_{plan_key}_models", f"ai_model_{plan_key}_primary", f"ai_model_{plan_key}_fallback"):
+                    s.pop(k, None)
+                settings_save(s)
+                audit(call.from_user.id, f"ai_pool_reset_{plan_key}", "defaults")
+                ack(call, f"{plan_key.upper()} pool reset to defaults")
+                return render_adm_ai_route_edit(call, plan_key)
             if model not in _AI_OPERATIVE_KEYS:
                 ack(call, "Unknown AI operative"); return
-            set_setting(f"ai_model_{plan_key}_primary", model)
-            audit(call.from_user.id, f"ai_route_pri_{plan_key}", model)
-            ack(call, f"{plan_key.upper()} Primary -> {model.upper()}")
-            return render_adm_ai_route_edit(call, plan_key)
-    if data.startswith("adm_ai_set_fb_"):
-        parts = data.split("_")
-        if len(parts) >= 6:
-            plan_key, model = parts[4], parts[5]
-            if model not in _AI_OPERATIVE_KEYS:
-                ack(call, "Unknown AI operative"); return
-            set_setting(f"ai_model_{plan_key}_fallback", model)
-            audit(call.from_user.id, f"ai_route_fb_{plan_key}", model)
-            ack(call, f"{plan_key.upper()} Fallback -> {model.upper()}")
+            pool = get_plan_ai_models(plan_key, include_disabled=True)
+            if model in pool:
+                if len(pool) == 1:
+                    ack(call, "A plan needs at least one operative."); return render_adm_ai_route_edit(call, plan_key)
+                pool.remove(model); verb = "removed from"
+            else:
+                pool.append(model); verb = "added to"
+            set_plan_ai_models(plan_key, pool)
+            audit(call.from_user.id, f"ai_pool_{plan_key}", ",".join(pool))
+            ack(call, f"{model.upper()} {verb} {plan_key.upper()} pool")
             return render_adm_ai_route_edit(call, plan_key)
     
     # Notifications
@@ -19027,6 +19071,8 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_coupon":   render_coupon(call); return
     if data == "menu_stats":    render_user_stats(call); return
     if data == "menu_ai_chat":  render_ai_chat(call); return
+    if data == "menu_ai_models": render_ai_models(call); return
+    if data.startswith("ai_pick_"): action_ai_pick(call, data[len("ai_pick_"):]); return
     if data == "menu_admin":    render_admin(call); return
     if data == "menu_gh_host":  render_gh_repo_host_menu(call); return
     # Plans
@@ -19687,8 +19733,32 @@ def _telemetry_loop():
 
 # ─── AI SERVICES ───────────────────────────────────────────────────────────
 
-def _call_ai_api(prompt: str, user_plan: str = "free") -> Optional[str]:
-    """Tiered AI call system routing through Kaalix models based on admin settings."""
+def _call_ai_chain(prompt: str, user_plan: str, uid: Optional[int] = None) -> Tuple[Optional[str], Optional[str]]:
+    """Try the user's selected operatives in order, then the master fallbacks.
+    Returns (reply, model_key) so callers can label the response with the model that answered."""
+    chain = get_user_ai_models(uid, user_plan) if uid is not None else get_plan_ai_models(user_plan)[:AI_USER_MAX_MODELS]
+    tried: List[str] = []
+    for model in chain:
+        if model in tried:
+            continue
+        tried.append(model)
+        res = _call_kaalix_model(model, prompt)
+        if res:
+            return res, model
+
+    # Master Fallback: DeepSeek (Kaalix) and Claude (OmegaTech) have proven the most stable
+    for master_backup in ["deepseek-v3", "claude", "deepseek-r1"]:
+        if master_backup in tried:
+            continue
+        res_master = _call_kaalix_model(master_backup, prompt)
+        if res_master:
+            return res_master, master_backup
+
+    return None, None
+
+
+def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None) -> Optional[str]:
+    """Tiered AI call system routing through the operatives configured for the plan / chosen by the user."""
     if not get_setting("ai_global_enabled", True):
         return None
 
@@ -19699,24 +19769,11 @@ def _call_ai_api(prompt: str, user_plan: str = "free") -> Optional[str]:
     if any(p_low.startswith(g) for g in greetings) or len(p_low) < 4:
         return f"Hello, Commander! How may I assist you with your elite bot hosting today?"
 
-    primary_model = get_plan_primary_model(user_plan)
-    fallback_model = get_plan_fallback_model(user_plan)
-    
-    res = _call_kaalix_model(primary_model, prompt)
+    res, used = _call_ai_chain(prompt, user_plan, uid)
     if res:
+        if uid is not None and used:
+            AI_LAST_MODEL_USED[uid] = used
         return res
-        
-    res_fb = _call_kaalix_model(fallback_model, prompt)
-    if res_fb:
-        return res_fb
-        
-    # Master Fallback: If regional models (Qwen/Gemini) fail, route through DeepSeek which has proven 100% stable
-    for master_backup in ["deepseek-v3", "deepseek-r1"]:
-        if master_backup not in (primary_model, fallback_model):
-            res_master = _call_kaalix_model(master_backup, prompt)
-            if res_master:
-                return res_master
-        
     return None
 
 def _ai_vision_verify(file_path: str, expected_amt: float) -> Dict[str, Any]:
@@ -19818,7 +19875,12 @@ def render_ai_chat(call: types.CallbackQuery) -> None:
         f"{G['div']}{FOOTER}"
     )
     USER_STATES[call.from_user.id] = {"flow": "ai_chat"}
-    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, back_main_kb(), call=call)
+    chain = get_user_ai_models(call.from_user.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn(f"🧠  My AI: {' → '.join(ai_label(m).split(' (')[0] for m in chain)[:48]}",
+               callback_data="menu_ai_models", style="success"))
+    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
 
 _LORD_CIPHER_BRAG_LOCK = threading.Lock()
 _LORD_CIPHER_BRAGS = (
@@ -19877,10 +19939,10 @@ def handle_ai_chat_message(m: types.Message) -> None:
             
         # Tiered Model Selection
         plan = get_ai_model(m.from_user.id)
-        ai_response = _call_ai_api(m.text, user_plan=plan)
+        ai_response = _call_ai_api(m.text, user_plan=plan, uid=m.from_user.id)
         
         if ai_response:
-            primary_model = get_plan_primary_model(plan)
+            primary_model = AI_LAST_MODEL_USED.get(m.from_user.id) or get_user_ai_models(m.from_user.id, plan)[0]
             
             # Sanitize AI response: remove unsupported tags like <think>
             clean_res = re.sub(r'<(think|thought)>.*?</\1>', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
@@ -19973,10 +20035,10 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         )
         
         plan = get_ai_model(call.from_user.id)
-        ai_resp = _call_ai_api(prompt, user_plan=plan)
+        ai_resp = _call_ai_api(prompt, user_plan=plan, uid=call.from_user.id)
         
         if ai_resp:
-            primary_model = get_plan_primary_model(plan)
+            primary_model = AI_LAST_MODEL_USED.get(call.from_user.id) or get_user_ai_models(call.from_user.id, plan)[0]
             clean_resp = re.sub(r'<(think|thought)>.*?</\1>', '', ai_resp, flags=re.DOTALL | re.IGNORECASE).strip()
             
             # Extract code block if present
@@ -20089,21 +20151,162 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
         ack(call, f"Failed to apply patch: {e}")
 
 _AI_OPERATIVE_LABELS = {
-    "claude": "Claude-3.5 (Elite Brain)",
+    # OmegaTech — verified coding models
+    "claude": "Claude (Elite Coder)",
+    "claude-sonnet": "Claude 3.5 Sonnet",
+    "claude-cli": "Claude (AICli)",
+    "hotbot": "GPT-5 (Premium)",
+    "chatgpt": "ChatGPT (OpenAI)",
+    "gpt-4o-mini": "GPT-4o Mini (Fast)",
+    "deepseek-v32": "DeepSeek V3.2",
+    "deepseek-cli": "DeepSeek R1 (AICli)",
+    "code-assistant": "Code Assistant (DeepAI)",
+    "chatbot": "Elite Assistant (Claude)",
+    "mistral": "Mistral (Chat)",
+    # OmegaTech — extra / experimental
+    "claude-haiku": "Claude Haiku 4.5",
+    "qwen-80b": "Qwen3 80B",
+    "qwen3-coder": "Qwen3 Coder",
+    "perplexity": "Live Research (Web)",
+    "all-ai": "Universal Fallback",
+    # Kaalix provider
     "deepseek-r1": "Deepseek-R1 (Reasoning)",
     "deepseek-v3": "Deepseek-V3 (Fast Chat)",
-    "qwen": "Qwen-72B (Technical)",
-    "chatbot": "Elite Assistant (Claude)",
-    "hotbot": "Premium AI (GPT-5)",
-    "claude-haiku": "Claude Haiku 4.5",
-    "qwen-80b": "Qwen3 80B (Elite)",
-    "perplexity": "Live Research (Web)",
+    "qwen": "Qwen (Technical)",
     "gemini": "Gemini-Pro (Knowledge)",
     "gptlogic": "Logic Analysis (GPT)",
-    "all-ai": "Universal Fallback",
     "cohere": "Cohere (Efficient)",
 }
 _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
+
+# Default operative pool per plan (admin can override from the AI Command Center).
+_AI_PLAN_DEFAULT_MODELS = {
+    "free":       ["deepseek-v3", "gpt-4o-mini", "mistral"],
+    "starter":    ["deepseek-v32", "gpt-4o-mini", "chatgpt", "mistral"],
+    "basic":      ["claude", "deepseek-v32", "chatgpt", "gpt-4o-mini"],
+    "pro":        ["claude", "hotbot", "deepseek-cli", "chatgpt", "code-assistant"],
+    "enterprise": ["claude", "claude-sonnet", "hotbot", "deepseek-r1", "code-assistant", "deepseek-cli"],
+    "lifetime":   ["claude", "claude-sonnet", "hotbot", "deepseek-r1", "code-assistant", "deepseek-cli"],
+}
+
+
+def _ai_operative_enabled(key: str) -> bool:
+    return key in _AI_OPERATIVE_KEYS and bool(get_setting(f"ai_operative_{key}_enabled", True))
+
+
+def ai_label(key: str) -> str:
+    return _AI_OPERATIVE_LABELS.get(key, key.upper())
+
+
+def get_plan_ai_models(plan: str, include_disabled: bool = False) -> List[str]:
+    """Ordered operative pool the admin has made available to a plan tier."""
+    plan = (plan or "free").lower()
+    configured = get_setting(f"ai_plan_{plan}_models", None)
+    if not isinstance(configured, list):
+        legacy = [get_setting(f"ai_model_{plan}_primary"), get_setting(f"ai_model_{plan}_fallback")]
+        configured = [str(m).lower() for m in legacy if m] + list(_AI_PLAN_DEFAULT_MODELS.get(plan, _AI_PLAN_DEFAULT_MODELS["free"]))
+    pool: List[str] = []
+    for m in configured:
+        m = str(m).lower()
+        if m in _AI_OPERATIVE_KEYS and m not in pool and (include_disabled or _ai_operative_enabled(m)):
+            pool.append(m)
+    if not pool and not include_disabled:
+        pool = [m for m in ("deepseek-v3", "claude") if _ai_operative_enabled(m)] or ["deepseek-v3"]
+    return pool
+
+
+def set_plan_ai_models(plan: str, models: List[str]) -> None:
+    set_setting(f"ai_plan_{plan}_models", [m for m in models if m in _AI_OPERATIVE_KEYS])
+
+
+def get_user_ai_models(uid: Optional[int], plan: Optional[str] = None) -> List[str]:
+    """Operatives the user has picked (max AI_USER_MAX_MODELS), restricted to the plan pool.
+    Falls back to the first slots of the plan pool when nothing valid is selected."""
+    plan = plan or (get_ai_model(uid) if uid is not None else "free")
+    pool = get_plan_ai_models(plan)
+    picked: List[str] = []
+    if uid is not None:
+        u = (db_load_ro().get("users", {}) or {}).get(str(uid), {})
+        for m in (u.get("ai_models") or []):
+            m = str(m).lower()
+            if m in pool and m not in picked:
+                picked.append(m)
+    picked = picked[:AI_USER_MAX_MODELS]
+    return picked or pool[:AI_USER_MAX_MODELS]
+
+
+def set_user_ai_models(uid: int, models: List[str]) -> None:
+    d = db_load()
+    u = d["users"].get(str(uid))
+    if u is None:
+        return
+    u["ai_models"] = models[:AI_USER_MAX_MODELS]
+    db_save(d)
+
+
+def render_ai_models(call: types.CallbackQuery) -> None:
+    """User panel: pick up to AI_USER_MAX_MODELS operatives from the plan's pool."""
+    uid = call.from_user.id
+    plan = get_ai_model(uid)
+    pool = get_plan_ai_models(plan)
+    picked = get_user_ai_models(uid, plan)
+    plan_name = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])["name"]
+
+    cap = (
+        f"<b>🧠 {sc('My AI Operatives')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"💎 <b>{sc('Plan')}</b>: <code>{esc(plan_name)}</code>\n"
+        f"🎯 <b>{sc('Slots')}</b>: <code>{len(picked)}/{AI_USER_MAX_MODELS}</code>\n\n"
+        f"<b>{sc('Active chain')}</b> ({sc('tried in order')}):\n"
+    )
+    for i, m in enumerate(picked, 1):
+        cap += f"{i}. <code>{esc(ai_label(m))}</code>\n"
+    cap += (
+        f"\n<i>{sc('Tap an operative to add or remove it. Your plan unlocks')} {len(pool)} "
+        f"{sc('operative(s); upgrade for more')}.</i>{G['div']}{FOOTER}"
+    )
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for m in pool:
+        sel = m in picked
+        slot = f"#{picked.index(m) + 1} " if sel else ""
+        kb.add(Btn(f"{'✅' if sel else '▫️'} {slot}{ai_label(m)}", callback_data=f"ai_pick_{m}",
+                   style="success" if sel else "primary"))
+    kb.add(Btn("↺  Reset to plan default", callback_data="ai_pick_reset", style="primary"))
+    kb.add(Btn(f"{G['back']}  AI Assɪsᴛᴀɴᴛ", callback_data="menu_ai_chat", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
+
+
+def action_ai_pick(call: types.CallbackQuery, model: str) -> None:
+    """Toggle an operative in the user's chain, enforcing plan pool + slot limit."""
+    uid = call.from_user.id
+    plan = get_ai_model(uid)
+    pool = get_plan_ai_models(plan)
+    if model == "reset":
+        set_user_ai_models(uid, [])
+        ack(call, "AI operatives reset to plan default.")
+        return render_ai_models(call)
+    if model not in pool:
+        ack(call, "That operative is not available on your plan.")
+        return render_ai_models(call)
+    u = (db_load_ro().get("users", {}) or {}).get(str(uid), {})
+    current = [str(m).lower() for m in (u.get("ai_models") or []) if str(m).lower() in pool]
+    if not current:
+        current = list(get_user_ai_models(uid, plan))
+    if model in current:
+        if len(current) == 1:
+            ack(call, "Keep at least one operative active.")
+            return render_ai_models(call)
+        current.remove(model)
+        ack(call, f"{ai_label(model)} removed.")
+    else:
+        if len(current) >= AI_USER_MAX_MODELS:
+            ack(call, f"Limit reached: you can keep {AI_USER_MAX_MODELS} operatives. Remove one first.")
+            return render_ai_models(call)
+        current.append(model)
+        ack(call, f"{ai_label(model)} added as #{len(current)}.")
+    set_user_ai_models(uid, current)
+    render_ai_models(call)
 
 
 def render_adm_ai_config(call: types.CallbackQuery) -> None:
@@ -20115,7 +20318,7 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     cap = (
         f"<b>🤖 {sc('AI Command Center')}</b>\n"
         f"{G['div_eq']}\n"
-        f"<i>{sc('Manage Kaalix AI operatives and model routing')}.</i>\n\n"
+        f"<i>{sc('Manage OmegaTech / Kaalix AI operatives and per-plan model pools')}.</i>\n\n"
         f"🌐 <b>Global Status</b>: {'🟢 ACTIVE' if global_on else '🔴 OFFLINE'}\n\n"
         f"💎 <b>Active Operatives</b>:\n"
     )
@@ -20154,10 +20357,11 @@ def render_adm_ai_routing_menu(call: types.CallbackQuery) -> None:
     
     kb = types.InlineKeyboardMarkup(row_width=1)
     for plan_key, plan_data in PLAN_LIMITS.items():
-        primary = get_plan_primary_model(plan_key)
-        fallback = get_plan_fallback_model(plan_key)
-        cap += f"• <b>{plan_data['name']}</b>: <code>{primary.upper()}</code> (FB: {fallback.upper()})\n"
+        pool = get_plan_ai_models(plan_key, include_disabled=True)
+        pool_str = ", ".join(m.upper() for m in pool) or "—"
+        cap += f"• <b>{plan_data['name']}</b> ({len(pool)}): <code>{esc(pool_str)}</code>\n"
         kb.add(Btn(f"⚙️ Configure {plan_data['name']}", callback_data=f"adm_ai_route_edit_{plan_key}", style="primary"))
+    cap += f"\n<i>{sc('Users pick up to')} {AI_USER_MAX_MODELS} {sc('operatives from their plan pool; the first is primary, the rest are fallbacks')}.</i>\n"
         
     kb.add(Btn(f"{G['back']}  AI Cᴏɴꜰɪɢ", callback_data="adm_ai_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
@@ -20167,29 +20371,27 @@ def render_adm_ai_route_edit(call: types.CallbackQuery, plan_key: str) -> None:
     if plan_key not in PLAN_LIMITS: return
     plan_name = PLAN_LIMITS[plan_key]["name"]
     
-    operatives = list(_AI_OPERATIVE_KEYS)
+    pool = get_plan_ai_models(plan_key, include_disabled=True)
     
     cap = (
         f"<b>⚙️ {sc('AI Routing')}: {plan_name}</b>\n"
         f"{G['div_eq']}\n"
-        f"Select the **Primary** and **Fallback** AI operatives for the <b>{plan_name}</b> tier.{FOOTER}"
+        f"{sc('Toggle the operatives available to the')} <b>{plan_name}</b> {sc('tier')}. "
+        f"{sc('Order = default priority; users on this plan may activate up to')} {AI_USER_MAX_MODELS}.\n\n"
+        f"<b>{sc('Pool')}</b> ({len(pool)}):\n"
     )
+    for i, m in enumerate(pool, 1):
+        state = "" if _ai_operative_enabled(m) else " 🔴"
+        cap += f"{i}. <code>{esc(ai_label(m))}</code>{state}\n"
+    cap += FOOTER
     
     kb = types.InlineKeyboardMarkup(row_width=2)
-    # Primary Model Selection
-    kb.add(Btn(f"🔴 --- PRIMARY MODEL ---", callback_data="none", style="danger"))
-    for op in operatives:
-        is_sel = get_plan_primary_model(plan_key) == op
-        btn_style = "success" if is_sel else "primary"
-        kb.add(Btn(f"{'✅ ' if is_sel else ''}{op.upper()}", callback_data=f"adm_ai_set_pri_{plan_key}_{op}", style=btn_style))
-        
-    # Fallback Model Selection
-    kb.add(Btn(f"🔴 --- FALLBACK MODEL ---", callback_data="none", style="danger"))
-    for op in operatives:
-        is_sel = get_plan_fallback_model(plan_key) == op
-        btn_style = "success" if is_sel else "primary"
-        kb.add(Btn(f"{'✅ ' if is_sel else ''}{op.upper()}", callback_data=f"adm_ai_set_fb_{plan_key}_{op}", style=btn_style))
-        
+    for op in _AI_OPERATIVE_KEYS:
+        is_sel = op in pool
+        idx = f"#{pool.index(op) + 1} " if is_sel else ""
+        kb.add(Btn(f"{'✅ ' if is_sel else ''}{idx}{ai_label(op)[:22]}", callback_data=f"adm_ai_pool_{plan_key}_{op}",
+                   style="success" if is_sel else "primary"))
+    kb.add(Btn("↺  Reset to defaults", callback_data=f"adm_ai_pool_{plan_key}_reset", style="primary"))
     kb.add(Btn(f"{G['back']}  Rᴏᴜᴛɪɴɢ Mᴇɴᴜ", callback_data="adm_ai_routing_menu", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
@@ -20259,27 +20461,13 @@ def get_ai_model(uid: int) -> str:
     return "free"
 
 def get_plan_primary_model(plan: str) -> str:
-    """Helper to get the primary model name for a plan tier dynamically from admin settings."""
-    plan = (plan or "free").lower()
-    # Dynamic lookup: ai_model_{plan}_primary
-    # Defaults: Enterprise/Lifetime -> R1, Pro -> Qwen, Others -> V3
-    default = "deepseek-v3"
-    if plan in ["enterprise", "lifetime"]: default = "deepseek-r1"
-    elif plan == "pro": default = "qwen"
-    
-    configured = str(get_setting(f"ai_model_{plan}_primary", default)).lower()
-    return configured if configured in _AI_OPERATIVE_KEYS else default
+    """First operative in the plan pool."""
+    return get_plan_ai_models(plan)[0]
 
 def get_plan_fallback_model(plan: str) -> str:
-    """Helper to get the fallback model name for a plan tier dynamically from admin settings."""
-    plan = (plan or "free").lower()
-    # Dynamic lookup: ai_model_{plan}_fallback
-    # Defaults: Enterprise/Lifetime -> Gemini, other tiers -> Deepseek-V3.
-    default = "deepseek-v3"
-    if plan in ["enterprise", "lifetime"]: default = "gemini"
-
-    configured = str(get_setting(f"ai_model_{plan}_fallback", default)).lower()
-    return configured if configured in _AI_OPERATIVE_KEYS else default
+    """Second operative in the plan pool (or the primary when the pool has one entry)."""
+    pool = get_plan_ai_models(plan)
+    return pool[1] if len(pool) > 1 else pool[0]
 
 def _handle_ai_chat_document(m: types.Message) -> None:
     """Extracts code from uploaded file or zip and sends to AI for analysis."""
@@ -20325,10 +20513,10 @@ def _handle_ai_chat_document(m: types.Message) -> None:
     
     try:
         plan = get_ai_model(m.from_user.id)
-        ai_response = _call_ai_api(prompt, user_plan=plan)
+        ai_response = _call_ai_api(prompt, user_plan=plan, uid=m.from_user.id)
         
         if ai_response:
-            primary_model = get_plan_primary_model(plan)
+            primary_model = AI_LAST_MODEL_USED.get(m.from_user.id) or get_user_ai_models(m.from_user.id, plan)[0]
             clean_res = re.sub(r'<(think|thought)>.*?</\1>', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
             clean_res = re.sub(r'<(think|thought)>', '', clean_res, flags=re.IGNORECASE)
             
