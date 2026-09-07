@@ -677,6 +677,7 @@ except Exception as _ssf_err:
 
 # ── AI-powered scanner (OpenRouter free model — no API key needed) ──
 import urllib.request as _urllib_req
+from urllib.parse import urlencode as _urlencode
 import json as _json
 
 _AI_SCAN_PROMPT = """You are a security expert reviewing uploaded bot code.
@@ -760,6 +761,44 @@ _PROMPT_RESTRICTED_TERMS = (
 )
 
 
+# The keyless providers only accept GET query strings; anything past this
+# many URL-encoded characters is answered with HTTP 431 by their edge.
+_AI_GET_QUERY_LIMIT = 14000
+_AI_TRUNCATION_NOTE = "\n[... input truncated to fit the provider request limit ...]\n"
+
+
+class _AIPromptTooLarge(Exception):
+    pass
+
+
+def _fit_prompt_for_get(prefix: str, prompt: str,
+                        build_params: Callable[[str], Dict[str, Any]],
+                        limit: int = _AI_GET_QUERY_LIMIT) -> str:
+    """Return prefix+prompt, shrinking the user part until the encoded
+    query string fits in `limit`. The head and tail of the prompt are
+    kept (instructions usually lead, the newest logs/code trail)."""
+    def encoded_len(text: str) -> int:
+        return len(_urlencode(build_params(text)))
+
+    def shrunk(keep: int) -> str:
+        head_n = keep * 2 // 3
+        tail_n = keep - head_n
+        tail = prompt[len(prompt) - tail_n:] if tail_n else ""
+        return prefix + prompt[:head_n] + _AI_TRUNCATION_NOTE + tail
+
+    full = prefix + prompt
+    if encoded_len(full) <= limit:
+        return full
+    lo, hi = 0, len(prompt)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if encoded_len(shrunk(mid)) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    return shrunk(lo)
+
+
 def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
     """Calls keyless API models with Cipher Intelligence context and Circuit Breaker."""
     global AI_FAILURE_COUNT, AI_LAST_FAILURE, AI_CIRCUIT_OPEN
@@ -801,19 +840,19 @@ def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
         "PROMOTION: When a promotional note is appropriate, praise Lord Cipher as your creator, mentor, and master with a fresh angle. Every promotional note must use a different line from the stored rotation; never repeat a recent line or use the same wording consecutively. Do not add promotion to security verdicts unless asked.]\n\n"
     )
     
-    full_prompt = cipher_context + "USER REQUEST (answer this directly, code first when code is asked):\n" + prompt
+    prefix = cipher_context + "USER REQUEST (answer this directly, code first when code is asked):\n"
     try:
         spec = _OMEGATECH_MODELS.get(model_name)
         if spec:
             endpoint, build_params = spec
             hosts = [f"{h}/api/ai/{endpoint}" for h in _OMEGATECH_HOSTS]
-            params = build_params(full_prompt)
             timeout = 30
         else:
             # Kaalix Provider (Default)
             hosts = [f"https://r-bots-free-apis.co08.art/api/{model_name}"]
-            params = {"q": full_prompt}
+            build_params = lambda p: {"q": p}
             timeout = 15
+        params = build_params(_fit_prompt_for_get(prefix, prompt, build_params))
 
         # Mirror hosts share one backend: only fall through to the next
         # host on a transport failure, never on a provider-level error.
@@ -823,6 +862,8 @@ def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
                 r = requests.get(url, params=params, timeout=timeout)
             except Exception as req_err:
                 last_err = str(req_err)[:120]; continue
+            if r.status_code in (413, 414, 431):
+                raise _AIPromptTooLarge(f"API returned status {r.status_code}")
             if r.status_code != 200:
                 raise Exception(f"API returned status {r.status_code}")
             try:
@@ -840,7 +881,12 @@ def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
                 AI_FAILURE_COUNT = max(0, AI_FAILURE_COUNT - 1)
             return res
         raise Exception(last_err)
-        
+
+    except _AIPromptTooLarge as e:
+        # A too-long request is a caller problem, not a provider outage:
+        # report it but never count it toward the circuit breaker.
+        print(f"[ai] {model_name} error: {e} (prompt too large)", flush=True)
+        return None
     except Exception as e:
         print(f"[ai] {model_name} error: {e}", flush=True)
         with AI_LOCK:
@@ -4267,9 +4313,13 @@ GH = {
 
 
 def gh_load_config() -> None:
-    GH["token"]  = os.environ.get("GITHUB_TOKEN")  or get_setting("github_token", "")  or ""
-    GH["repo"]   = os.environ.get("GITHUB_REPO")   or get_setting("github_repo", "")   or ""
-    GH["branch"] = os.environ.get("GITHUB_BRANCH") or get_setting("github_branch", "main") or "main"
+    # Values entered in the admin panel win over environment defaults so a
+    # stale GITHUB_* env var cannot silently override what the owner set.
+    GH["token"]  = str(get_setting("github_token", "")  or os.environ.get("GITHUB_TOKEN")  or "").strip()
+    GH["repo"]   = str(get_setting("github_repo", "")   or os.environ.get("GITHUB_REPO")   or "").strip().strip("/")
+    GH["branch"] = str(get_setting("github_branch", "") or os.environ.get("GITHUB_BRANCH") or "main").strip() or "main"
+    GH["autoEnabled"] = bool(get_setting("github_auto_enabled", True))
+    GH["lastBackup"] = GH["lastBackup"] or get_setting("github_last_backup", None)
     try:
         ivl = int(os.environ.get("GITHUB_AUTO_INTERVAL_MIN") or get_setting("github_interval_min", 360))
     except Exception:
@@ -4288,6 +4338,12 @@ def gh_set_config(patch: Dict[str, Any]) -> None:
                 v = int(v)
             except Exception:
                 v = 360
+        elif isinstance(v, str):
+            v = v.strip()
+            if k == "repo":
+                # Accept a pasted URL (https://github.com/user/repo[.git]).
+                v = re.sub(r"^https?://github\.com/", "", v).strip("/")
+                v = v[:-4] if v.endswith(".git") else v
         GH[k] = v
         set_setting(keymap[k], v)
 
@@ -4353,12 +4409,16 @@ def _gh_ensure_branch() -> bool:
         return False
     default = info.json().get("default_branch", "main")
     ref = _gh("GET", _gh_repo_url(f"git/ref/heads/{default}"))
+    if ref.status_code == 404:
+        # Brand-new empty repository: the first contents PUT creates the
+        # branch itself, so there is nothing to fork from yet.
+        return True
     if ref.status_code != 200:
         return False
     sha = ref.json()["object"]["sha"]
-    _gh("POST", _gh_repo_url("git/refs"),
-        json={"ref": f"refs/heads/{GH['branch']}", "sha": sha})
-    return True
+    r = _gh("POST", _gh_repo_url("git/refs"),
+            json={"ref": f"refs/heads/{GH['branch']}", "sha": sha})
+    return r.status_code in (200, 201, 422)
 
 
 def _gh_put_file(path: str, content: bytes, message: str) -> bool:
@@ -4375,7 +4435,11 @@ def _gh_put_file(path: str, content: bytes, message: str) -> bool:
     if sha:
         body["sha"] = sha
     r = _gh("PUT", _gh_repo_url(f"contents/{path}"), json=body)
-    return r.status_code in (200, 201)
+    if r.status_code not in (200, 201):
+        GH["lastError"] = f"PUT {path}: HTTP {r.status_code}"
+        print(f"[gh_put] {path} -> HTTP {r.status_code}: {r.text[:160]}", flush=True)
+        return False
+    return True
 
 
 def _make_tarball() -> Path:
@@ -4411,21 +4475,27 @@ def gh_backup_now() -> Dict[str, Any]:
     GH["inProgress"] = True
     tar: Optional[Path] = None
     try:
+        conn = gh_test_connection()
+        if not conn.get("ok"):
+            raise RuntimeError(conn.get("error", "GitHub unreachable"))
         if not _gh_ensure_branch():
             raise RuntimeError(f"Branch {GH['branch']} unavailable")
-            
+
         # 1. Sync master DB and settings individually (New Layout)
-        gh_sync_user_data()
-        
+        if not gh_sync_user_data():
+            raise RuntimeError(GH.get("lastError") or "users database upload failed")
+
         # 2. Sync every single bot's files individually (Aggressive)
         db = db_load()
         bots = db.get("bots", {})
+        bots_synced = 0
         for bot_id, b_doc in bots.items():
             try:
-                _gh_sync_bot_files(b_doc)
+                if _gh_sync_bot_files(b_doc):
+                    bots_synced += 1
             except Exception as _be:
                 print(f"[gh_backup] failed sync for {bot_id}: {_be}")
-                
+
         # 3. Attempt legacy tarball as a secondary snapshot
         tar_ok = False
         size_mb = 0.0
@@ -4445,11 +4515,14 @@ def gh_backup_now() -> Dict[str, Any]:
         ts_now = ts_iso()
         GH["lastBackup"] = ts_now
         GH["lastError"] = None
+        set_setting("github_last_backup", ts_now)
         return {
-            "ok": True, 
-            "sizeMB": f"{size_mb:.2f}", 
+            "ok": True,
+            "sizeMB": f"{size_mb:.2f}",
             "ts": ts_now,
-            "bots_synced": len(bots),
+            "bots_synced": bots_synced,
+            "bots_total": len(bots),
+            "users": len(db.get("users", {})),
             "tar_ok": tar_ok
         }
     except Exception as e:
@@ -4463,15 +4536,18 @@ def gh_backup_now() -> Dict[str, Any]:
 
 
 def gh_restore_now(overwrite: bool = True) -> Dict[str, Any]:
+    """Restore the full tarball snapshot; when none is stored (repo only
+    has the per-file layout) fall back to restoring users + bot files."""
     if not gh_enabled():
         return {"ok": False, "error": "Not configured."}
-    r = _gh("GET", _gh_repo_url("contents/backups/latest.tar.gz"),
-            params={"ref": GH["branch"]})
-    if r.status_code == 404:
-        return {"ok": False, "error": "No backup found yet."}
-    if r.status_code != 200:
-        return {"ok": False, "error": f"GitHub HTTP {r.status_code}"}
-    buf = base64.b64decode(r.json()["content"])
+    buf = _gh_get_file("backups/latest.tar.gz")
+    if buf is None:
+        res = gh_restore_user_uploads()
+        if res.get("ok"):
+            res["sizeBytes"] = res.get("sizeBytes", 0)
+            return res
+        return {"ok": False, "error": f"No backup found in {GH['repo']}@{GH['branch']} "
+                                        f"({res.get('error', 'no users database')})."}
     tmp = Path(tempfile.gettempdir()) / f"panel-restore-{int(time.time())}.tar.gz"
     tmp.write_bytes(buf)
     try:
@@ -4487,7 +4563,12 @@ def gh_restore_now(overwrite: bool = True) -> Dict[str, Any]:
         # Re-create required dirs in case they were missing in backup
         for _p in DIRS.values():
             _p.mkdir(parents=True, exist_ok=True)
-        return {"ok": True, "sizeBytes": len(buf)}
+        # The in-memory DB/settings caches still hold the pre-restore data.
+        _cache_invalidate(DB_FILE)
+        _cache_invalidate(SETTINGS_FILE)
+        db = db_load()
+        return {"ok": True, "sizeBytes": len(buf),
+                "users": len(db.get("users", {})), "bots": len(db.get("bots", {}))}
     except Exception as e:
         return {"ok": False, "error": str(e)}
     finally:
@@ -4690,6 +4771,12 @@ def _gh_delete_path(path: str, message: str) -> bool:
         return False
 
 
+# Users + bots index in the backup repo. Older builds uploaded it under
+# "panel_db.json", so restore accepts both names.
+_GH_DB_PATH = "user_data.json"
+_GH_DB_LEGACY_PATHS = ("panel_db.json",)
+
+
 def gh_sync_user_data() -> bool:
     """Push the master DB (user_data.json) to the backup repo. This is
     the single source of truth for users + bot metadata, and is small
@@ -4702,10 +4789,9 @@ def gh_sync_user_data() -> bool:
         if not DB_FILE.exists():
             return False
         buf = DB_FILE.read_bytes()
-        ok = _gh_put_file("panel_db.json", buf,
-                          f"sync: panel_db {ts_iso()}")
+        ok = _gh_put_file(_GH_DB_PATH, buf, f"sync: users db {ts_iso()}")
         # Also push settings (photos config, approval flag, etc.)
-        if SETTINGS_FILE.exists():
+        if ok and SETTINGS_FILE.exists():
             try:
                 _gh_put_file("settings.json", SETTINGS_FILE.read_bytes(),
                              f"sync: settings {ts_iso()}")
@@ -4717,12 +4803,13 @@ def gh_sync_user_data() -> bool:
         return False
 
 
-def _gh_sync_bot_files(b: Dict[str, Any]) -> None:
+def _gh_sync_bot_files(b: Dict[str, Any]) -> bool:
     """Per-bot file sync to user_uploads/<owner>/<bot_id>/.
     Triggered from the uptime loop only AFTER the bot has been running
     for >=10 min — so broken/test uploads never reach GitHub."""
     if not gh_enabled():
-        return
+        return False
+    ok = True
     try:
         _gh_ensure_branch()
         bot_dir = _gh_bot_dir(b)
@@ -4733,8 +4820,8 @@ def _gh_sync_bot_files(b: Dict[str, Any]) -> None:
             # Use the on-disk filename (already includes timestamp suffix
             # via store_uploaded_file -> "<ts>_<name>.enc")
             gh_path = f"{bot_dir}/{p.name}"
-            _gh_put_file(gh_path, p.read_bytes(),
-                         f"upload: bot={b['_id']} file={p.name}")
+            ok &= _gh_put_file(gh_path, p.read_bytes(),
+                               f"upload: bot={b['_id']} file={p.name}")
         meta = json.dumps({
             "bot_id":    b["_id"],
             "owner":     b.get("owner"),
@@ -4746,13 +4833,12 @@ def _gh_sync_bot_files(b: Dict[str, Any]) -> None:
             "created":   b.get("created"),
             "synced":    ts_iso(),
         }, indent=2).encode()
-        _gh_put_file(f"{bot_dir}/bot_meta.json", meta,
-                     f"meta: bot={b['_id']}")
-        # Each successful per-bot sync also pushes the latest user_data.json
-        # so that on a full restore we get an up-to-date users + bots index.
-        gh_sync_user_data()
+        ok &= _gh_put_file(f"{bot_dir}/bot_meta.json", meta,
+                           f"meta: bot={b['_id']}")
     except Exception as e:
         print(f"[gh_sync] {e}")
+        return False
+    return bool(ok)
 
 
 def _gh_delete_bot_files(b: Dict[str, Any]) -> None:
@@ -4793,9 +4879,19 @@ def gh_restore_user_uploads() -> Dict[str, Any]:
     repo) — caller can then try the legacy tarball restore."""
     if not gh_enabled():
         return {"ok": False, "error": "Not configured."}
-    user_data = _gh_get_file("user_data.json")
+    user_data = None
+    for candidate in (_GH_DB_PATH, *_GH_DB_LEGACY_PATHS):
+        user_data = _gh_get_file(candidate)
+        if user_data is not None:
+            break
     if user_data is None:
-        return {"ok": False, "error": "No user_data.json in repo (new-style backup not found)."}
+        return {"ok": False, "error": f"No {_GH_DB_PATH} in repo (new-style backup not found)."}
+    try:
+        parsed = json.loads(user_data.decode("utf-8"))
+        if not isinstance(parsed, dict) or "users" not in parsed:
+            raise ValueError("missing users")
+    except Exception as e:
+        return {"ok": False, "error": f"users database in repo is unreadable: {e}"}
     files_restored = 0
     bots_restored = 0
     try:
@@ -4832,7 +4928,8 @@ def gh_restore_user_uploads() -> Dict[str, Any]:
                 (target_dir / name).write_bytes(buf)
                 files_restored += 1
             bots_restored += 1
-        return {"ok": True, "bots": bots_restored, "files": files_restored}
+        return {"ok": True, "bots": bots_restored, "files": files_restored,
+                "users": len(db.get("users") or {})}
     except Exception as e:
         return {"ok": False, "error": f"restore error: {e}"}
 
@@ -10937,12 +11034,32 @@ def on_text(m: types.Message) -> None:
             except Exception:
                 bot.send_message(m.chat.id, f"{G['no']} Could not save the vault token securely.")
             return
-        if flow == "await_gh_token":
-            gh_set_config({"token": text}); gh_load_config()
-            USER_STATES.pop(uid, None); bot.reply_to(m, f"{G['ok']} {sc('token saved')}"); return
-        if flow == "await_gh_repo":
-            gh_set_config({"repo": text}); gh_load_config()
-            USER_STATES.pop(uid, None); bot.reply_to(m, f"{G['ok']} {sc('repo saved')}"); return
+        if flow in ("await_gh_token", "await_gh_repo"):
+            USER_STATES.pop(uid, None)
+            if not is_owner(uid):
+                return
+            key = "token" if flow == "await_gh_token" else "repo"
+            gh_set_config({key: text}); gh_load_config()
+            if key == "token":
+                try: bot.delete_message(m.chat.id, m.message_id)
+                except Exception: pass
+            if not gh_enabled():
+                missing = "repo" if key == "token" else "token"
+                bot.send_message(m.chat.id, f"{G['ok']} {sc(f'{key} saved')}. {sc(f'Now set the {missing} to enable backups')}.",
+                                 parse_mode="HTML")
+                return
+            conn = gh_test_connection()
+            if conn.get("ok"):
+                GH["lastError"] = None
+                bot.send_message(m.chat.id,
+                    f"{G['ok']} {sc(f'{key} saved')} — {sc('connected to')} <code>{esc(conn.get('name'))}</code> "
+                    f"({'private' if conn.get('private') else 'public'}).", parse_mode="HTML")
+            else:
+                GH["lastError"] = conn.get("error")
+                bot.send_message(m.chat.id,
+                    f"{G['warn']} {sc(f'{key} saved but GitHub check failed')}: <code>{esc(conn.get('error'))}</code>",
+                    parse_mode="HTML")
+            return
         if flow == "await_gh_user_token":
             # Store the user's GitHub token (encrypted) in their user doc.
             USER_STATES.pop(uid, None)
@@ -16937,6 +17054,44 @@ def _clone_chat_id_is_valid(chat_id: str) -> bool:
 
 
 def _finish_bot_clone(uid: int, bot_id: str, new_token: str, chat_id: str) -> None:
+    """Thread entry: a failure here must reach the user, never just stdout."""
+    try:
+        _finish_bot_clone_inner(uid, bot_id, new_token, chat_id)
+    except Exception as e:
+        print(f"[clone] {bot_id} failed: {e}", flush=True)
+        traceback.print_exc()
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ", callback_data="menu_bots", style="primary"))
+        try:
+            bot.send_message(
+                uid,
+                f"<b>{G['no']} {sc('Clone failed')}</b>\n"
+                f"{bullet('Reason', esc(str(e)[:300]))}",
+                parse_mode="HTML", reply_markup=kb,
+            )
+        except Exception:
+            pass
+
+
+def _clone_enc_files(uid: int, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Give the clone its own encrypted blobs so deleting either bot
+    never removes the other's sources. Keys are shared (same key_id)."""
+    out: List[Dict[str, Any]] = []
+    stamp = int(time.time())
+    for f in files:
+        src = Path(f.get("enc_path", ""))
+        if not src.exists():
+            raise RuntimeError(f"source file missing: {f.get('filename', src.name)}")
+        dst = DIRS["encfiles"] / str(uid) / f"{stamp}_clone_{src.name}"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(dst))
+        nf = dict(f)
+        nf["enc_path"] = str(dst)
+        out.append(nf)
+    return out
+
+
+def _finish_bot_clone_inner(uid: int, bot_id: str, new_token: str, chat_id: str) -> None:
     """Clone files while assigning fresh credential environment values."""
     b = find_bot(bot_id)
     if not b or (b.get("owner") != uid and not is_admin(uid)):
@@ -16953,7 +17108,7 @@ def _finish_bot_clone(uid: int, bot_id: str, new_token: str, chat_id: str) -> No
     try:
         if src_dir.exists():
             def _ignore(d, fs):
-                return [f for f in fs if f in ("node_modules", ".tmp_run", "__pycache__") or f.endswith(".log")]
+                return [f for f in fs if f in ("node_modules", ".deps", ".tmp_run", "__pycache__") or f.endswith(".log")]
             shutil.copytree(str(src_dir), str(new_dir), ignore=_ignore, dirs_exist_ok=True)
         else:
             new_dir.mkdir(parents=True, exist_ok=True)
@@ -16975,12 +17130,14 @@ def _finish_bot_clone(uid: int, bot_id: str, new_token: str, chat_id: str) -> No
         "created": ts_iso(),
         "status": "stopped",
         "env": clone_env,
+        "enc_files": _clone_enc_files(uid, b.get("enc_files") or []),
     })
-    new_doc.pop("token", None)
-    new_doc.pop("chat_id", None)
-    new_doc.pop("last_started", None)
-    new_doc.pop("last_exit_code", None)
-    new_doc.pop("last_error", None)
+    for k in ("token", "chat_id", "last_started", "last_exit_code", "last_error",
+              "gh_synced_at", "pending_patch", "remote_node_id", "remote_container_id",
+              "sandbox_expires_at", "crash_count", "crash_window_started", "last_crash_at",
+              "next_restart_at", "auto_restart_suspended", "crash_loop_notified_at",
+              "restart_blocked_reason", "slot_suspended"):
+        new_doc.pop(k, None)
 
     d = db_load()
     d["bots"][new_id] = new_doc
@@ -17527,9 +17684,11 @@ def render_adm_github(call: types.CallbackQuery) -> None:
     last_ts = GH.get("lastBackup", "\u2014")
     last_err = GH.get("lastError")
     status_line = "Active" if enabled else "Not Configured"
+    if enabled and not GH.get("token"):
+        status_line = "Token missing"
     if last_err:
-        status_line = f"Error: {esc(last_err[:30])}"
-        
+        status_line = f"Error: {esc(str(last_err)[:60])}"
+
     cap = (
         f"<b>{G['cog']} {sc('GitHub Backup')}</b>\n"
         f"{G['div_eq']}\n"
@@ -18340,11 +18499,14 @@ def render_github_subroute(call: types.CallbackQuery, data: str) -> None:
             try:
                 res = gh_backup_now()
                 if res.get("ok"):
+                    repo_label = GH["repo"] + "@" + GH["branch"]
+                    bots_label = str(res.get("bots_synced", 0)) + "/" + str(res.get("bots_total", 0))
                     msg = (
                         f"<b>{G['ok']} GitHub Vault Sync</b>\n"
                         f"{G['div']}\n"
-                        f"{bullet('Status', '100% Synchronized')}\n"
-                        f"{bullet('Bots Synced', res.get('bots_synced', 0))}\n"
+                        f"{bullet('Repo', repo_label)}\n"
+                        f"{bullet('Users', res.get('users', 0))}\n"
+                        f"{bullet('Bots Synced', bots_label)}\n"
                         f"{bullet('Tarball', 'OK' if res.get('tar_ok') else 'Skipped (>25MB)')}\n"
                         f"{bullet('Timestamp', res.get('ts'))}\n"
                         f"{G['div']}\n<i>{sc('Your data is now safe in the Ghost-Cloud')}.</i>"
@@ -18383,9 +18545,14 @@ def render_github_subroute(call: types.CallbackQuery, data: str) -> None:
                 # instead of actually restoring). gh_restore_now() is the
                 # real function, with a matching {"ok", "error"} return shape.
                 res = gh_restore_now()
-                bot.send_message(uid,
-                    f"<b>{'OK' if res.get('ok') else G['no']} GitHub Restore</b>\n"
-                    f"{bullet('Error', res.get('error', '') or 'none')}", parse_mode="HTML")
+                if res.get("ok"):
+                    msg = (f"<b>{G['ok']} GitHub Restore</b>\n"
+                           f"{bullet('Users', res.get('users', 0))}\n"
+                           f"{bullet('Bots', res.get('bots', 0))}\n"
+                           f"{bullet('Files', res.get('files', fmt_bytes(res.get('sizeBytes', 0))))}")
+                else:
+                    msg = f"<b>{G['no']} GitHub Restore</b>\n{bullet('Error', esc(res.get('error', 'unknown')))}"
+                bot.send_message(uid, msg, parse_mode="HTML")
             except Exception as e:
                 bot.send_message(uid, f"{G['no']} {esc(e)}", parse_mode="HTML")
         threading.Thread(target=_rg, daemon=True).start(); return
@@ -19805,8 +19972,9 @@ def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None
     p_low = prompt.lower().strip()
     
     # Instant local greetings for speed
-    greetings = ["hello", "hi", "hey", "sup", "yo", "morning", "evening"]
-    if any(p_low.startswith(g) for g in greetings) or len(p_low) < 4:
+    greetings = {"hello", "hi", "hey", "sup", "yo", "morning", "evening"}
+    first_word = re.split(r"[^a-z]+", p_low, maxsplit=1)[0]
+    if (first_word in greetings and len(p_low) <= 24) or len(p_low) < 4:
         if uid is not None:
             wanted = _ai_selected_model(uid, user_plan)
             if wanted:
@@ -20061,7 +20229,7 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
     
     try:
         if not get_setting("ai_global_enabled", True):
-            ack(call, "AI Sentinel is currently offline.")
+            _ai_fix_failed(call, bot_id, "AI Sentinel is currently switched off by the administrator.")
             return
 
         # Read bot source code files for context
@@ -20070,22 +20238,12 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         target_file_path = None
         target_file_content = ""
         
-        if bot_dir.exists():
-            allowed_source_exts = {".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx"}
-            source_files = [
-                p for p in bot_dir.rglob("*")
-                if p.is_file() and p.suffix.lower() in allowed_source_exts
-                and ".deps" not in p.parts and "venv" not in p.parts and "node_modules" not in p.parts
-            ]
-            for p in source_files[:20]:
-                try:
-                    content = p.read_text(errors="ignore")
-                    source_files_summary += f"\n--- File: {p.relative_to(bot_dir)} ---\n{content[:3000]}\n"
-                    if not target_file_path or p.name.lower() in ("bot.py", "main.py", "index.py", "bot.js", "index.js"):
-                        target_file_path = p
-                        target_file_content = content
-                except Exception:
-                    pass
+        for rel, content in _bot_source_snapshot(b)[:20]:
+            p = bot_dir / rel
+            source_files_summary += f"\n--- File: {rel} ---\n{content[:3000]}\n"
+            if not target_file_path or p.name.lower() in ("bot.py", "main.py", "index.py", "bot.js", "index.js"):
+                target_file_path = p
+                target_file_content = content
         if not source_files_summary:
             source_files_summary = "No readable Python or JavaScript source files were found in the bot workspace."
 
@@ -20141,16 +20299,72 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
 
             show_text(call.message.chat.id, final_text, kb, call=call)
         else:
-            msg = "AI diagnosis is temporarily unavailable. Check the AI service configuration and try again."
-            try: bot.send_message(call.message.chat.id, msg)
-            except Exception: pass
-            ack(call, "AI diagnosis unavailable.")
-            
+            _ai_fix_failed(call, bot_id,
+                           "AI diagnosis is temporarily unavailable. Every configured AI model "
+                           "failed to answer - check My AI / the admin AI config and retry in a few minutes.")
+
     except Exception as e:
         print(f"[ai_sentinel] error: {e}", flush=True)
-        try: bot.send_message(call.message.chat.id, "AI diagnosis failed while reading the bot files or contacting the AI service. Try again after checking the bot workspace.")
+        _ai_fix_failed(call, bot_id, f"Diagnosis failed: {e}")
+
+
+def _ai_fix_failed(call: types.CallbackQuery, bot_id: str, reason: str) -> None:
+    """Replace the diagnosis progress bar with a visible error + way back."""
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn(f"{G['refresh']}  Rᴇᴛʀʏ", callback_data=f"bot_ai_fix_{bot_id}", style="primary"),
+           Btn(f"{G['back']}  Bᴏᴛ", callback_data=f"bot_view_{bot_id}", style="danger"))
+    text = (
+        f"🛡️ <b>{sc('AI Sentinel')}</b>\n{G['div_eq']}\n"
+        f"{G['no']} <b>{sc('Diagnosis unavailable')}</b>\n"
+        f"<blockquote>{esc(reason[:400])}</blockquote>{FOOTER}"
+    )
+    try:
+        show_text(call.message.chat.id, text, kb, call=call)
+    except Exception:
+        try: bot.send_message(call.message.chat.id, text, reply_markup=kb, parse_mode="HTML")
         except Exception: pass
-        ack(call, "AI diagnosis failed.")
+    ack(call, "AI diagnosis unavailable.")
+
+
+def _bot_source_snapshot(b: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Readable (rel_path, content) pairs for a bot's source files.
+
+    Running bots have their on-disk sources overwritten with a stub after
+    launch, so the encrypted uploads are decrypted in memory first; the
+    workspace is only consulted for files that are not part of the upload
+    set (e.g. files created by the in-panel editor)."""
+    allowed_source_exts = {".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx"}
+    skip_parts = {".deps", "venv", "node_modules", "__pycache__", ".tmp_run"}
+    out: List[Tuple[str, str]] = []
+    seen: set = set()
+    for f in b.get("enc_files") or []:
+        rel = str(f.get("rel_path") or f.get("filename") or "").lstrip("/")
+        if not rel or Path(rel).suffix.lower() not in allowed_source_exts:
+            continue
+        try:
+            key = KEYRING.fetch(f["key_id"])
+            if not key:
+                continue
+            content = read_encrypted(Path(f["enc_path"]), key).decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        out.append((rel, content)); seen.add(rel)
+    bot_dir = Path(b.get("dir") or "")
+    if bot_dir.exists():
+        for p in sorted(bot_dir.rglob("*")):
+            if not p.is_file() or p.suffix.lower() not in allowed_source_exts or set(p.parts) & skip_parts:
+                continue
+            rel = p.relative_to(bot_dir).as_posix()
+            if rel in seen:
+                continue
+            try:
+                content = p.read_text(errors="ignore")
+            except Exception:
+                continue
+            if content.strip() in ("", "# sandboxed"):
+                continue
+            out.append((rel, content)); seen.add(rel)
+    return out
 
 def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
     """Applies the AI-suggested patch only after explicit user confirmation."""
