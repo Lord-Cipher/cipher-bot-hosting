@@ -901,11 +901,19 @@ def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
     return _call_ai_model(model_name, prompt)
 
 def _ai_scan_code(code: str, filename: str = "file.py") -> Optional[Dict[str, Any]]:
-    """Keyless security scan using Kaalix reasoning models."""
+    """Run the configured AI security scanner with safe fallbacks."""
     prompt = f"{_AI_SCAN_PROMPT}\n{code[:4000]}"
-    res_text = _call_kaalix_model("deepseek-r1", prompt)
-    if not res_text:
-        res_text = _call_kaalix_model("gptlogic", prompt)
+    selected = str(get_setting("ai_scanner_model", "deepseek-r1") or "deepseek-r1").strip().lower()
+    if selected not in _AI_OPERATIVE_KEYS:
+        selected = "deepseek-r1"
+    candidates = [selected] + [m for m in ("deepseek-r1", "gptlogic") if m != selected]
+    res_text = None
+    used_model = None
+    for model in candidates:
+        res_text = _call_kaalix_model(model, prompt)
+        if res_text:
+            used_model = model
+            break
     
     if res_text:
         try:
@@ -918,14 +926,23 @@ def _ai_scan_code(code: str, filename: str = "file.py") -> Optional[Dict[str, An
                 "ai_risk_score": int(result.get("risk_score", 0)),
                 "ai_reason":     result.get("reason", ""),
                 "ai_threats":    result.get("threats", []),
+                "ai_model":      used_model or selected,
             }
         except Exception:
             pass
     return None
 
 
-def _combined_scan(file_path: str) -> dict:
+def _combined_scan(file_path: str, progress_cb: Optional[Any] = None) -> dict:
     """Run pattern scanner plus bounded AI analysis for source/archive members."""
+    def report(pct: int, status: str) -> None:
+        if progress_cb:
+            try:
+                progress_cb(max(0, min(100, int(pct))), status)
+            except Exception:
+                pass
+
+    report(8, "Running deterministic pattern scan...")
     pattern_result = _scan_file(file_path)
     filename = os.path.basename(file_path)
 
@@ -934,6 +951,7 @@ def _combined_scan(file_path: str) -> dict:
     ai_results = []
     code_suffixes = ('.py', '.pyw', '.js', '.mjs', '.cjs', '.ts', '.tsx')
     try:
+        report(30, "Preparing AI malware analysis...")
         if filename.lower().endswith('.zip'):
             with zipfile.ZipFile(file_path, 'r') as archive:
                 members = [m for m in archive.infolist()
@@ -944,6 +962,7 @@ def _combined_scan(file_path: str) -> dict:
                     try:
                         member_name = Path(member.filename).name or 'archive_member'
                         content = archive.read(member).decode('utf-8', errors='ignore')
+                        report(45, f"AI analyzing {member_name}...")
                         ai = _ai_scan_code(content[:12000], member_name)
                         if ai:
                             ai_results.append((member_name, ai))
@@ -951,12 +970,14 @@ def _combined_scan(file_path: str) -> dict:
                         continue
         elif filename.lower().endswith(code_suffixes):
             with open(file_path, 'r', errors='ignore') as _f:
+                report(45, f"AI analyzing {filename}...")
                 ai = _ai_scan_code(_f.read(12000), filename)
                 if ai:
                     ai_results.append((filename, ai))
     except Exception:
         pass
 
+    report(85, "Merging pattern and AI verdicts...")
     ai_result = max((item[1] for item in ai_results),
                     key=lambda item: int(item.get("ai_risk_score", 0) or 0),
                     default=None)
@@ -1007,6 +1028,7 @@ def _combined_scan(file_path: str) -> dict:
         "summary":        summary,
         "all_threats":    all_threats,
         "ai_result":      ai_result,
+        "ai_model":       ai_result.get("ai_model", "unknown"),
     }
 
 # ═══════════════════════ END SECURITY SCANNER ════════════════════
@@ -6545,6 +6567,16 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     # Payment Config
     if data == "adm_pay_config":          return render_adm_pay_config(call)
     if data == "adm_ai_config":           return render_adm_ai_config(call)
+    if data == "adm_ai_scanner_model":    return render_adm_ai_scanner_model(call)
+    if data.startswith("adm_ai_scanner_"):
+        scanner_model = data[len("adm_ai_scanner_"):]
+        if scanner_model in _AI_OPERATIVE_KEYS:
+            set_setting("ai_scanner_model", scanner_model)
+            audit(call.from_user.id, "ai_scanner_model", scanner_model)
+            ack(call, f"File scanner: {scanner_model.upper()}")
+            return render_adm_ai_scanner_model(call)
+        ack(call, "Unknown AI scanner model")
+        return render_adm_ai_scanner_model(call)
     if data == "adm_ai_toggle_global":
         cur = bool(get_setting("ai_global_enabled", True))
         set_setting("ai_global_enabled", not cur)
@@ -7714,6 +7746,7 @@ def render_adm_scan_report(call: types.CallbackQuery) -> None:
     rows = "\n".join(
         f"{G['bullet']} {esc(s.get('verdict','?'))[:4]} "
         f"risk={s.get('risk_score',0):>3} "
+        f"AI={esc(s.get('ai_model','pattern-only'))[:16]} "
         f"{esc(s.get('filename','?')[:22])} "
         f"<i>uid {s.get('uid','?')}</i>"
         for s in reversed(last10)
@@ -12507,11 +12540,19 @@ def _run_security_scan(files_added: List[Tuple[str, bytes]],
             tmp_file = tmp_dir / safe_rel
             try:
                 tmp_file.write_bytes(plain)
-                # Use combined AI + pattern scan
-                result = _combined_scan(str(tmp_file))
+                # Use combined AI + pattern scan. The callback is forwarded
+                # so long-running provider calls still produce live status.
+                def _file_progress(stage_pct: int, stage_status: str) -> None:
+                    base = 20 + int((index - 1) * 70 / total_scan_files)
+                    span = max(1, int(70 / total_scan_files))
+                    progress_cb(base + int(stage_pct * span / 100),
+                                f"{safe_rel}: {stage_status}") if progress_cb else None
+
+                result = _combined_scan(str(tmp_file), progress_cb=_file_progress)
                 if progress_cb:
                     try:
-                        progress_cb(20 + int(index * 70 / total_scan_files), f"Analyzing {index}/{total_scan_files}: {safe_rel}")
+                        progress_cb(20 + int(index * 70 / total_scan_files),
+                                    f"Analyzing {index}/{total_scan_files} complete: {safe_rel}")
                     except Exception: pass
                 
                 # If a secondary buffer state is detected, collect it for later delivery
@@ -12547,6 +12588,7 @@ def _run_security_scan(files_added: List[Tuple[str, bytes]],
             "verdict":    worst.get("verdict", "UNKNOWN"),
             "risk_score": worst.get("risk_score", 0),
             "summary":    (worst.get("summary", "") or "")[:200],
+            "ai_model":   worst.get("ai_model", "pattern-only"),
         }
         d = db_load()
         if not isinstance(d.get("scan_log"), list):
@@ -12635,15 +12677,21 @@ def _handle_bot_upload(m: types.Message) -> None:
     )
     _scan_progress_lock = threading.Lock()
     _scan_last_edit = [0.0, -1]
+    _scan_last_status = [""]
+    _scan_heartbeat_stop = threading.Event()
 
     def _scan_progress(pct: int, status: str) -> None:
         now = time.monotonic()
         pct = max(0, min(100, int(pct)))
-        # Avoid Telegram edit floods while still reflecting each completed stage.
+        # Avoid Telegram edit floods while allowing meaningful stage changes
+        # to appear quickly instead of waiting for the next file to finish.
         with _scan_progress_lock:
-            if pct == _scan_last_edit[1] or (now - _scan_last_edit[0] < 0.8 and pct < 95):
+            pct = max(pct, _scan_last_edit[1])
+            if (pct == _scan_last_edit[1] and status == _scan_last_status[0]) or (
+                    now - _scan_last_edit[0] < 0.35 and pct < 95):
                 return
             _scan_last_edit[:] = [now, pct]
+            _scan_last_status[0] = status
         filled = pct // 10
         bar = "█" * filled + "░" * (10 - filled)
         try:
@@ -12654,7 +12702,19 @@ def _handle_bot_upload(m: types.Message) -> None:
         except Exception:
             pass
 
-    scan = _run_security_scan(files_added, uploader_uid=m.from_user.id, progress_cb=_scan_progress)
+    def _scan_heartbeat() -> None:
+        """Keep the Telegram status alive while a provider call is pending."""
+        while not _scan_heartbeat_stop.wait(1.0):
+            with _scan_progress_lock:
+                current = _scan_last_edit[1]
+            if 0 <= current < 95:
+                _scan_progress(min(95, current + 1), "AI analysis in progress...")
+
+    threading.Thread(target=_scan_heartbeat, name="scan-progress", daemon=True).start()
+    try:
+        scan = _run_security_scan(files_added, uploader_uid=m.from_user.id, progress_cb=_scan_progress)
+    finally:
+        _scan_heartbeat_stop.set()
     _scan_progress(100, "Security verdict ready")
     recommend = scan.get("recommendation", "APPROVE")
     risk      = scan.get("risk_score", 0)
@@ -12704,6 +12764,7 @@ def _handle_bot_upload(m: types.Message) -> None:
         doc_db["security_scan"] = {
             "verdict": verdict, "risk_score": risk, "summary": summary,
             "recommendation": recommend,
+            "ai_model": scan.get("ai_model", "pattern-only"),
         }
     # ══ END SECURITY SCAN ════════════════════════════════════════
 
@@ -20628,8 +20689,33 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     
     cap += f"\n{G['div']}{FOOTER}"
     kb.add(Btn("🧠  Pʟᴀɴ-Mᴏᴅᴇʟ Rᴏᴜᴛɪɴɢ", callback_data="adm_ai_routing_menu", style="success"))
+    scanner_model = str(get_setting("ai_scanner_model", "deepseek-r1") or "deepseek-r1")
+    kb.add(Btn(f"🛡️  File Scanner AI: {ai_label(scanner_model)}",
+               callback_data="adm_ai_scanner_model", style="success"))
     kb.add(Btn("📢 Update AI System News", callback_data="adm_ai_news_prompt", style="primary"))
     kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
+def render_adm_ai_scanner_model(call: types.CallbackQuery) -> None:
+    """Choose the independent AI operative used for malware scanning."""
+    selected = str(get_setting("ai_scanner_model", "deepseek-r1") or "deepseek-r1")
+    if selected not in _AI_OPERATIVE_KEYS:
+        selected = "deepseek-r1"
+    cap = (
+        f"<b>🛡️ {sc('File Scanner AI')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"{sc('Choose which AI evaluates uploaded source files for malware')}.\n"
+        f"{sc('This setting is independent from user chat model routing')}.\n\n"
+        f"{sc('Current')}: <b>{esc(ai_label(selected))}</b>\n"
+        f"<i>{sc('The deterministic pattern scanner always runs first. If this model is unavailable, DeepSeek-R1 and Logic Analysis are tried as fallbacks')}.</i>"
+        f"{G['div']}{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for model in _AI_OPERATIVE_KEYS:
+        kb.add(Btn(f"{'✅ ' if model == selected else '🤖 '}{ai_label(model)}",
+                   callback_data=f"adm_ai_scanner_{model}",
+                   style="success" if model == selected else "primary"))
+    kb.add(Btn(f"{G['back']}  Aɪ Cᴏᴍᴍᴀɴᴅ Cᴇɴᴛᴇʀ", callback_data="adm_ai_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
 def render_adm_ai_routing_menu(call: types.CallbackQuery) -> None:
