@@ -12582,15 +12582,18 @@ def _run_security_scan(files_added: List[Tuple[str, bytes]],
                 # Use combined AI + pattern scan. The callback is forwarded
                 # so long-running provider calls still produce live status.
                 def _file_progress(stage_pct: int, stage_status: str) -> None:
-                    base = 20 + int((index - 1) * 70 / total_scan_files)
-                    span = max(1, int(70 / total_scan_files))
+                    # 10-90% is reserved for actual file work. The final
+                    # 10% is intentionally reserved for verdict/logging and
+                    # must not be skipped by a fast scan.
+                    base = 10 + int((index - 1) * 80 / total_scan_files)
+                    span = max(1, int(80 / total_scan_files))
                     progress_cb(base + int(stage_pct * span / 100),
                                 f"{safe_rel}: {stage_status}") if progress_cb else None
 
                 result = _combined_scan(str(tmp_file), progress_cb=_file_progress)
                 if progress_cb:
                     try:
-                        progress_cb(20 + int(index * 70 / total_scan_files),
+                        progress_cb(10 + int(index * 80 / total_scan_files),
                                     f"Analyzing {index}/{total_scan_files} complete: {safe_rel}")
                     except Exception: pass
                 
@@ -12755,6 +12758,10 @@ def _handle_bot_upload(m: types.Message) -> None:
     finally:
         _scan_heartbeat_stop.set()
     _scan_progress(100, "Security verdict ready")
+    # Telegram edits are asynchronous from the user's perspective. Keep the
+    # completed state visible briefly so the bar cannot appear to jump from a
+    # throttled intermediate value straight to a deleted message.
+    time.sleep(0.75)
     recommend = scan.get("recommendation", "APPROVE")
     risk      = scan.get("risk_score", 0)
     verdict   = scan.get("verdict", "SAFE")
