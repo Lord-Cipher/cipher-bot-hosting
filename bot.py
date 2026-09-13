@@ -9741,10 +9741,17 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
             "ts": time.time()
         }
 
-    running_bots = [(bid, info) for bid, info in RUNNING.items()
-                    if info["proc"].poll() is None]
-    crashed_bots = [(bid, info) for bid, info in RUNNING.items()
-                    if info["proc"].poll() is not None]
+    def _is_running(info: Dict[str, Any]) -> bool:
+        if info.get("remote"):
+            return info.get("node_status", "ONLINE") in {"ONLINE", "AUTHENTICATED"}
+        proc = info.get("proc")
+        try:
+            return bool(proc and proc.poll() is None)
+        except Exception:
+            return False
+
+    running_bots = [(bid, info) for bid, info in RUNNING.items() if _is_running(info)]
+    crashed_bots = [(bid, info) for bid, info in RUNNING.items() if not _is_running(info)]
     total_child_ram = 0
     total_child_cpu = 0.0
     for bid, info in running_bots:
@@ -9811,11 +9818,15 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
 def render_adm_monitor_bots(call: types.CallbackQuery) -> None:
     rows: List[str] = []
     for bid, info in list(RUNNING.items())[:20]:
-        rc = info["proc"].poll()
+        proc = info.get("proc")
+        try:
+            rc = proc.poll() if proc else None
+        except Exception:
+            rc = -1
         is_running = rc is None
         b = find_bot(bid)
         name = (b.get("name","?") if b else bid)[:20]
-        pid  = info["proc"].pid
+        pid  = getattr(proc, "pid", "remote")
         rss  = 0
         cpu  = 0.0
         if is_running:
@@ -19352,6 +19363,9 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_ai_fix_"):     action_bot_ai_fix(call, data.split("_", 3)[3]); return
     if data.startswith("bot_applyfix_"): action_bot_apply_fix(call, data.split("_", 2)[2]); return
     if data.startswith("bot_pip_"):         start_pip_install_flow(call, data.split("_", 2)[2]); return
+    if data == "adm_monitor_refresh":       render_adm_live_monitor(call); return
+    if data == "adm_monitor_bots":          render_adm_monitor_bots(call); return
+    if data == "adm_monitor_system":        render_adm_monitor_system(call); return
     if data.startswith("pkg_quick_"):
         parts = data.split("_", 3)
         if len(parts) >= 4: action_pkg_quick_install(call, parts[2], parts[3]); return
@@ -19967,8 +19981,8 @@ def _telemetry_loop():
                         render_bot_view(mock_call, sess["bot_id"], _live_refresh=True)
                     elif sess["type"] == "adm_monitor":
                         render_adm_live_monitor(mock_call)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[telemetry] live UI refresh failed for chat {chat_id}: {e}", flush=True)
                     
         except Exception as e:
             print(f"[telemetry] error: {e}", flush=True)
