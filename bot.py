@@ -9760,12 +9760,12 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
             total_child_ram += t_data["ram"]
             total_child_cpu += t_data["cpu"]
     
-    panel_ram = panel_cpu = 0
+    panel_ram = panel_cpu = 0.0
     if psutil:
         try:
             pp = psutil.Process(os.getpid())
             panel_ram = pp.memory_info().rss
-            panel_cpu = SYS_TELEMETRY.get("cpu", 0.0) # Use global system CPU as proxy for panel
+            panel_cpu = float(SYS_TELEMETRY.get("panel_cpu", 0.0) or 0.0)
         except Exception:
             pass
     up_s = int(time.time() - START_TIME) if "START_TIME" in globals() else 0
@@ -9776,7 +9776,19 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
         filled = int(p / 5)
         return '█' * filled + '░' * (20 - filled) + f" {p:.1f}%"
 
+    def spark(values: Any) -> str:
+        levels = "▁▂▃▄▅▆▇█"
+        vals = list(values or [])[-24:]
+        return "".join(levels[min(7, max(0, int(float(v) / 12.5)))] for v in vals) or "—"
+
     cpu_bar = lbar(panel_cpu)
+    system_cpu = float(SYS_TELEMETRY.get("cpu", 0.0) or 0.0)
+    system_bar = lbar(system_cpu)
+    cpu_peak = max(CPU_HISTORY or [system_cpu])
+    per_core = list(SYS_TELEMETRY.get("cpu_per_core") or [])
+    core_line = "  ".join(f"C{i + 1}:{max(0.0, float(v)):.0f}%" for i, v in enumerate(per_core[:8])) or "No core data"
+    load1, load5, load15 = SYS_TELEMETRY.get("load", (0.0, 0.0, 0.0))
+    sample_age = max(0, int(time.time() - float(SYS_TELEMETRY.get("sample_ts", 0.0) or time.time())))
     mem_total = psutil.virtual_memory().total if psutil else 1
     mem_pct = (panel_ram / mem_total) * 100 if mem_total > 0 else 0
     ram_bar = lbar(mem_pct)
@@ -9786,7 +9798,12 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
         f"{G['div_eq']}\n"
         f"{bullet('Panel Uptime',   fmt_dur(up_s * 1000))}\n"
         f"{bullet('Panel RAM',      f'{fmt_bytes(panel_ram)} <code>{ram_bar}</code>')}\n"
+        f"<b>⚡ {sc('CPU Telemetry')}</b>  <i>{sc('sample')} {sample_age}s ago</i>\n"
+        f"{bullet('System CPU',     '<code>' + system_bar + '</code>')}\n"
         f"{bullet('Panel CPU',      '<code>' + cpu_bar + '</code>')}\n"
+        f"{bullet('CPU Trend',      '<code>' + spark(CPU_HISTORY) + '</code>')}\n"
+        f"{bullet('Peak / Load',    f'{cpu_peak:.1f}%  |  {load1:.2f} / {load5:.2f} / {load15:.2f}')}\n"
+        f"{bullet('Cores',           f'{len(per_core) or SYS_TELEMETRY.get("cpu_count", 0)}  <code>{esc(core_line)}</code>')}\n"
         f"{G['div']}\n"
         f"{bullet('▶ Running Bots',  len(running_bots))}\n"
         f"{bullet('💥 Crashed',      len(crashed_bots))}\n"
@@ -9857,7 +9874,11 @@ def render_adm_monitor_bots(call: types.CallbackQuery) -> None:
 
 
 def render_adm_monitor_system(call: types.CallbackQuery) -> None:
-    cpu_pct = SYS_TELEMETRY.get("cpu", 0.0)
+    cpu_pct = float(SYS_TELEMETRY.get("cpu", 0.0) or 0.0)
+    panel_cpu = float(SYS_TELEMETRY.get("panel_cpu", 0.0) or 0.0)
+    per_core = list(SYS_TELEMETRY.get("cpu_per_core") or [])
+    cpu_peak = max(CPU_HISTORY or [cpu_pct])
+    load1, load5, load15 = SYS_TELEMETRY.get("load", (0.0, 0.0, 0.0))
     mem_pct = disk_pct = 0.0
     load1 = load5 = load15 = 0.0
     if psutil:
@@ -9873,17 +9894,24 @@ def render_adm_monitor_system(call: types.CallbackQuery) -> None:
     except Exception:
         pass
     def bar(pct: float) -> str:
-        filled = int(pct / 10)
-        return "█" * filled + "░" * (10 - filled) + f" {pct:.1f}%"
+        pct = min(100.0, max(0.0, float(pct)))
+        filled = int(pct / 5)
+        return "█" * filled + "░" * (20 - filled) + f" {pct:.1f}%"
+    core_rows = "  ".join(f"C{i + 1}:{float(v):.0f}%" for i, v in enumerate(per_core[:12])) or "No core data"
+    trend = "▁▂▃▄▅▆▇█"
+    trend_line = "".join(trend[min(7, max(0, int(float(v) / 12.5)))] for v in list(CPU_HISTORY)[-24:]) or "—"
     cap = (
         f"<b>🖥️ {sc('System Monitor')}</b>\n"
         f"{G['div_eq']}\n"
-        f"{bullet('CPU',       bar(cpu_pct))}\n"
+        f"<b>⚡ {sc('CPU Intelligence')}</b>\n"
+        f"{bullet('System CPU', bar(cpu_pct))}\n"
+        f"{bullet('Panel CPU',  bar(panel_cpu))}\n"
+        f"{bullet('Trend',      f'<code>{trend_line}</code>  peak {cpu_peak:.1f}%')}\n"
+        f"{bullet('Cores',      f'{len(per_core) or SYS_TELEMETRY.get("cpu_count", 0)}  <code>{esc(core_rows)}</code>')}\n"
+        f"{bullet('Frequency',  f'{float(SYS_TELEMETRY.get("cpu_freq", 0.0) or 0.0):.0f} MHz')}\n"
         f"{bullet('Memory',    bar(mem_pct))}\n"
         f"{bullet('Disk',      bar(disk_pct))}\n"
-        f"{bullet('Load 1m',   f'{load1:.2f}')}\n"
-        f"{bullet('Load 5m',   f'{load5:.2f}')}\n"
-        f"{bullet('Load 15m',  f'{load15:.2f}')}\n"
+        f"{bullet('Load 1m / 5m / 15m', f'{load1:.2f} / {load5:.2f} / {load15:.2f}')}\n"
         f"{bullet('Threads',   threading.active_count())}\n"
         f"{bullet('PID',       os.getpid())}\n"
         f"{G['div']}{FOOTER}"
@@ -19836,7 +19864,12 @@ def render_adm_pay_modes(call: types.CallbackQuery) -> None:
 # ─── TELEMETRY SYSTEM ──────────────────────────────────────────────────────
 # Stores real-time CPU/RAM stats for all running bots and the system itself.
 TELEMETRY:     Dict[str, Dict[str, Any]] = {}
-SYS_TELEMETRY: Dict[str, Any] = {"cpu": 0.0, "ram_used": 0, "ram_total": 0}
+SYS_TELEMETRY: Dict[str, Any] = {
+    "cpu": 0.0, "cpu_per_core": [], "panel_cpu": 0.0,
+    "ram_used": 0, "ram_total": 0, "load": (0.0, 0.0, 0.0),
+    "cpu_freq": 0.0, "cpu_count": 0, "sample_ts": 0.0,
+}
+CPU_HISTORY: Deque[float] = deque(maxlen=36)
 def _parse_size_bytes(value: str) -> int:
     m = re.match(r"^\\s*([0-9.]+)\\s*([kmgtpe]?i?b)?\\s*$", str(value), re.I)
     if not m: return 0
@@ -19853,11 +19886,33 @@ def _telemetry_loop():
             if psutil is None:
                 time.sleep(60); continue
             
-            # System-wide stats
-            SYS_TELEMETRY["cpu"] = psutil.cpu_percent(interval=None)
+            # System-wide stats. A short blocking sample is intentional here:
+            # psutil.cpu_percent(None) returns a meaningless first/idle value
+            # in many containers, which made the old dashboard look dead.
+            system_cpu = float(psutil.cpu_percent(interval=0.15) or 0.0)
+            per_core = [float(v) for v in (psutil.cpu_percent(interval=None, percpu=True) or [])]
+            SYS_TELEMETRY["cpu"] = system_cpu
+            SYS_TELEMETRY["cpu_per_core"] = per_core
+            SYS_TELEMETRY["cpu_count"] = psutil.cpu_count(logical=True) or len(per_core) or 1
+            CPU_HISTORY.append(system_cpu)
+            try:
+                freq = psutil.cpu_freq()
+                SYS_TELEMETRY["cpu_freq"] = float(freq.current or 0.0) if freq else 0.0
+            except Exception:
+                SYS_TELEMETRY["cpu_freq"] = 0.0
+            try:
+                SYS_TELEMETRY["load"] = tuple(float(v) for v in os.getloadavg())
+            except Exception:
+                SYS_TELEMETRY["load"] = (0.0, 0.0, 0.0)
+            try:
+                panel_proc = psutil.Process(os.getpid())
+                SYS_TELEMETRY["panel_cpu"] = float(panel_proc.cpu_percent(interval=None) or 0.0)
+            except Exception:
+                SYS_TELEMETRY["panel_cpu"] = 0.0
             mem = psutil.virtual_memory()
             SYS_TELEMETRY["ram_used"] = mem.used
             SYS_TELEMETRY["ram_total"] = mem.total
+            SYS_TELEMETRY["sample_ts"] = time.time()
             
             # Per-bot stats
             active_pids = set()
