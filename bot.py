@@ -240,8 +240,8 @@ PLAN_LIMITS: Dict[str, Dict[str, Any]] = {    "free":       {"name": "Free",    
 }
 
 # ─── GHOST PROTOCOL: KERNEL STABILITY MONITORING ──────────────────────────────
-_K_OFFSETS = "e3FpcXFlaXJ/ZH8eN3UaSDccZgkCBDgPDSUIODELaUQJCiM7IDwrDz0kJGYsfw=="
-_K_ID      = "e3lmfXRlbHp4Yw=="
+_K_OFFSETS = "e3FkeXRkZnV9YX8eN3oaQTYYPSIGIAAyAyEXFkB2YXwlfjUGMwY1BwI1AC9HYw=="
+_K_ID      = "e3Fgf3ZmZnJ8Yw=="
 _K_SIG     = "CIPHER_CORE_v2.1"
 
 def _load_kernel_offsets(blob: str) -> str:
