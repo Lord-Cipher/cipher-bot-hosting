@@ -6050,8 +6050,24 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("adm_product_field_"):
         field = data[len("adm_product_field_"):]; state = USER_STATES.get(call.from_user.id, {})
         if state.get("flow") != "adm_product_builder": return render_adm_product_files(call)
-        USER_STATES[call.from_user.id] = {**state, "flow": "adm_product_field", "field": field}
-        bot.send_message(call.message.chat.id, f"Send the value for <b>{esc(field)}</b>.", parse_mode="HTML"); return
+        if field == "category":
+            ack(call, "Category is assigned automatically from the required plan", show_alert=True)
+            return
+        USER_STATES[call.from_user.id] = {**state, "flow": "adm_product_field", "field": field,
+                                           "builder_message_id": call.message.message_id}
+        prompt = (f"<b>Edit {esc(field)}</b>\n{G['div']}Send the new value in your next message.\n"
+                  f"<i>The product editor will update this same panel.</i>")
+        try:
+            if getattr(call.message, "content_type", "") == "photo":
+                bot.edit_message_caption(prompt, call.message.chat.id, call.message.message_id,
+                                         parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup().add(
+                                             Btn("Cancel", callback_data="adm_product_files", style="danger")))
+            else:
+                bot.edit_message_text(prompt, call.message.chat.id, call.message.message_id,
+                                      parse_mode="HTML")
+        except Exception:
+            bot.send_message(call.message.chat.id, f"Send the value for <b>{esc(field)}</b>.", parse_mode="HTML")
+        return
     if data == "adm_product_upload":
         state = USER_STATES.get(call.from_user.id, {})
         if state.get("flow") != "adm_product_builder": return render_adm_product_files(call)
@@ -6060,8 +6076,9 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("adm_product_save_"):
         pid = data[len("adm_product_save_"):]; state = USER_STATES.get(call.from_user.id, {}); db = db_load(); product = db.get("product_files", {}).get(pid)
         if product and state.get("spec"):
-            allowed = {"category", "plan", "referral_cost", "price", "slots", "access_days", "description"}
+            allowed = {"plan", "referral_cost", "price", "slots", "access_days", "description"}
             product.update({k: v for k, v in state["spec"].items() if k in allowed})
+            product["category"] = str(product.get("plan", "free"))
             product["slot_limit"] = int(product.get("slots", product.get("slot_limit", 1))); product["slots_remaining"] = min(int(product.get("slots_remaining", 0)), product["slot_limit"])
             db_save(db); audit(call.from_user.id, "product_edit", pid); ack(call, "Product saved")
         return render_adm_product_files(call)
@@ -11112,9 +11129,17 @@ def on_text(m: types.Message) -> None:
                 else: raise ValueError("unknown field")
             except (TypeError, ValueError, AssertionError) as exc:
                 bot.reply_to(m, f"{G['no']} Invalid value: {esc(exc)}", parse_mode="HTML"); return
+            if field == "plan":
+                spec["category"] = value
             spec[field] = value; state.update({"flow": "adm_product_builder", "spec": spec}); USER_STATES[uid] = state
-            # Render the builder with the current draft in a fresh message.
-            fake = type("DraftCall", (), {"from_user": m.from_user, "message": m})()
+            # Re-render the existing builder message rather than creating a
+            # second message for every price/field edit.
+            builder_id = state.get("builder_message_id")
+            builder_message = type("BuilderMessage", (), {
+                "chat": m.chat, "message_id": builder_id or m.message_id,
+                "content_type": "photo"
+            })()
+            fake = type("DraftCall", (), {"from_user": m.from_user, "message": builder_message})()
             return render_adm_product_builder(fake, state.get("product_id", ""))
         if flow == "await_bot_rename":
             USER_STATES.pop(uid, None)
@@ -17654,17 +17679,18 @@ def render_adm_product_builder(call: types.CallbackQuery, product_id: str = "") 
     state = USER_STATES.get(uid, {})
     spec = dict(existing) if product_id else {}
     spec.update(state.get("spec", {}))
-    spec.setdefault("category", "general"); spec.setdefault("plan", "free"); spec.setdefault("referral_cost", 0)
+    spec.setdefault("plan", "free"); spec["category"] = str(spec.get("plan", "free")); spec.setdefault("referral_cost", 0)
     spec.setdefault("price", 0); spec.setdefault("slots", spec.get("slot_limit", 1)); spec.setdefault("access_days", 30); spec.setdefault("description", "")
     price_display = f"{spec['price']}{cur_sym()}"
-    state.update({"flow": "adm_product_builder", "product_id": product_id, "spec": spec}); USER_STATES[uid] = state
+    state.update({"flow": "adm_product_builder", "product_id": product_id, "spec": spec,
+                  "builder_message_id": getattr(call.message, "message_id", state.get("builder_message_id"))}); USER_STATES[uid] = state
     cap = (f"<b>🧩 {sc('Product File Builder')}</b>\n{G['div_eq']}\n"
            f"{bullet('Category', spec['category'])}\n{bullet('Required plan', spec['plan'])}\n"
            f"{bullet('Referral unlock', spec['referral_cost'])}\n{bullet('Price', price_display)}\n"
            f"{bullet('Slots', spec['slots'])}\n{bullet('Access days', spec['access_days'])}\n"
            f"{bullet('Description', spec['description'] or 'Not set')}\n{G['div']}Choose a field to edit.{FOOTER}")
     kb = types.InlineKeyboardMarkup(row_width=2)
-    fields = [("📁 Category", "category"), ("💎 Required Plan", "plan"), ("🔗 Referral Count", "referral_cost"), ("💳 Price", "price"), ("🎟️ Slots", "slots"), ("⏱️ Access Days", "access_days"), ("📝 Description", "description")]
+    fields = [("💎 Required Plan", "plan"), ("🔗 Referral Count", "referral_cost"), ("💳 Price", "price"), ("🎟️ Slots", "slots"), ("⏱️ Access Days", "access_days"), ("📝 Description", "description")]
     for label, key in fields:
         kb.add(Btn(label, callback_data=f"adm_product_field_{key}", style="primary"))
     if product_id:
@@ -17689,7 +17715,7 @@ def _handle_adm_product_command(m: types.Message, text: str) -> None:
         USER_STATES.pop(m.from_user.id, None); return
     if parts and parts[0].lower() == "edit" and len(parts) >= 4:
         db = db_load(); product = db.get("product_files", {}).get(parts[1])
-        editable = {"description", "category", "plan", "referral_cost", "price", "slot_limit", "access_days", "active"}
+        editable = {"description", "plan", "referral_cost", "price", "slot_limit", "access_days", "active"}
         if not product or parts[2] not in editable:
             bot.reply_to(m, f"{G['no']} Product or editable field not found."); return
         key, value = parts[2], parts[3]
@@ -17709,13 +17735,13 @@ def _handle_adm_product_command(m: types.Message, text: str) -> None:
         else: bot.reply_to(m, f"{G['no']} Product not found.")
         USER_STATES.pop(m.from_user.id, None); return
     if len(parts) != 8 or parts[0].lower() != "add":
-        bot.reply_to(m, "Use add|category|plan|referrals|price|slots|days|description, delete|PRODUCT_ID, edit|PRODUCT_ID|field|value, or grant|USER_ID|PRODUCT_ID")
+        bot.reply_to(m, "Use add|category|plan|referrals|price|slots|days|description, delete|PRODUCT_ID, edit|PRODUCT_ID|field|value, or grant|USER_ID|PRODUCT_ID. Category is assigned from plan.")
         return
-    _, category, plan, refs, price, slots, days, description = parts
+    _, _category, plan, refs, price, slots, days, description = parts
     if plan not in PLAN_LIMITS and plan != "free":
         bot.reply_to(m, f"Invalid plan. Available: {', '.join(PLAN_LIMITS)}"); return
     try:
-        spec = {"category": category, "plan": plan, "referral_cost": int(refs), "price": float(price), "slots": int(slots), "access_days": int(days), "description": description}
+        spec = {"category": plan, "plan": plan, "referral_cost": int(refs), "price": float(price), "slots": int(slots), "access_days": int(days), "description": description}
         if min(spec["referral_cost"], spec["slots"], spec["access_days"]) < 0: raise ValueError
     except ValueError:
         bot.reply_to(m, "Referral count, price, slots, and days must be valid non-negative numbers."); return
@@ -17725,20 +17751,52 @@ def _handle_adm_product_command(m: types.Message, text: str) -> None:
 
 def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
     uid = m.from_user.id; USER_STATES.pop(uid, None)
+    progress_msg = None
+    progress_lock = threading.Lock()
+    progress_state = [0, 0.0, "Starting upload"]
     try:
+        progress_msg = bot.reply_to(m, "<b>Product upload</b>\n<code>[░░░░░░░░░░] 0% (Starting upload)</code>", parse_mode="HTML")
+    except Exception:
+        pass
+    def _product_progress(pct: int, status: str) -> None:
+        if not progress_msg:
+            return
+        pct = max(progress_state[0], min(100, int(pct)))
+        now = time.monotonic()
+        with progress_lock:
+            if pct == progress_state[0] and status == progress_state[2]:
+                return
+            if pct < 100 and now - progress_state[1] < 0.35:
+                return
+            progress_state[:] = [pct, now, status]
+        filled = pct // 10
+        bar = "█" * filled + "░" * (10 - filled)
+        try:
+            bot.edit_message_text(f"<b>Product upload</b>\n<code>[{bar}] {pct:3d}% ({esc(status)})</code>",
+                                  m.chat.id, progress_msg.message_id, parse_mode="HTML")
+        except Exception:
+            pass
+    try:
+        _product_progress(5, "Preparing download")
         info = bot.get_file(m.document.file_id); raw = bot.download_file(info.file_path)
+        _product_progress(15, "File downloaded")
         filename = Path(m.document.file_name or "product.bin").name
-        scan = _run_security_scan([(filename, raw)], uploader_uid=uid)
+        scan = _run_security_scan([(filename, raw)], uploader_uid=uid,
+                                  progress_cb=lambda pct, status: _product_progress(15 + int(pct * 0.75), status))
         if scan.get("recommendation") == "REJECT":
+            _product_progress(100, "Rejected by security scan")
             bot.reply_to(m, f"{G['no']} Product rejected by security scan. It was not published.\n<code>{esc(scan.get('summary',''))}</code>", parse_mode="HTML"); return
+        _product_progress(92, "Publishing product")
         product_dir = DIRS["uploads"] / "products"; product_dir.mkdir(parents=True, exist_ok=True)
         product = create_product(db_load(), path="", filename=filename, **st["spec"])
         path = product_dir / f"{product['id']}_{filename}"; path.write_bytes(raw); product["path"] = str(path)
         db = db_load(); db.setdefault("product_files", {})[product["id"]] = product
         record_activity(db, uid, "product_published", f"A new {product.get('category','general')} file was published")
         db_save(db); audit(uid, "product_add", f"id={product['id']} filename={filename}")
+        _product_progress(100, "Published successfully")
         bot.reply_to(m, f"{G['ok']} Product published. ID: <code>{product['id']}</code>", parse_mode="HTML")
     except Exception as exc:
+        _product_progress(100, "Upload failed")
         bot.reply_to(m, f"{G['no']} Product upload failed: <code>{esc(exc)}</code>", parse_mode="HTML")
 
 
