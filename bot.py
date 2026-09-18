@@ -2345,15 +2345,27 @@ def _oxapay_webhook_listener() -> Any:
         if status in {"paid", "pay", "completed", "success"}:
             try:
                 uid = int(uid_str)
-                # Extract plan from order_id (format: plan_uid_timestamp)
-                plan_key = order_id.split("_")[0] if "_" in order_id else "pro"
-                
-                # Grant the plan
-                grant_plan(uid, plan_key)
-                log_notification("PAYMENT", f"OxaPay auto-payment successful for UID {uid} (Plan: {plan_key})", uid=uid)
-                
-                # Send elite receipt
-                send_elite_receipt(uid, str(track_id), plan_key)
+                # Product orders use product_<product_id>_<uid>_<timestamp>.
+                if str(order_id).startswith("product_"):
+                    product_id = str(order_id).split("_")[1]
+                    db = db_load(); product = db.get("product_files", {}).get(product_id)
+                    user = db.get("users", {}).get(str(uid), {})
+                    if not product:
+                        raise ValueError("product not found")
+                    ok, reason, granted = product_access(db, uid, product_id, plan_active=lambda _plan: True, purchase=True)
+                    if not ok:
+                        raise ValueError(reason)
+                    user.setdefault("product_access", {})[product_id] = granted["buyers"][str(uid)]
+                    db_save(db)
+                    log_notification("PAYMENT", f"OxaPay product purchase successful for UID {uid} (Product: {product_id})", uid=uid)
+                    bot.send_message(uid, f"{G['ok']} Payment confirmed. Your file is now unlocked.")
+                    _send_product_file(uid, product)
+                else:
+                    # Extract plan from order_id (format: plan_uid_timestamp)
+                    plan_key = order_id.split("_")[0] if "_" in order_id else "pro"
+                    grant_plan(uid, plan_key)
+                    log_notification("PAYMENT", f"OxaPay auto-payment successful for UID {uid} (Plan: {plan_key})", uid=uid)
+                    send_elite_receipt(uid, str(track_id), plan_key)
                 
                 _flush_map_buffer(uid)
                 return "OK", 200
@@ -2713,10 +2725,9 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f"Pʀᴏꜰɪʟᴇ",      callback_data="menu_profile",  style="primary"),
     )
     kb.add(
-        Btn("📦  Fɪʟᴇ Cᴀᴛᴀʟᴏɢ", callback_data="menu_products", style="primary"),
-        Btn("🏆  Aᴄʜɪᴇᴠᴇᴍᴇɴᴛꜱ", callback_data="menu_achievements", style="primary"),
+        Btn("Fɪʟᴇ Cᴀᴛᴀʟᴏɢ", callback_data="menu_products", style="primary"),
+        Btn("Aᴄʜɪᴇᴠᴇᴍᴇɴᴛꜱ", callback_data="menu_achievements", style="primary"),
     )
-    kb.add(Btn("🌍  Pᴜʙʟɪᴄ Aᴄᴛɪᴠɪᴛʏ", callback_data="menu_activity", style="primary"))
     kb.add(
         Btn(f" Wᴀʟʟᴇᴛ",     callback_data="menu_wallet",   style="success"),
         Btn(f"Tɪᴄᴋᴇᴛꜱ",    callback_data="menu_tickets",  style="success"),
@@ -5319,9 +5330,9 @@ def expiry_reminders() -> None:
 # 15. CALLBACK / HANDLER  COMMON HELPERS
 # ═════════════════════════════════════════════════════════════════
 
-def ack(call: types.CallbackQuery, text: str = "") -> None:
+def ack(call: types.CallbackQuery, text: str = "", show_alert: bool = False) -> None:
     try:
-        bot.answer_callback_query(call.id, text=text)
+        bot.answer_callback_query(call.id, text=text, show_alert=show_alert)
     except Exception as e:
         # answer_callback_query fails after ~15s or on a stale/duplicate
         # query id — that's expected and fine to ignore. But this used to
@@ -17542,10 +17553,10 @@ def render_products(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
     d = db_load(); products = [p for p in d.get("product_files", {}).values() if p.get("active")]
     if not products:
-        cap = f"<b>📦 {sc('Product Files')}</b>\n{G['div_eq']}\n<i>{sc('No files are available yet')}</i>{FOOTER}"
+        cap = f"<b>{sc('Product Files')}</b>\n{G['div_eq']}\n<i>{sc('No files are available yet')}</i>{FOOTER}"
         show_menu(call.message.chat.id, PHOTOS["main"], cap, _adm_back("menu_main"), call=call); return
     rows = "\n".join(f"{G['bullet']} <b>{esc(p.get('filename','file'))}</b> — {esc(p.get('category','general'))} — {p.get('slots_remaining', 0)} slots" for p in products[:30])
-    cap = f"<b>📦 {sc('Product Files')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Choose a file to view its description and access options.{FOOTER}"
+    cap = f"<b>{sc('Product Files')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Choose a file to view its description and access options.{FOOTER}"
     kb = types.InlineKeyboardMarkup(row_width=1)
     for p in products[:30]:
         kb.add(Btn(f"📄 {p.get('filename','file')[:35]}", callback_data=f"product_view_{p['id']}", style="primary"))
@@ -17591,10 +17602,27 @@ def action_product_referral(call: types.CallbackQuery, product_id: str) -> None:
 def action_product_purchase(call: types.CallbackQuery, product_id: str) -> None:
     p = db_load().get("product_files", {}).get(product_id)
     if not p: ack(call, "Product unavailable"); return
+    if not OXAPAY_KEY:
+        ack(call, "Automatic payments are not configured", show_alert=True); return
+    amount = float(p.get("price", 0) or 0)
+    if amount <= 0:
+        ack(call, "This file has no purchase price; use the referral unlock", show_alert=True); return
+    currency_code = str(get_setting("payment_currency", "USD") or "USD").upper()
+    ack(call, "Generating payment invoice...")
     try:
-        bot.send_message(OWNER_ID, f"🛒 Purchase request: user <code>{call.from_user.id}</code> requested <b>{esc(p.get('filename','file'))}</b> ({p.get('price',0)}{cur_sym()})", parse_mode="HTML")
-    except Exception: pass
-    ack(call, "Purchase request sent to admin", show_alert=True)
+        pay_url, track_id, error, usd_price = _create_oxapay_invoice(amount, currency_code, call.from_user.id, f"product_{product_id}")
+        if not pay_url or not track_id:
+            ack(call, error or "Could not create invoice", show_alert=True); return
+        cap = (f"<b>Automatic File Payment</b>\n{G['div_eq']}\n"
+               f"{bullet('File', p.get('filename', 'file'))}\n"
+               f"{bullet('Price', f'{amount:g}{cur_sym()} {currency_code} (~${usd_price:.2f})')}\n"
+               f"{G['div']}After payment confirmation, the file will be unlocked automatically.{FOOTER}")
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(Btn("Pay with OxaPay", url=pay_url, style="success"))
+        kb.add(Btn("Back to File", callback_data=f"product_view_{product_id}", style="danger"))
+        show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
+    except Exception as exc:
+        ack(call, f"Invoice error: {str(exc)[:120]}", show_alert=True)
 
 
 def render_achievements(call: types.CallbackQuery) -> None:
@@ -17602,14 +17630,7 @@ def render_achievements(call: types.CallbackQuery) -> None:
     unlocked = set(u.get("achievements", [])); rows = []
     for key, (name, desc, xp) in __import__("community_products").DEFAULT_ACHIEVEMENTS.items():
         rows.append(f"{'🏆' if key in unlocked else '▫️'} <b>{name}</b> — {desc} (+{xp} XP)")
-    cap = f"<b>🏆 {sc('Achievements')}</b>\n{G['div_eq']}\n{bullet('Level', developer_level(u.get('xp', 0)))}\n{bullet('XP', u.get('xp', 0))}\n{G['div']}\n" + "\n".join(rows) + FOOTER
-    show_menu(call.message.chat.id, PHOTOS["main"], cap, _adm_back("menu_main"), call=call)
-
-
-def render_activity_feed(call: types.CallbackQuery) -> None:
-    events = [e for e in db_load().get("activity_feed", []) if e.get("public")][-20:]
-    rows = "\n".join(f"• {esc(e.get('message',''))} — <i>{esc(str(e.get('ts',''))[:16])}</i>" for e in reversed(events)) or f"<i>{sc('No public activity yet')}</i>"
-    cap = f"<b>🌍 {sc('Public Activity')}</b>\n{G['div_eq']}\n{rows}{FOOTER}"
+    cap = f"<b>{sc('Achievements')}</b>\n{G['div_eq']}\n{bullet('Level', developer_level(u.get('xp', 0)))}\n{bullet('XP', u.get('xp', 0))}\n{G['div']}\n" + "\n".join(rows) + FOOTER
     show_menu(call.message.chat.id, PHOTOS["main"], cap, _adm_back("menu_main"), call=call)
 
 
@@ -19679,7 +19700,6 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_referral": render_referral(call); return
     if data == "menu_products": render_products(call); return
     if data == "menu_achievements": render_achievements(call); return
-    if data == "menu_activity": render_activity_feed(call); return
     if data.startswith("product_view_"): render_product_view(call, data[len("product_view_"):]); return
     if data.startswith("product_ref_"): action_product_referral(call, data[len("product_ref_"):]); return
     if data.startswith("product_buy_"): action_product_purchase(call, data[len("product_buy_"):]); return
