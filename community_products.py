@@ -122,7 +122,10 @@ def product_access(db: Dict[str, Any], uid: int, product_id: str, *, plan_active
         return False, "Product is unavailable", None
     key = str(uid)
     now = utc_now()
-    if p.get("plan") not in {"free", ""} and not plan_active(p.get("plan", "free")):
+    # Referral unlocks require the user's active plan to meet the file's
+    # minimum tier. A paid purchase is an explicit product entitlement and
+    # may unlock a higher-tier file independently of the user's plan.
+    if not purchase and p.get("plan") not in {"free", ""} and not plan_active(p.get("plan", "free")):
         return False, f"An active {p.get('plan')} plan is required", p
     existing = p.get("buyers", {}).get(key)
     if existing and datetime.fromisoformat(existing["expires"]) > now:

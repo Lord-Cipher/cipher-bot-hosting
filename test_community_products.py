@@ -35,6 +35,15 @@ def test_product_purchase_reuses_access_without_consuming_second_slot():
     assert ok and p["slots_remaining"] == 2
 
 
+def test_purchase_can_unlock_higher_plan_but_referral_cannot():
+    db = {}
+    product = create_product(db, path="/tmp/product", filename="lifetime.py", description="Lifetime", category="lifetime", plan="lifetime", referral_cost=1, price=25, slots=2, access_days=30)
+    ok, message, _ = product_access(db, 10, product["id"], plan_active=lambda _plan: False, referral_count=5)
+    assert not ok and "lifetime plan" in message
+    ok, _, purchased = product_access(db, 10, product["id"], plan_active=lambda _plan: False, purchase=True)
+    assert ok and purchased["buyers"]["10"]["mode"] == "purchase"
+
+
 def test_safe_rename_updates_text_references_and_rejects_traversal():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -50,5 +59,6 @@ def test_safe_rename_updates_text_references_and_rejects_traversal():
 if __name__ == "__main__":
     test_product_referral_slots_and_expiry()
     test_product_purchase_reuses_access_without_consuming_second_slot()
+    test_purchase_can_unlock_higher_plan_but_referral_cannot()
     test_safe_rename_updates_text_references_and_rejects_traversal()
     print("community product tests passed")
