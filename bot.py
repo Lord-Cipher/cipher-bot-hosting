@@ -6023,6 +6023,37 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_trial(call)
     if data == "adm_product_files":
         return render_adm_product_files(call)
+    if data == "adm_product_add":
+        USER_STATES[call.from_user.id] = {"flow": "adm_product_builder", "spec": {}}
+        return render_adm_product_builder(call)
+    if data.startswith("adm_product_edit_"):
+        return render_adm_product_builder(call, data[len("adm_product_edit_"):])
+    if data.startswith("adm_product_delete_"):
+        pid = data[len("adm_product_delete_"):]; db = db_load(); product = db.get("product_files", {}).pop(pid, None)
+        if product:
+            try: Path(product.get("path", "")).unlink(missing_ok=True)
+            except Exception: pass
+            db_save(db); audit(call.from_user.id, "product_delete", pid); ack(call, "Product deleted")
+        else: ack(call, "Product not found")
+        return render_adm_product_files(call)
+    if data.startswith("adm_product_field_"):
+        field = data[len("adm_product_field_"):]; state = USER_STATES.get(call.from_user.id, {})
+        if state.get("flow") != "adm_product_builder": return render_adm_product_files(call)
+        USER_STATES[call.from_user.id] = {**state, "flow": "adm_product_field", "field": field}
+        bot.send_message(call.message.chat.id, f"Send the value for <b>{esc(field)}</b>.", parse_mode="HTML"); return
+    if data == "adm_product_upload":
+        state = USER_STATES.get(call.from_user.id, {})
+        if state.get("flow") != "adm_product_builder": return render_adm_product_files(call)
+        USER_STATES[call.from_user.id] = {**state, "flow": "await_adm_product_file"}
+        bot.send_message(call.message.chat.id, "Now send the product document. It will be security-scanned before publication."); return
+    if data.startswith("adm_product_save_"):
+        pid = data[len("adm_product_save_"):]; state = USER_STATES.get(call.from_user.id, {}); db = db_load(); product = db.get("product_files", {}).get(pid)
+        if product and state.get("spec"):
+            allowed = {"category", "plan", "referral_cost", "price", "slots", "access_days", "description"}
+            product.update({k: v for k, v in state["spec"].items() if k in allowed})
+            product["slot_limit"] = int(product.get("slots", product.get("slot_limit", 1))); product["slots_remaining"] = min(int(product.get("slots_remaining", 0)), product["slot_limit"])
+            db_save(db); audit(call.from_user.id, "product_edit", pid); ack(call, "Product saved")
+        return render_adm_product_files(call)
     if data == "adm_tickets":
         return render_adm_tickets(call)
     if data == "adm_admins":
@@ -11058,6 +11089,22 @@ def on_text(m: types.Message) -> None:
             if not is_admin(uid):
                 USER_STATES.pop(uid, None); return
             return _handle_adm_product_command(m, text)
+        if flow == "adm_product_field":
+            state = dict(st); field = state.get("field"); spec = dict(state.get("spec", {}))
+            try:
+                if field in {"referral_cost", "slots", "access_days"}: value = int(text); assert value >= 0
+                elif field == "price": value = float(text); assert value >= 0
+                elif field == "plan":
+                    value = text.lower()
+                    if value not in PLAN_LIMITS and value != "free": raise ValueError("unknown plan")
+                elif field in {"category", "description"}: value = text[:1000]
+                else: raise ValueError("unknown field")
+            except (TypeError, ValueError, AssertionError) as exc:
+                bot.reply_to(m, f"{G['no']} Invalid value: {esc(exc)}", parse_mode="HTML"); return
+            spec[field] = value; state.update({"flow": "adm_product_builder", "spec": spec}); USER_STATES[uid] = state
+            # Render the builder with the current draft in a fresh message.
+            fake = type("DraftCall", (), {"from_user": m.from_user, "message": m})()
+            return render_adm_product_builder(fake, state.get("product_id", ""))
         if flow == "await_bot_rename":
             USER_STATES.pop(uid, None)
             bot_id = str(st.get("bot_id", "")); b = find_bot(bot_id)
@@ -17569,9 +17616,42 @@ def render_activity_feed(call: types.CallbackQuery) -> None:
 def render_adm_product_files(call: types.CallbackQuery) -> None:
     products = db_load().get("product_files", {})
     rows = "\n".join(f"<code>{pid}</code> — {esc(p.get('filename','file'))} | {esc(p.get('category','general'))} | {p.get('slots_remaining',0)} left" for pid, p in products.items()) or f"<i>{sc('No product files')}</i>"
-    cap = f"<b>📦 {sc('Product File Manager')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Add format:\n<code>add|category|plan|referrals|price|slots|days|description</code>\nThen send the file.\nDelete: <code>delete|PRODUCT_ID</code>\nEdit: <code>edit|PRODUCT_ID|field|value</code>\nGrant purchase: <code>grant|USER_ID|PRODUCT_ID</code>{FOOTER}"
-    USER_STATES[call.from_user.id] = {"flow": "await_adm_product_command"}
-    show_menu(call.message.chat.id, PHOTOS["admin"], cap, _adm_back("menu_admin"), call=call)
+    cap = f"<b>📦 {sc('Product File Manager')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Create and manage downloadable files with guided controls.{FOOTER}"
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("➕ Add Product File", callback_data="adm_product_add", style="success"))
+    for pid, product in list(products.items())[:20]:
+        label = str(product.get("filename", "file"))[:24]
+        kb.add(Btn(f"✏️ {label}", callback_data=f"adm_product_edit_{pid}", style="primary"),
+               Btn(f"🗑️ Delete {label}", callback_data=f"adm_product_delete_{pid}", style="danger"))
+    kb.add(Btn("⬅️ Admin Panel", callback_data="menu_admin", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
+
+
+def render_adm_product_builder(call: types.CallbackQuery, product_id: str = "") -> None:
+    uid = call.from_user.id
+    existing = db_load().get("product_files", {}).get(product_id, {}) if product_id else {}
+    state = USER_STATES.get(uid, {})
+    spec = dict(existing) if product_id else {}
+    spec.update(state.get("spec", {}))
+    spec.setdefault("category", "general"); spec.setdefault("plan", "free"); spec.setdefault("referral_cost", 0)
+    spec.setdefault("price", 0); spec.setdefault("slots", spec.get("slot_limit", 1)); spec.setdefault("access_days", 30); spec.setdefault("description", "")
+    price_display = f"{spec['price']}{cur_sym()}"
+    state.update({"flow": "adm_product_builder", "product_id": product_id, "spec": spec}); USER_STATES[uid] = state
+    cap = (f"<b>🧩 {sc('Product File Builder')}</b>\n{G['div_eq']}\n"
+           f"{bullet('Category', spec['category'])}\n{bullet('Required plan', spec['plan'])}\n"
+           f"{bullet('Referral unlock', spec['referral_cost'])}\n{bullet('Price', price_display)}\n"
+           f"{bullet('Slots', spec['slots'])}\n{bullet('Access days', spec['access_days'])}\n"
+           f"{bullet('Description', spec['description'] or 'Not set')}\n{G['div']}Choose a field to edit.{FOOTER}")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    fields = [("📁 Category", "category"), ("💎 Required Plan", "plan"), ("🔗 Referral Count", "referral_cost"), ("💳 Price", "price"), ("🎟️ Slots", "slots"), ("⏱️ Access Days", "access_days"), ("📝 Description", "description")]
+    for label, key in fields:
+        kb.add(Btn(label, callback_data=f"adm_product_field_{key}", style="primary"))
+    if product_id:
+        kb.add(Btn("💾 Save Changes", callback_data=f"adm_product_save_{product_id}", style="success"))
+    else:
+        kb.add(Btn("📤 Upload Product File", callback_data="adm_product_upload", style="success"))
+    kb.add(Btn("⬅️ Product Files", callback_data="adm_product_files", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
 
 def _handle_adm_product_command(m: types.Message, text: str) -> None:
