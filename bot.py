@@ -9798,28 +9798,33 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
     cpu_peak = max(CPU_HISTORY or [system_cpu])
     per_core = list(SYS_TELEMETRY.get("cpu_per_core") or [])
     core_line = "  ".join(f"C{i + 1}:{max(0.0, float(v)):.0f}%" for i, v in enumerate(per_core[:8])) or "No core data"
+    core_count = len(per_core) or int(SYS_TELEMETRY.get("cpu_count", 0) or 0)
     load1, load5, load15 = SYS_TELEMETRY.get("load", (0.0, 0.0, 0.0))
     sample_age = max(0, int(time.time() - float(SYS_TELEMETRY.get("sample_ts", 0.0) or time.time())))
     mem_total = psutil.virtual_memory().total if psutil else 1
     mem_pct = (panel_ram / mem_total) * 100 if mem_total > 0 else 0
     ram_bar = lbar(mem_pct)
+    panel_ram_display = f"{fmt_bytes(panel_ram)} <code>{ram_bar}</code>"
+    peak_load_display = f"{cpu_peak:.1f}%  |  {load1:.2f} / {load5:.2f} / {load15:.2f}"
+    core_display = f"{core_count}  <code>{esc(core_line)}</code>"
+    child_cpu_display = f"{total_child_cpu:.1f}%"
 
     cap = (
         f"<b>📡 {sc('Live Monitor')} (5s Live Feed)</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Panel Uptime',   fmt_dur(up_s * 1000))}\n"
-        f"{bullet('Panel RAM',      f'{fmt_bytes(panel_ram)} <code>{ram_bar}</code>')}\n"
+        f"{bullet('Panel RAM',      panel_ram_display)}\n"
         f"<b>⚡ {sc('CPU Telemetry')}</b>  <i>{sc('sample')} {sample_age}s ago</i>\n"
         f"{bullet('System CPU',     '<code>' + system_bar + '</code>')}\n"
         f"{bullet('Panel CPU',      '<code>' + cpu_bar + '</code>')}\n"
         f"{bullet('CPU Trend',      '<code>' + spark(CPU_HISTORY) + '</code>')}\n"
-        f"{bullet('Peak / Load',    f'{cpu_peak:.1f}%  |  {load1:.2f} / {load5:.2f} / {load15:.2f}')}\n"
-        f"{bullet('Cores',           f'{len(per_core) or SYS_TELEMETRY.get("cpu_count", 0)}  <code>{esc(core_line)}</code>')}\n"
+        f"{bullet('Peak / Load',    peak_load_display)}\n"
+        f"{bullet('Cores',           core_display)}\n"
         f"{G['div']}\n"
         f"{bullet('▶ Running Bots',  len(running_bots))}\n"
         f"{bullet('💥 Crashed',      len(crashed_bots))}\n"
         f"{bullet('Child RAM Total', fmt_bytes(total_child_ram))}\n"
-        f"{bullet('Child CPU Total', f'{total_child_cpu:.1f}%')}\n"
+        f"{bullet('Child CPU Total', child_cpu_display)}\n"
         f"{G['div']}\n"
         f"<b>{sc('Active Instances')} (5s Auto-Sync):</b>\n"
         + ("\n".join(
@@ -9909,6 +9914,10 @@ def render_adm_monitor_system(call: types.CallbackQuery) -> None:
         filled = int(pct / 5)
         return "█" * filled + "░" * (20 - filled) + f" {pct:.1f}%"
     core_rows = "  ".join(f"C{i + 1}:{float(v):.0f}%" for i, v in enumerate(per_core[:12])) or "No core data"
+    core_count = len(per_core) or int(SYS_TELEMETRY.get("cpu_count", 0) or 0)
+    frequency_display = f"{float(SYS_TELEMETRY.get('cpu_freq', 0.0) or 0.0):.0f} MHz"
+    core_rows_display = f"{core_count}  <code>{esc(core_rows)}</code>"
+    load_display = f"{load1:.2f} / {load5:.2f} / {load15:.2f}"
     trend = "▁▂▃▄▅▆▇█"
     trend_line = "".join(trend[min(7, max(0, int(float(v) / 12.5)))] for v in list(CPU_HISTORY)[-24:]) or "—"
     cap = (
@@ -9918,11 +9927,11 @@ def render_adm_monitor_system(call: types.CallbackQuery) -> None:
         f"{bullet('System CPU', bar(cpu_pct))}\n"
         f"{bullet('Panel CPU',  bar(panel_cpu))}\n"
         f"{bullet('Trend',      f'<code>{trend_line}</code>  peak {cpu_peak:.1f}%')}\n"
-        f"{bullet('Cores',      f'{len(per_core) or SYS_TELEMETRY.get("cpu_count", 0)}  <code>{esc(core_rows)}</code>')}\n"
-        f"{bullet('Frequency',  f'{float(SYS_TELEMETRY.get("cpu_freq", 0.0) or 0.0):.0f} MHz')}\n"
+        f"{bullet('Cores',      core_rows_display)}\n"
+        f"{bullet('Frequency',  frequency_display)}\n"
         f"{bullet('Memory',    bar(mem_pct))}\n"
         f"{bullet('Disk',      bar(disk_pct))}\n"
-        f"{bullet('Load 1m / 5m / 15m', f'{load1:.2f} / {load5:.2f} / {load15:.2f}')}\n"
+        f"{bullet('Load 1m / 5m / 15m', load_display)}\n"
         f"{bullet('Threads',   threading.active_count())}\n"
         f"{bullet('PID',       os.getpid())}\n"
         f"{G['div']}{FOOTER}"
