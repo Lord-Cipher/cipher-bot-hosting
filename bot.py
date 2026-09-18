@@ -95,9 +95,20 @@ _auto_install_missing()
 # Now safe to import third-party modules.
 try:
     from dotenv import load_dotenv
-    load_dotenv()
-    # Optional host-independent vault file; normal .env values take precedence.
-    load_dotenv(Path(__file__).resolve().parent / "cipher_vault.env", override=False)
+    # Resolve configuration beside this script, not from the process cwd.
+    # This matters for VPS services launched by systemd/supervisord, whose
+    # working directory may be /, /root, or otherwise unrelated to the app.
+    _APP_DIR = Path(__file__).resolve().parent
+    _ENV_FILE = _APP_DIR / ".env"
+    _VAULT_ENV_FILE = _APP_DIR / "cipher_vault.env"
+    # Existing deployment environment variables always win. The regular
+    # sibling .env is preferred over the optional vault env file.
+    load_dotenv(_ENV_FILE, override=False)
+    load_dotenv(_VAULT_ENV_FILE, override=False)
+    if _ENV_FILE.is_file():
+        print(f"[config] loaded {_ENV_FILE}", flush=True)
+    elif _VAULT_ENV_FILE.is_file():
+        print(f"[config] loaded {_VAULT_ENV_FILE}", flush=True)
 except ImportError:
     pass
 
