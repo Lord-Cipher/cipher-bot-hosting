@@ -17580,7 +17580,7 @@ def render_products(call: types.CallbackQuery) -> None:
     if not products:
         cap = f"<b>{sc('Product Files')}</b>\n{G['div_eq']}\n<i>{sc('No files are available yet')}</i>{FOOTER}"
         show_menu(call.message.chat.id, PHOTOS["main"], cap, _adm_back("menu_main"), call=call); return
-    rows = "\n".join(f"{G['bullet']} <b>{esc(p.get('filename','file'))}</b> — {esc(p.get('category','general'))} — {p.get('slots_remaining', 0)} slots" for p in products[:30])
+    rows = "\n".join(f"{G['bullet']} <b>{esc(p.get('filename','file'))}</b> — {esc(p.get('plan','free'))} — {p.get('slots_remaining', 0)} slots" for p in products[:30])
     cap = f"<b>{sc('Product Files')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Choose a file to view its description and access options.{FOOTER}"
     kb = types.InlineKeyboardMarkup(row_width=1)
     for p in products[:30]:
@@ -17595,7 +17595,7 @@ def render_product_view(call: types.CallbackQuery, product_id: str) -> None:
         ack(call, "Product unavailable"); return
     purchase_display = f"{p.get('price', 0)}{cur_sym()}"
     cap = (f"<b>📄 {esc(p.get('filename','file'))}</b>\n{G['div_eq']}\n"
-           f"{bullet('Category', p.get('category','general'))}\n{bullet('Plan', p.get('plan','free'))}\n"
+           f"{bullet('Category', p.get('plan','free'))}\n{bullet('Plan', p.get('plan','free'))}\n"
            f"{bullet('Referral unlock', p.get('referral_cost', 0))}\n{bullet('Purchase', purchase_display)}\n"
            f"{bullet('Remaining slots', p.get('slots_remaining', 0))}\n{G['div']}\n{esc(p.get('description','No description'))}{FOOTER}")
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -17661,7 +17661,7 @@ def render_achievements(call: types.CallbackQuery) -> None:
 
 def render_adm_product_files(call: types.CallbackQuery) -> None:
     products = db_load().get("product_files", {})
-    rows = "\n".join(f"<code>{pid}</code> — {esc(p.get('filename','file'))} | {esc(p.get('category','general'))} | {p.get('slots_remaining',0)} left" for pid, p in products.items()) or f"<i>{sc('No product files')}</i>"
+    rows = "\n".join(f"<code>{pid}</code> — {esc(p.get('filename','file'))} | {esc(p.get('plan','free'))} | {p.get('slots_remaining',0)} left" for pid, p in products.items()) or f"<i>{sc('No product files')}</i>"
     cap = f"<b>📦 {sc('Product File Manager')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Create and manage downloadable files with guided controls.{FOOTER}"
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn("➕ Add Product File", callback_data="adm_product_add", style="success"))
