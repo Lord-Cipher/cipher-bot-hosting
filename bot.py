@@ -41,6 +41,10 @@ from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
 from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle
 from ai_preflight import run_preflight
+from community_products import (
+    award_for_event, create_product, developer_level, ensure_db as ensure_community_db,
+    product_access, record_activity, rename_project_file,
+)
 
 _REQUIRED_PKGS = [
     ("telebot",             "pyTelegramBotAPI"),
@@ -1566,6 +1570,9 @@ _DB_DEFAULT_KEYS: Tuple[Tuple[str, Any], ...] = (
     ("rate_violations", {}),
     ("scan_log", []),        # security scan history for admin panel
     ("notifications", []),   # system alerts for admin center
+    ("product_files", {}),   # admin-managed downloadable products
+    ("activity_feed", []),   # sanitized public activity events
+    ("achievement_defs", {}),
 )
 
 
@@ -2706,6 +2713,11 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f"Pʀᴏꜰɪʟᴇ",      callback_data="menu_profile",  style="primary"),
     )
     kb.add(
+        Btn("📦  Fɪʟᴇ Cᴀᴛᴀʟᴏɢ", callback_data="menu_products", style="primary"),
+        Btn("🏆  Aᴄʜɪᴇᴠᴇᴍᴇɴᴛꜱ", callback_data="menu_achievements", style="primary"),
+    )
+    kb.add(Btn("🌍  Pᴜʙʟɪᴄ Aᴄᴛɪᴠɪᴛʏ", callback_data="menu_activity", style="primary"))
+    kb.add(
         Btn(f" Wᴀʟʟᴇᴛ",     callback_data="menu_wallet",   style="success"),
         Btn(f"Tɪᴄᴋᴇᴛꜱ",    callback_data="menu_tickets",  style="success"),
     )
@@ -2995,6 +3007,7 @@ def admin_kb(uid: int = 0) -> types.InlineKeyboardMarkup:
             Btn("🔗  Rᴇꜰᴇʀʀᴀʟ Sʏꜱ",    callback_data="adm_referral_sys",   style="success"),
             Btn("🧹  Jᴀɴɪᴛᴏʀ",          callback_data="adm_janitor",        style="danger"),
         )
+        kb.add(Btn("📦  Pʀᴏᴅᴜᴄᴛ Fɪʟᴇꜱ", callback_data="adm_product_files", style="success"))
         kb.add(
             Btn("🌐  Wᴇʙʜᴏᴏᴋꜱ",         callback_data="adm_webhooks",       style="primary"),
             Btn("🎯  Fᴇᴀᴛᴜʀᴇ Fʟᴀɢꜱ",    callback_data="adm_feature_flags",  style="primary"),
@@ -3080,9 +3093,10 @@ def bot_actions_kb(bot_id: str, running: bool, premium: bool = False) -> types.I
         Btn(f"{G['download']}  Iɴꜱᴛᴀʟʟ Pᴋɢ", callback_data=f"bot_pip_{bot_id}",   style="primary"),
     )
     kb.add(
-        Btn(f"🧠  AI Dɪᴀɢɴᴏsᴇ",      callback_data=f"bot_ai_fix_{bot_id}", style="success"),
+        Btn("🧠  Aɪ Dɪᴀɢɴᴏsᴇ",      callback_data=f"bot_ai_fix_{bot_id}", style="success"),
         Btn(f"{G['plus']}  Cʟᴏɴᴇ",           callback_data=f"bot_clone_{bot_id}", style="primary"),
     )
+    kb.add(Btn("✏️  Rᴇɴᴀᴍᴇ Fɪʟᴇ", callback_data=f"bot_rename_{bot_id}", style="primary"))
     kb.add(
         Btn(f"{G['arrow']}  Dᴏᴡɴʟᴏᴀᴅ", callback_data=f"bot_dl_{bot_id}", style="primary"),
     )
@@ -5004,14 +5018,18 @@ def get_or_create_user(u: types.User, ref: Optional[int] = None) -> Tuple[Dict[s
             "ref_by": ref if ref and ref != u.id else None,
             "ref_count": 0, "ref_credit": 0, "trial_used": False,
             "bot_slots_bonus": 0,
+            "xp": 0, "achievements": [], "product_access": {}, "bot_slot_grants": [],
             "stats": {"commands": 0, "bots_uploaded": 0, "logins": 1},
         }
         db_save(db)
         if ref and ref != u.id and str(ref) in db["users"]:
             db["users"][str(ref)]["ref_count"] = int(db["users"][str(ref)].get("ref_count", 0)) + 1
             db["users"][str(ref)]["ref_credit"] = int(db["users"][str(ref)].get("ref_credit", 0)) + 1
-            db["users"][str(ref)]["bot_slots_bonus"] = int(
-                db["users"][str(ref)].get("bot_slots_bonus", 0)) + 1
+            ref_user = db["users"][str(ref)]
+            grant_days = int(get_setting("referral_slot_days", 30) or 30)
+            ref_user.setdefault("bot_slot_grants", []).append({"granted": ts_iso(), "expires": (now_utc() + timedelta(days=max(1, grant_days))).isoformat()})
+            new_achievements = award_for_event(db, ref_user, "referral")
+            record_activity(db, int(ref), "referral", f"{ref_user.get('name', 'A user')} earned a referral bonus")
             db_save(db)
             try:
                 bot.send_message(
@@ -5029,6 +5047,10 @@ def get_or_create_user(u: types.User, ref: Optional[int] = None) -> Tuple[Dict[s
             f"{bullet('User ID', u.id)}"
         )
     else:
+        db["users"][key].setdefault("xp", 0)
+        db["users"][key].setdefault("achievements", [])
+        db["users"][key].setdefault("product_access", {})
+        db["users"][key].setdefault("bot_slot_grants", [])
         db["users"][key]["last_seen"] = ts_iso()
         db["users"][key]["stats"]["logins"] = int(
             db["users"][key]["stats"].get("logins", 0)) + 1
@@ -5092,7 +5114,11 @@ def user_max_bots(u: Dict[str, Any]) -> int:
     default = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])["max_bots"]
     # Honor admin override from Settings → Plans Editor.
     base = int(get_setting(f"plan_max_bots_{plan}", default))
-    return base + int(u.get("bot_slots_bonus", 0))
+    now = now_utc()
+    grants = [g for g in (u.get("bot_slot_grants") or []) if isinstance(g, dict) and str(g.get("expires", "")) > now.isoformat()]
+    # bot_slots_bonus remains a legacy entitlement for records created before
+    # expiring grants were introduced; new referral rewards use bot_slot_grants.
+    return base + int(u.get("bot_slots_bonus", 0)) + len(grants)
 
 
 def user_plan_expiry(u: Dict[str, Any]) -> Optional[str]:
@@ -5995,6 +6021,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_coupons(call)
     if data == "adm_trial":
         return render_adm_trial(call)
+    if data == "adm_product_files":
+        return render_adm_product_files(call)
     if data == "adm_tickets":
         return render_adm_tickets(call)
     if data == "adm_admins":
@@ -6864,6 +6892,12 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         bot.send_message(call.message.chat.id,
                          f"{G['settings']} {sc('Send min plan to enable referrals')}: <code>{plans}</code>",
                          parse_mode="HTML"); return
+    if data == "adm_ref_set_slot_days":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_slot_days"}
+        bot.send_message(call.message.chat.id, "Send the number of days each referral-earned slot remains valid."); return
+    if data == "adm_ref_set_slot_refs":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_slot_refs"}
+        bot.send_message(call.message.chat.id, "Send the number of referrals required to unlock one slot."); return
     # Janitor
     if data == "adm_janitor":             return render_adm_janitor(call)
     if data == "adm_jan_run_now":
@@ -9354,6 +9388,8 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
     enabled   = _ff_get("referral_system")
     reward    = get_setting("referral_reward_amount", 20)
     min_plan  = get_setting("referral_min_plan", "free")
+    slot_days = get_setting("referral_slot_days", 30)
+    slot_refs = get_setting("referral_slot_referrals", 1)
     d = db_load()
     total_refs = sum(len(u.get("referrals", [])) for u in d["users"].values())
     total_paid = sum(u.get("referral_earnings", 0) for u in d["users"].values())
@@ -9363,6 +9399,8 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
         f"{bullet('Status',        '✅ Enabled' if enabled else '❌ Disabled')}\n"
         f"{bullet('Reward/Refer',  f'{reward}{cur_sym()} wallet credit')}\n"
         f"{bullet('Min Plan',      min_plan)}\n"
+        f"{bullet('Slot Duration', f'{slot_days} days')}\n"
+        f"{bullet('Refs per Slot',  slot_refs)}\n"
         f"{bullet('Total Referrals', total_refs)}\n"
         f"{bullet('Total Paid Out',  f'{total_paid}{cur_sym()}')}\n"
         f"{G['div']}{FOOTER}"
@@ -9381,6 +9419,10 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
     kb.add(
         Btn(f"✏️  Sᴇᴛ Rᴇᴡᴀʀᴅ {cur_sym()}", callback_data="adm_ref_set_reward",   style="primary"),
         Btn("✏️  Sᴇᴛ Mɪɴ Pʟᴀɴ", callback_data="adm_ref_set_min_plan", style="primary"),
+    )
+    kb.add(
+        Btn("⏱️  Sᴇᴛ Sʟᴏᴛ Dᴀʏꜱ", callback_data="adm_ref_set_slot_days", style="primary"),
+        Btn("🔢  Sᴇᴛ Rᴇꜰꜱ/Sʟᴏᴛ", callback_data="adm_ref_set_slot_refs", style="primary"),
     )
     kb.add(Btn("📈  Rᴇꜰᴇʀʀᴀʟ Aɴᴀʟʏᴛɪᴄꜱ", callback_data="adm_referral_detail", style="primary"))
     kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
@@ -10828,6 +10870,10 @@ def on_document(m: types.Message) -> None:
     st = USER_STATES.get(uid) or {}
     if st.get("flow") == "ai_chat":
         return _handle_ai_chat_document(m)
+    if st.get("flow") == "await_adm_product_file":
+        if not is_admin(uid):
+            USER_STATES.pop(uid, None); return
+        return _handle_adm_product_file(m, st)
     if st.get("flow") == "await_payment_proof":
         return _handle_payment_proof(m, st)
     if st.get("flow") == "await_topup_proof":
@@ -11008,6 +11054,26 @@ def on_text(m: types.Message) -> None:
             bot.send_message(m.chat.id, "Credential saved securely. The submitted message was deleted.", protect_content=True)
             audit(uid, "node_credential_saved", f"node={node_id}")
             return
+        if flow == "await_adm_product_command":
+            if not is_admin(uid):
+                USER_STATES.pop(uid, None); return
+            return _handle_adm_product_command(m, text)
+        if flow == "await_bot_rename":
+            USER_STATES.pop(uid, None)
+            bot_id = str(st.get("bot_id", "")); b = find_bot(bot_id)
+            if not b or (b.get("owner") != uid and not is_admin(uid)):
+                bot.reply_to(m, f"{G['no']} You cannot rename that project."); return
+            names = [x.strip() for x in text.split("|", 1)]
+            if len(names) != 2:
+                bot.reply_to(m, "Use: old_filename.py|new_filename.py"); return
+            ok, result = rename_project_file(b.get("dir", ""), names[0], names[1])
+            if ok:
+                b["enc_files"] = [{**f, "filename": result if f.get("filename") == names[0] else f.get("filename"), "rel_path": result if f.get("rel_path") == names[0] else f.get("rel_path")} for f in b.get("enc_files", [])]
+                save_bot(b); audit(uid, "project_file_rename", f"bot={bot_id} {names[0]}->{result}")
+                bot.reply_to(m, f"{G['ok']} Renamed to <code>{esc(result)}</code>. Security scanning rules were not bypassed.", parse_mode="HTML")
+            else:
+                bot.reply_to(m, f"{G['no']} Rename failed: <code>{esc(result)}</code>", parse_mode="HTML")
+            return
         if flow == "ai_chat":
             return handle_ai_chat_message(m)
         if flow == "await_env_kv":
@@ -11087,6 +11153,18 @@ def on_text(m: types.Message) -> None:
             USER_STATES.pop(uid, None)
             bot.reply_to(m, f"Free trial duration set to {hours} hours")
             return
+        if flow == "await_adm_ref_slot_days":
+            try: value = int(text); assert value > 0
+            except (TypeError, ValueError, AssertionError):
+                bot.reply_to(m, "Send a positive number of days."); return
+            set_setting("referral_slot_days", value); USER_STATES.pop(uid, None)
+            bot.reply_to(m, f"Referral slot duration set to {value} days."); return
+        if flow == "await_adm_ref_slot_refs":
+            try: value = int(text); assert value > 0
+            except (TypeError, ValueError, AssertionError):
+                bot.reply_to(m, "Send a positive referral count."); return
+            set_setting("referral_slot_referrals", value); USER_STATES.pop(uid, None)
+            bot.reply_to(m, f"Referrals required per slot set to {value}."); return
         if flow == "await_admin_admins":
             return _handle_admin_admins(m)
         if flow == "await_ticket_subject":
@@ -17404,6 +17482,165 @@ def action_bot_download(call: types.CallbackQuery, bot_id: str) -> None:
     threading.Thread(target=_bg, daemon=True).start()
 
 
+# ─── Community products, achievements, activity feed, and safe renaming ───────
+def _product_plan_ok(user: Dict[str, Any], required: str) -> bool:
+    if required in ("", "free", None):
+        return True
+    order = {"free": 0, "starter": 1, "basic": 2, "pro": 3, "enterprise": 4, "lifetime": 5}
+    current = str(user.get("plan", "free"))
+    return order.get(current, 0) >= order.get(str(required), 99) and user_plan_active(user)
+
+
+def render_products(call: types.CallbackQuery) -> None:
+    uid = call.from_user.id
+    d = db_load(); products = [p for p in d.get("product_files", {}).values() if p.get("active")]
+    if not products:
+        cap = f"<b>📦 {sc('Product Files')}</b>\n{G['div_eq']}\n<i>{sc('No files are available yet')}</i>{FOOTER}"
+        show_menu(call.message.chat.id, PHOTOS["main"], cap, _adm_back("menu_main"), call=call); return
+    rows = "\n".join(f"{G['bullet']} <b>{esc(p.get('filename','file'))}</b> — {esc(p.get('category','general'))} — {p.get('slots_remaining', 0)} slots" for p in products[:30])
+    cap = f"<b>📦 {sc('Product Files')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Choose a file to view its description and access options.{FOOTER}"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for p in products[:30]:
+        kb.add(Btn(f"📄 {p.get('filename','file')[:35]}", callback_data=f"product_view_{p['id']}", style="primary"))
+    kb.add(Btn(f"{G['back']} {sc('Main Menu')}", callback_data="menu_main", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call)
+
+
+def render_product_view(call: types.CallbackQuery, product_id: str) -> None:
+    p = db_load().get("product_files", {}).get(product_id)
+    if not p or not p.get("active"):
+        ack(call, "Product unavailable"); return
+    purchase_display = f"{p.get('price', 0)}{cur_sym()}"
+    cap = (f"<b>📄 {esc(p.get('filename','file'))}</b>\n{G['div_eq']}\n"
+           f"{bullet('Category', p.get('category','general'))}\n{bullet('Plan', p.get('plan','free'))}\n"
+           f"{bullet('Referral unlock', p.get('referral_cost', 0))}\n{bullet('Purchase', purchase_display)}\n"
+           f"{bullet('Remaining slots', p.get('slots_remaining', 0))}\n{G['div']}\n{esc(p.get('description','No description'))}{FOOTER}")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🔓 Unlock with referrals", callback_data=f"product_ref_{product_id}", style="success"))
+    kb.add(Btn("💳 Request purchase", callback_data=f"product_buy_{product_id}", style="primary"))
+    kb.add(Btn(f"{G['back']} Files", callback_data="menu_products", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call)
+
+
+def _send_product_file(uid: int, product: Dict[str, Any]) -> None:
+    path = Path(product.get("path", ""))
+    if not path.is_file():
+        bot.send_message(uid, f"{G['no']} Product file is temporarily unavailable."); return
+    with path.open("rb") as fh:
+        bot.send_document(uid, fh, caption=f"📦 {esc(product.get('filename','file'))}", parse_mode="HTML")
+
+
+def action_product_referral(call: types.CallbackQuery, product_id: str) -> None:
+    uid = call.from_user.id; d = db_load(); u = d["users"].get(str(uid), {})
+    ok, msg, product = product_access(d, uid, product_id, plan_active=lambda plan: _product_plan_ok(u, plan), referral_count=len(u.get("referrals", []) or []))
+    if not ok:
+        ack(call, msg, show_alert=True); return
+    u.setdefault("product_access", {})[product_id] = product["buyers"][str(uid)]
+    award_for_event(d, u, "product")
+    record_activity(d, uid, "product_unlock", f"{u.get('name','A user')} unlocked a product", public=False)
+    db_save(d); ack(call, "Unlocked"); _send_product_file(uid, product)
+
+
+def action_product_purchase(call: types.CallbackQuery, product_id: str) -> None:
+    p = db_load().get("product_files", {}).get(product_id)
+    if not p: ack(call, "Product unavailable"); return
+    try:
+        bot.send_message(OWNER_ID, f"🛒 Purchase request: user <code>{call.from_user.id}</code> requested <b>{esc(p.get('filename','file'))}</b> ({p.get('price',0)}{cur_sym()})", parse_mode="HTML")
+    except Exception: pass
+    ack(call, "Purchase request sent to admin", show_alert=True)
+
+
+def render_achievements(call: types.CallbackQuery) -> None:
+    u = db_load()["users"].get(str(call.from_user.id), {})
+    unlocked = set(u.get("achievements", [])); rows = []
+    for key, (name, desc, xp) in __import__("community_products").DEFAULT_ACHIEVEMENTS.items():
+        rows.append(f"{'🏆' if key in unlocked else '▫️'} <b>{name}</b> — {desc} (+{xp} XP)")
+    cap = f"<b>🏆 {sc('Achievements')}</b>\n{G['div_eq']}\n{bullet('Level', developer_level(u.get('xp', 0)))}\n{bullet('XP', u.get('xp', 0))}\n{G['div']}\n" + "\n".join(rows) + FOOTER
+    show_menu(call.message.chat.id, PHOTOS["main"], cap, _adm_back("menu_main"), call=call)
+
+
+def render_activity_feed(call: types.CallbackQuery) -> None:
+    events = [e for e in db_load().get("activity_feed", []) if e.get("public")][-20:]
+    rows = "\n".join(f"• {esc(e.get('message',''))} — <i>{esc(str(e.get('ts',''))[:16])}</i>" for e in reversed(events)) or f"<i>{sc('No public activity yet')}</i>"
+    cap = f"<b>🌍 {sc('Public Activity')}</b>\n{G['div_eq']}\n{rows}{FOOTER}"
+    show_menu(call.message.chat.id, PHOTOS["main"], cap, _adm_back("menu_main"), call=call)
+
+
+def render_adm_product_files(call: types.CallbackQuery) -> None:
+    products = db_load().get("product_files", {})
+    rows = "\n".join(f"<code>{pid}</code> — {esc(p.get('filename','file'))} | {esc(p.get('category','general'))} | {p.get('slots_remaining',0)} left" for pid, p in products.items()) or f"<i>{sc('No product files')}</i>"
+    cap = f"<b>📦 {sc('Product File Manager')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Add format:\n<code>add|category|plan|referrals|price|slots|days|description</code>\nThen send the file.\nDelete: <code>delete|PRODUCT_ID</code>\nEdit: <code>edit|PRODUCT_ID|field|value</code>\nGrant purchase: <code>grant|USER_ID|PRODUCT_ID</code>{FOOTER}"
+    USER_STATES[call.from_user.id] = {"flow": "await_adm_product_command"}
+    show_menu(call.message.chat.id, PHOTOS["admin"], cap, _adm_back("menu_admin"), call=call)
+
+
+def _handle_adm_product_command(m: types.Message, text: str) -> None:
+    parts = [x.strip() for x in text.split("|", 7)]
+    if parts and parts[0].lower() == "grant" and len(parts) >= 3:
+        db = db_load(); product = db.get("product_files", {}).get(parts[2]); target = db.get("users", {}).get(parts[1])
+        if not product or not target:
+            bot.reply_to(m, f"{G['no']} Product or user not found."); return
+        ok, msg, granted = product_access(db, int(parts[1]), parts[2], plan_active=lambda _plan: True, purchase=True)
+        if ok:
+            target.setdefault("product_access", {})[parts[2]] = granted["buyers"][parts[1]]
+            db_save(db); bot.reply_to(m, f"{G['ok']} Purchase access granted.")
+        else: bot.reply_to(m, f"{G['no']} {msg}")
+        USER_STATES.pop(m.from_user.id, None); return
+    if parts and parts[0].lower() == "edit" and len(parts) >= 4:
+        db = db_load(); product = db.get("product_files", {}).get(parts[1])
+        editable = {"description", "category", "plan", "referral_cost", "price", "slot_limit", "access_days", "active"}
+        if not product or parts[2] not in editable:
+            bot.reply_to(m, f"{G['no']} Product or editable field not found."); return
+        key, value = parts[2], parts[3]
+        try:
+            product[key] = ((value.lower() == "true") if key == "active" else int(value) if key in {"referral_cost", "slot_limit", "access_days"} else float(value) if key == "price" else value)
+            if key == "slot_limit": product["slots_remaining"] = max(0, int(value))
+        except ValueError:
+            bot.reply_to(m, f"{G['no']} Invalid value."); return
+        db_save(db); audit(m.from_user.id, "product_edit", f"id={parts[1]} field={key}")
+        bot.reply_to(m, f"{G['ok']} Product updated."); USER_STATES.pop(m.from_user.id, None); return
+    if parts and parts[0].lower() == "delete" and len(parts) >= 2:
+        db = db_load(); product = db.get("product_files", {}).pop(parts[1], None)
+        if product:
+            try: Path(product.get("path", "")).unlink(missing_ok=True)
+            except Exception: pass
+            db_save(db); audit(m.from_user.id, "product_delete", parts[1]); bot.reply_to(m, f"{G['ok']} Product deleted.")
+        else: bot.reply_to(m, f"{G['no']} Product not found.")
+        USER_STATES.pop(m.from_user.id, None); return
+    if len(parts) != 8 or parts[0].lower() != "add":
+        bot.reply_to(m, "Use add|category|plan|referrals|price|slots|days|description, delete|PRODUCT_ID, edit|PRODUCT_ID|field|value, or grant|USER_ID|PRODUCT_ID")
+        return
+    _, category, plan, refs, price, slots, days, description = parts
+    if plan not in PLAN_LIMITS and plan != "free":
+        bot.reply_to(m, f"Invalid plan. Available: {', '.join(PLAN_LIMITS)}"); return
+    try:
+        spec = {"category": category, "plan": plan, "referral_cost": int(refs), "price": float(price), "slots": int(slots), "access_days": int(days), "description": description}
+        if min(spec["referral_cost"], spec["slots"], spec["access_days"]) < 0: raise ValueError
+    except ValueError:
+        bot.reply_to(m, "Referral count, price, slots, and days must be valid non-negative numbers."); return
+    USER_STATES[m.from_user.id] = {"flow": "await_adm_product_file", "spec": spec}
+    bot.reply_to(m, f"{G['ok']} Specification saved. Now send the .py/.zip product file.")
+
+
+def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
+    uid = m.from_user.id; USER_STATES.pop(uid, None)
+    try:
+        info = bot.get_file(m.document.file_id); raw = bot.download_file(info.file_path)
+        filename = Path(m.document.file_name or "product.bin").name
+        scan = _run_security_scan([(filename, raw)], uploader_uid=uid)
+        if scan.get("recommendation") == "REJECT":
+            bot.reply_to(m, f"{G['no']} Product rejected by security scan. It was not published.\n<code>{esc(scan.get('summary',''))}</code>", parse_mode="HTML"); return
+        product_dir = DIRS["uploads"] / "products"; product_dir.mkdir(parents=True, exist_ok=True)
+        product = create_product(db_load(), path="", filename=filename, **st["spec"])
+        path = product_dir / f"{product['id']}_{filename}"; path.write_bytes(raw); product["path"] = str(path)
+        db = db_load(); db.setdefault("product_files", {})[product["id"]] = product
+        record_activity(db, uid, "product_published", f"A new {product.get('category','general')} file was published")
+        db_save(db); audit(uid, "product_add", f"id={product['id']} filename={filename}")
+        bot.reply_to(m, f"{G['ok']} Product published. ID: <code>{product['id']}</code>", parse_mode="HTML")
+    except Exception as exc:
+        bot.reply_to(m, f"{G['no']} Product upload failed: <code>{esc(exc)}</code>", parse_mode="HTML")
+
+
 # ─── Admin panel ──────────────────────────────────────────────────────────────
 
 def render_admin(call: types.CallbackQuery) -> None:
@@ -19360,6 +19597,12 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_buy":      render_buy_menu(call); return
     if data == "menu_profile":  render_profile(call); return
     if data == "menu_referral": render_referral(call); return
+    if data == "menu_products": render_products(call); return
+    if data == "menu_achievements": render_achievements(call); return
+    if data == "menu_activity": render_activity_feed(call); return
+    if data.startswith("product_view_"): render_product_view(call, data[len("product_view_"):]); return
+    if data.startswith("product_ref_"): action_product_referral(call, data[len("product_ref_"):]); return
+    if data.startswith("product_buy_"): action_product_purchase(call, data[len("product_buy_"):]); return
     if data == "referral_copy":
         uid = call.from_user.id
         try:
@@ -19406,6 +19649,13 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_logs_"):        action_bot_logs(call, data.split("_", 2)[2]); return
     if data.startswith("bot_info_"):        action_bot_info(call, data.split("_", 2)[2]); return
     if data.startswith("bot_env_"):         render_env_menu(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_rename_"):
+        bot_id = data[len("bot_rename_"):]; target = find_bot(bot_id)
+        if not target or (target.get("owner") != call.from_user.id and not is_admin(call.from_user.id)):
+            ack(call, "Not yours", show_alert=True); return
+        USER_STATES[call.from_user.id] = {"flow": "await_bot_rename", "bot_id": bot_id}
+        bot.send_message(call.message.chat.id, "Send: <code>old_filename.py|new_filename.py</code>. The extension must remain unchanged; the project will be rescanned normally.", parse_mode="HTML")
+        ack(call); return
     if data.startswith("env_add_"):         start_env_add(call, data.split("_", 2)[2]); return
     if data.startswith("env_del_"):
         parts = data.split("_", 3)
