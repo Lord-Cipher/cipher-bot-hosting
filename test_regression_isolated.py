@@ -77,6 +77,12 @@ assert 'elif is_managed_host and pub_url:' in BOT
 assert 'refusing polling fallback to avoid Telegram 409 conflicts' in BOT
 assert 'await_adm_oxapay_key' in BOT
 assert 'bot.delete_message(m.chat.id, m.message_id)' in BOT
+assert 'adm_product_toggle_catalog' in BOT
+assert 'products_cat_' in BOT
+assert 'requested_filename' in BOT
+assert 'file_coins' in BOT
+assert 'f"{prefix}_slot_{uid}"' in BOT
+assert 'adm_ref_redeem' in BOT
 assert '"amount": float(usd_amount)' in BOT
 assert 'def _create_oxapay_invoice(local_amount: float, currency_code: str' in BOT
 assert '_local_amount_to_usd(local_amount, currency_code)' in BOT

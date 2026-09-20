@@ -5095,6 +5095,7 @@ def get_or_create_user(u: types.User, ref: Optional[int] = None) -> Tuple[Dict[s
             "verified": False, "verified_at": None,
             "ref_by": ref if ref and ref != u.id else None,
             "ref_count": 0, "ref_credit": 0, "trial_used": False,
+            "file_coins": 0,
             "bot_slots_bonus": 0,
             "xp": 0, "achievements": [], "product_access": {}, "bot_slot_grants": [],
             "stats": {"commands": 0, "bots_uploaded": 0, "logins": 1},
@@ -5104,8 +5105,6 @@ def get_or_create_user(u: types.User, ref: Optional[int] = None) -> Tuple[Dict[s
             db["users"][str(ref)]["ref_count"] = int(db["users"][str(ref)].get("ref_count", 0)) + 1
             db["users"][str(ref)]["ref_credit"] = int(db["users"][str(ref)].get("ref_credit", 0)) + 1
             ref_user = db["users"][str(ref)]
-            grant_days = int(get_setting("referral_slot_days", 30) or 30)
-            ref_user.setdefault("bot_slot_grants", []).append({"granted": ts_iso(), "expires": (now_utc() + timedelta(days=max(1, grant_days))).isoformat()})
             new_achievements = award_for_event(db, ref_user, "referral")
             record_activity(db, int(ref), "referral", f"{ref_user.get('name', 'A user')} earned a referral bonus")
             db_save(db)
@@ -5114,7 +5113,7 @@ def get_or_create_user(u: types.User, ref: Optional[int] = None) -> Tuple[Dict[s
                     ref,
                     f"<b>{G['plus']} {sc('You earned a referral bonus')}</b>\n"
                     f"{bullet('From', f'@{u.username or u.first_name}')}\n"
-                    f"{bullet('Bonus', '+1 bot slot, +1 wallet credit')}",
+                    f"{bullet('Referral credit', '+1 redeemable credit')}",
                 )
             except Exception:
                 pass
@@ -5128,6 +5127,7 @@ def get_or_create_user(u: types.User, ref: Optional[int] = None) -> Tuple[Dict[s
         db["users"][key].setdefault("xp", 0)
         db["users"][key].setdefault("achievements", [])
         db["users"][key].setdefault("product_access", {})
+        db["users"][key].setdefault("file_coins", 0)
         db["users"][key].setdefault("bot_slot_grants", [])
         db["users"][key]["last_seen"] = ts_iso()
         db["users"][key]["stats"]["logins"] = int(
@@ -6111,6 +6111,13 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_trial(call)
     if data == "adm_product_files":
         return render_adm_product_files(call)
+    if data == "adm_product_toggle_catalog":
+        if not admin_only_call(call, "full_access"):
+            return
+        enabled = _ff_toggle("file_catalog")
+        audit(call.from_user.id, "file_catalog_toggle", f"now={enabled}")
+        ack(call, f"File Catalog: {'ON' if enabled else 'OFF'}")
+        return render_adm_product_files(call)
     if data == "adm_product_add":
         USER_STATES[call.from_user.id] = {"flow": "adm_product_builder", "spec": {}}
         return render_adm_product_builder(call)
@@ -6153,8 +6160,10 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("adm_product_save_"):
         pid = data[len("adm_product_save_"):]; state = USER_STATES.get(call.from_user.id, {}); db = db_load(); product = db.get("product_files", {}).get(pid)
         if product and state.get("spec"):
-            allowed = {"plan", "referral_cost", "price", "slots", "access_days", "description"}
+            allowed = {"filename", "plan", "referral_cost", "price", "slots", "access_days", "description"}
             product.update({k: v for k, v in state["spec"].items() if k in allowed})
+            if "filename" in state["spec"]:
+                product["filename"] = safe_filename(state["spec"]["filename"], product.get("filename", ""))
             product["category"] = str(product.get("plan", "free"))
             product["slot_limit"] = int(product.get("slots", product.get("slot_limit", 1))); product["slots_remaining"] = min(int(product.get("slots_remaining", 0)), product["slot_limit"])
             db_save(db); audit(call.from_user.id, "product_edit", pid); ack(call, "Product saved")
@@ -7056,6 +7065,14 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_ref_set_slot_refs":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_slot_refs"}
         bot.send_message(call.message.chat.id, "Send the number of referrals required to unlock one slot."); return
+    if data == "adm_ref_redeem":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_redeem_user"}
+        bot.send_message(call.message.chat.id, "Send the user ID whose referral credits should be redeemed."); return
+    if data.startswith("adm_ref_redeem_"):
+        parts = data.split("_")
+        if len(parts) == 5:
+            try: return action_referral_redeem(call, parts[3], int(parts[4]), admin_mode=True)
+            except (TypeError, ValueError): ack(call, "Invalid redemption", show_alert=True)
     # Janitor
     if data == "adm_janitor":             return render_adm_janitor(call)
     if data == "adm_jan_run_now":
@@ -9717,6 +9734,7 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
         Btn("⏱️  Sᴇᴛ Sʟᴏᴛ Dᴀʏꜱ", callback_data="adm_ref_set_slot_days", style="primary"),
         Btn("🔢  Sᴇᴛ Rᴇꜰꜱ/Sʟᴏᴛ", callback_data="adm_ref_set_slot_refs", style="primary"),
     )
+    kb.add(Btn("🎁  Rᴇꜰᴇʀʀᴀʟ Rᴇᴅᴇᴍᴘᴛɪᴏɴ", callback_data="adm_ref_redeem", style="success"))
     kb.add(Btn("📈  Rᴇꜰᴇʀʀᴀʟ Aɴᴀʟʏᴛɪᴄꜱ", callback_data="adm_referral_detail", style="primary"))
     kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("referral_adm", PHOTOS["referral"]), cap, kb, call=call)
@@ -11359,6 +11377,7 @@ def on_text(m: types.Message) -> None:
                 elif field == "plan":
                     value = text.lower()
                     if value not in PLAN_LIMITS and value != "free": raise ValueError("unknown plan")
+                elif field == "filename": value = safe_filename(text.strip(), spec.get("filename", ""))
                 elif field in {"category", "description"}: value = text[:1000]
                 else: raise ValueError("unknown field")
             except (TypeError, ValueError, AssertionError) as exc:
@@ -11470,6 +11489,19 @@ def on_text(m: types.Message) -> None:
             USER_STATES.pop(uid, None)
             bot.reply_to(m, f"Free trial duration set to {hours} hours")
             return
+        if flow == "await_adm_ref_redeem_user":
+            if not is_admin(uid):
+                USER_STATES.pop(uid, None); return
+            try:
+                target = int(text.strip())
+            except (TypeError, ValueError):
+                bot.reply_to(m, "Send a numeric user ID."); return
+            if str(target) not in db_load().get("users", {}):
+                bot.reply_to(m, "User not found."); return
+            USER_STATES.pop(uid, None)
+            fake = type("AdminRedeemCall", (), {"from_user": m.from_user, "message": m})()
+            return render_referral_redeem(fake, target, admin_mode=True)
+
         if flow == "await_adm_ref_slot_days":
             try: value = int(text); assert value > 0
             except (TypeError, ValueError, AssertionError):
@@ -16794,6 +16826,68 @@ def render_profile(call: types.CallbackQuery) -> None:
     show_menu(call.message.chat.id, PHOTOS.get("profile", PHOTOS["main"]), cap, back_main_kb(), call=call)
 
 
+def _referral_redeem(uid: int, mode: str) -> Tuple[bool, str]:
+    """Redeem configured referral credits for one slot or one file coin."""
+    d = db_load()
+    u = d.get("users", {}).get(str(uid))
+    if not u:
+        return False, "User not found"
+    credits = int(u.get("ref_credit", 0) or 0)
+    if mode == "slot":
+        cost = max(1, int(get_setting("referral_slot_referrals", 1) or 1))
+        if credits < cost:
+            return False, f"You need {cost} referral credit(s) for a bot slot"
+        days = max(1, int(get_setting("referral_slot_days", 30) or 30))
+        u.setdefault("bot_slot_grants", []).append({
+            "granted": ts_iso(),
+            "expires": (now_utc() + timedelta(days=days)).isoformat(),
+        })
+        u["ref_credit"] = credits - cost
+        result = f"Redeemed {cost} referral credit(s) for a bot slot valid {days} days"
+    elif mode == "file":
+        if credits < 1:
+            return False, "You need at least 1 referral credit for a file coin"
+        u["ref_credit"] = credits - 1
+        u["file_coins"] = int(u.get("file_coins", 0) or 0) + 1
+        result = "Redeemed 1 referral credit for 1 file coin"
+    else:
+        return False, "Unknown redemption type"
+    db_save(d)
+    audit(uid, "referral_redeem", f"mode={mode}")
+    return True, result
+
+
+def render_referral_redeem(call: types.CallbackQuery, target_uid: Optional[int] = None, admin_mode: bool = False) -> None:
+    uid = int(target_uid if target_uid is not None else call.from_user.id)
+    u = db_load().get("users", {}).get(str(uid), {})
+    if not u:
+        ack(call, "User not found", show_alert=True); return
+    credits = int(u.get("ref_credit", 0) or 0)
+    title = "Admin Referral Redemption" if admin_mode else "Redeem Referral"
+    cap = (
+        f"<b>🎁 {sc(title)}</b>\n{G['div_eq']}\n"
+        f"{bullet('User', uid)}\n"
+        f"{bullet('Referral credits', credits)}\n"
+        f"{bullet('File coins', int(u.get('file_coins', 0) or 0))}\n"
+        f"{G['div']}Choose how to redeem available referral credits.{FOOTER}"
+    )
+    prefix = "adm_ref_redeem" if admin_mode else "ref_redeem"
+    back = "adm_referral_sys" if admin_mode else "menu_referral"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🎟️ Redeem for Bot Slot", callback_data=f"{prefix}_slot_{uid}", style="success"))
+    kb.add(Btn("🪙 Redeem for File Coin", callback_data=f"{prefix}_file_{uid}", style="primary"))
+    kb.add(Btn(f"{G['back']} Back", callback_data=back, style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, kb, call=call)
+
+
+def action_referral_redeem(call: types.CallbackQuery, mode: str, uid: int, admin_mode: bool = False) -> None:
+    if admin_mode and not admin_only_call(call, "full_access"):
+        return
+    ok, message = _referral_redeem(uid, mode)
+    ack(call, message, show_alert=not ok)
+    render_referral_redeem(call, uid, admin_mode=admin_mode)
+
+
 def render_referral(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
     u = db_load()["users"][str(uid)]
@@ -16807,12 +16901,14 @@ def render_referral(call: types.CallbackQuery) -> None:
         f"{G['div_eq']}\n"
         f"{bullet('Your link', link)}\n"
         f"{bullet('Referrals', u.get('ref_count', 0))}\n"
-        f"{bullet('Bonus slots', u.get('bot_slots_bonus', 0))}\n"
+        f"{bullet('Referral credits', u.get('ref_credit', 0))}\n"
+        f"{bullet('File coins', u.get('file_coins', 0))}\n"
         f"{G['div']}\n"
         f"{sc('Each friend who joins via your link gives you +1 bot slot')}.\n{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(Btn(f"{sc('Copy Referral Link')}", callback_data="referral_copy", style="success"))
+    kb.add(Btn("🎁 Redemption of Referral", callback_data="ref_redeem", style="primary"))
     kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, kb, call=call)
 
@@ -17830,21 +17926,39 @@ def _product_plan_ok(user: Dict[str, Any], required: str) -> bool:
     return order.get(current, 0) >= order.get(str(required), 99) and user_plan_active(user)
 
 
-def render_products(call: types.CallbackQuery) -> None:
+def render_products(call: types.CallbackQuery, category: str = "") -> None:
     if not _ff_get("file_catalog"):
         ack(call, "The file catalog is currently unavailable.", show_alert=True)
         return
-    uid = call.from_user.id
-    d = db_load(); products = [p for p in d.get("product_files", {}).values() if p.get("active")]
+    d = db_load()
+    products = [p for p in d.get("product_files", {}).values()
+                if p.get("active") and (not category or str(p.get("plan", p.get("category", "free"))) == category)]
     if not products:
-        cap = f"<b>{sc('Product Files')}</b>\n{G['div_eq']}\n<i>{sc('No files are available yet')}</i>{FOOTER}"
-        show_menu(call.message.chat.id, PHOTOS["main"], cap, _adm_back("menu_main"), call=call); return
-    rows = "\n".join(f"{G['bullet']} <b>{esc(p.get('filename','file'))}</b> — {esc(p.get('plan','free'))} — {p.get('slots_remaining', 0)} slots" for p in products[:30])
-    cap = f"<b>{sc('Product Files')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Choose a file to view its description and access options.{FOOTER}"
+        cap = f"<b>{sc('Product Files')}</b>\n{G['div_eq']}\n<i>{sc('No files are available in this category')}</i>{FOOTER}"
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(Btn(f"{G['back']} Plan Categories", callback_data="menu_products", style="danger"))
+        show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call); return
+    if not category:
+        counts = {}
+        for p in d.get("product_files", {}).values():
+            if p.get("active"):
+                plan = str(p.get("plan", p.get("category", "free")))
+                counts[plan] = counts.get(plan, 0) + 1
+        cap = f"<b>{sc('Product File Categories')}</b>\n{G['div_eq']}\n{sc('Choose a plan category to browse its files.')}{FOOTER}"
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        for plan in PLAN_LIMITS:
+            if counts.get(plan, 0):
+                label = PLAN_LIMITS.get(plan, {}).get("name", plan.title())
+                kb.add(Btn(f"📂 {label} ({counts[plan]})", callback_data=f"products_cat_{plan}", style="primary"))
+        kb.add(Btn(f"{G['back']} {sc('Main Menu')}", callback_data="menu_main", style="danger"))
+        show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call); return
+    rows = "\n".join(f"{G['bullet']} <b>{esc(p.get('filename','file'))}</b> — {p.get('slots_remaining', 0)} slots" for p in products[:30])
+    label = PLAN_LIMITS.get(category, {}).get("name", category.title())
+    cap = f"<b>{sc('Files')} · {esc(label)}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Choose a file to view its description and access options.{FOOTER}"
     kb = types.InlineKeyboardMarkup(row_width=1)
     for p in products[:30]:
         kb.add(Btn(f"📄 {p.get('filename','file')[:35]}", callback_data=f"product_view_{p['id']}", style="primary"))
-    kb.add(Btn(f"{G['back']} {sc('Main Menu')}", callback_data="menu_main", style="danger"))
+    kb.add(Btn(f"{G['back']} Plan Categories", callback_data="menu_products", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call)
 
 
@@ -17880,9 +17994,15 @@ def action_product_referral(call: types.CallbackQuery, product_id: str) -> None:
         ack(call, "The file catalog is currently unavailable.", show_alert=True)
         return
     uid = call.from_user.id; d = db_load(); u = d["users"].get(str(uid), {})
-    ok, msg, product = product_access(d, uid, product_id, plan_active=lambda plan: _product_plan_ok(u, plan), referral_count=len(u.get("referrals", []) or []))
+    cost = int(d.get("product_files", {}).get(product_id, {}).get("referral_cost", 0) or 0)
+    if cost and int(u.get("file_coins", 0) or 0) < cost:
+        ack(call, f"You need {cost} file coin(s) to unlock this file. Redeem referrals first.", show_alert=True)
+        return
+    ok, msg, product = product_access(d, uid, product_id, plan_active=lambda plan: _product_plan_ok(u, plan), referral_count=cost)
     if not ok:
         ack(call, msg, show_alert=True); return
+    if cost:
+        u["file_coins"] = int(u.get("file_coins", 0) or 0) - cost
     u.setdefault("product_access", {})[product_id] = product["buyers"][str(uid)]
     award_for_event(d, u, "product")
     record_activity(d, uid, "product_unlock", f"{u.get('name','A user')} unlocked a product", public=False)
@@ -17930,8 +18050,10 @@ def render_achievements(call: types.CallbackQuery) -> None:
 def render_adm_product_files(call: types.CallbackQuery) -> None:
     products = db_load().get("product_files", {})
     rows = "\n".join(f"<code>{pid}</code> — {esc(p.get('filename','file'))} | {esc(p.get('plan','free'))} | {p.get('slots_remaining',0)} left" for pid, p in products.items()) or f"<i>{sc('No product files')}</i>"
-    cap = f"<b>📦 {sc('Product File Manager')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Create and manage downloadable files with guided controls.{FOOTER}"
+    enabled = _ff_get("file_catalog")
+    cap = f"<b>📦 {sc('Product File Manager')}</b>\n{G['div_eq']}\n{bullet('User Catalog', '✅ ON' if enabled else '❌ OFF')}\n{rows}\n{G['div']}Create and manage downloadable files with guided controls.{FOOTER}"
     kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn(f"{'✅' if enabled else '❌'} User Catalog", callback_data="adm_product_toggle_catalog", style="success" if enabled else "danger"))
     kb.add(Btn("➕ Add Product File", callback_data="adm_product_add", style="success"))
     for pid, product in list(products.items())[:20]:
         label = str(product.get("filename", "file"))[:24]
@@ -17948,17 +18070,19 @@ def render_adm_product_builder(call: types.CallbackQuery, product_id: str = "") 
     spec = dict(existing) if product_id else {}
     spec.update(state.get("spec", {}))
     spec.setdefault("plan", "free"); spec["category"] = str(spec.get("plan", "free")); spec.setdefault("referral_cost", 0)
+    spec.setdefault("filename", "")
     spec.setdefault("price", 0); spec.setdefault("slots", spec.get("slot_limit", 1)); spec.setdefault("access_days", 30); spec.setdefault("description", "")
     price_display = f"{spec['price']}{cur_sym()}"
     state.update({"flow": "adm_product_builder", "product_id": product_id, "spec": spec,
                   "builder_message_id": getattr(call.message, "message_id", state.get("builder_message_id"))}); USER_STATES[uid] = state
     cap = (f"<b>🧩 {sc('Product File Builder')}</b>\n{G['div_eq']}\n"
+           f"{bullet('Script name', spec['filename'] or 'Uses uploaded filename')}\n"
            f"{bullet('Category', spec['category'])}\n{bullet('Required plan', spec['plan'])}\n"
            f"{bullet('Referral unlock', spec['referral_cost'])}\n{bullet('Price', price_display)}\n"
            f"{bullet('Slots', spec['slots'])}\n{bullet('Access days', spec['access_days'])}\n"
            f"{bullet('Description', spec['description'] or 'Not set')}\n{G['div']}Choose a field to edit.{FOOTER}")
     kb = types.InlineKeyboardMarkup(row_width=2)
-    fields = [("💎 Required Plan", "plan"), ("🔗 Referral Count", "referral_cost"), ("💳 Price", "price"), ("🎟️ Slots", "slots"), ("⏱️ Access Days", "access_days"), ("📝 Description", "description")]
+    fields = [("🏷️ Script Name", "filename"), ("💎 Required Plan", "plan"), ("🔗 Referral Count", "referral_cost"), ("💳 Price", "price"), ("🎟️ Slots", "slots"), ("⏱️ Access Days", "access_days"), ("📝 Description", "description")]
     for label, key in fields:
         kb.add(Btn(label, callback_data=f"adm_product_field_{key}", style="primary"))
     if product_id:
@@ -18048,15 +18172,19 @@ def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
         _product_progress(5, "Preparing download")
         info = bot.get_file(m.document.file_id); raw = bot.download_file(info.file_path)
         _product_progress(15, "File downloaded")
-        filename = Path(m.document.file_name or "product.bin").name
-        scan = _run_security_scan([(filename, raw)], uploader_uid=uid,
+        original_filename = Path(m.document.file_name or "product.bin").name
+        requested_filename = str(st.get("spec", {}).get("filename", "") or "").strip()
+        filename = safe_filename(requested_filename, original_filename) if requested_filename else safe_filename(original_filename)
+        scan = _run_security_scan([(original_filename, raw)], uploader_uid=uid,
                                   progress_cb=lambda pct, status: _product_progress(15 + int(pct * 0.75), status))
         if scan.get("recommendation") == "REJECT":
             _product_progress(100, "Rejected by security scan")
             bot.reply_to(m, f"{G['no']} Product rejected by security scan. It was not published.\n<code>{esc(scan.get('summary',''))}</code>", parse_mode="HTML"); return
         _product_progress(92, "Publishing product")
         product_dir = DIRS["uploads"] / "products"; product_dir.mkdir(parents=True, exist_ok=True)
-        product = create_product(db_load(), path="", filename=filename, **st["spec"])
+        product_spec = dict(st["spec"])
+        product_spec.pop("filename", None)
+        product = create_product(db_load(), path="", filename=filename, **product_spec)
         path = product_dir / f"{product['id']}_{filename}"; path.write_bytes(raw); product["path"] = str(path)
         db = db_load(); db.setdefault("product_files", {})[product["id"]] = product
         record_activity(db, uid, "product_published", f"A new {product.get('category','general')} file was published")
@@ -20025,6 +20153,11 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_profile":  render_profile(call); return
     if data == "menu_referral": render_referral(call); return
     if data == "menu_products": render_products(call); return
+    if data.startswith("products_cat_"):
+        category = data[len("products_cat_"):]
+        if category not in PLAN_LIMITS:
+            ack(call, "Unknown plan category", show_alert=True); return
+        render_products(call, category); return
     if data == "menu_achievements": render_achievements(call); return
     if data.startswith("product_view_"): render_product_view(call, data[len("product_view_"):]); return
     if data.startswith("product_ref_"): action_product_referral(call, data[len("product_ref_"):]); return
@@ -20041,6 +20174,14 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
             bot.send_message(call.message.chat.id, f"<b>{sc('Your Referral Link')}</b>\n<code>{link}</code>", parse_mode="HTML")
         except Exception:
             pass
+        return
+    if data == "ref_redeem":
+        render_referral_redeem(call); return
+    if data.startswith("ref_redeem_"):
+        parts = data.split("_")
+        if len(parts) == 4:
+            try: action_referral_redeem(call, parts[2], int(parts[3]))
+            except (TypeError, ValueError): ack(call, "Invalid redemption", show_alert=True)
         return
     if data == "menu_wallet":   render_wallet(call); return
     if data == "menu_help":     render_help(call); return
