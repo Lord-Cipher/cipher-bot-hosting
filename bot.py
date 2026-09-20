@@ -20276,7 +20276,12 @@ def main() -> int:
         except Exception as e:
             print(f"[bot] webhook clear warning: {e}", flush=True)
             
-        print(f"[bot] starting long polling (stability mode)…", flush=True)
+        try:
+            polling_timeout = max(0, int(os.environ.get("POLLING_TIMEOUT", "80")))
+        except (TypeError, ValueError):
+            polling_timeout = 80
+        mode_label = "short polling" if polling_timeout <= 1 else "long polling"
+        print(f"[bot] starting {mode_label} (timeout={polling_timeout}s)…", flush=True)
         while True:
             try:
                 # Webhook mode exits above; polling is only entered after
@@ -20284,7 +20289,7 @@ def main() -> int:
                 bot.infinity_polling(
                     skip_pending=True, 
                     timeout=90, 
-                    long_polling_timeout=80,
+                    long_polling_timeout=polling_timeout,
                     none_stop=True,
                     logger_level=logging.ERROR
                 )
