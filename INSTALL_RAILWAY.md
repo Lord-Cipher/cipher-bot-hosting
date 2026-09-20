@@ -21,6 +21,7 @@ In your Railway project settings, configure the following environment variables:
 | `BOT_TOKEN` | Your main Telegram hosting bot token from `@BotFather`. | **Yes** |
 | `OWNER_ID` | Your Telegram Numeric User ID (e.g., `8065173971`). | **Yes** |
 | `FORCE_POLLING` | Set to `true` if you want long-polling instead of webhooks. | Optional |
+| `WEBHOOK_ENABLED` | Set to `true` for a multi-replica deployment with a public URL. | Optional |
 
 ---
 
@@ -37,3 +38,4 @@ In your Railway project settings, configure the following environment variables:
 - **Process Management:** Railway manages the container lifecycle directly. If the Python process crashes, Railway restarts the entire container.
 - **Keepalive Server:** The bot starts a lightweight HTTP keepalive server on port `8080` (or `PORT` environment variable) to satisfy Railway's health checks.
 - **Connection Mode:** If no domain is set, the bot automatically falls back to high-stability **Long Polling**, requiring zero manual domain configuration.
+- **Replica rule:** Telegram permits only one polling consumer per bot token. Keep polling deployments at exactly one replica. If running multiple replicas, configure `RAILWAY_PUBLIC_DOMAIN` or `PUBLIC_URL` and set `WEBHOOK_ENABLED=true` so Telegram sends updates through the webhook instead.

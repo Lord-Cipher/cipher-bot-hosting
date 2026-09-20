@@ -20195,6 +20195,11 @@ def main() -> int:
 
     # Check if admin explicitly enabled webhook or if we have a valid domain
     wh_enabled = get_setting("webhook_enabled", False)
+    # On multi-replica hosts such as Railway, explicitly enabling webhooks
+    # prevents replicas from competing for Telegram's getUpdates stream.
+    webhook_env = os.environ.get("WEBHOOK_ENABLED")
+    if webhook_env is not None:
+        wh_enabled = webhook_env.lower() in ("true", "1", "yes", "on")
     
     # If FORCE_POLLING is active, respect it
     force_polling = os.environ.get("FORCE_POLLING", "false").lower() in ("true", "1", "yes")
