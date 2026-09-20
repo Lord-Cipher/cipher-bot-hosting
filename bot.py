@@ -2721,13 +2721,16 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f" Bᴜʏ Pʟᴀɴ",    callback_data="menu_buy",      style="success"),
     )
     kb.add(
-        Btn(f"Rᴇꜰᴇʀʀᴀʟ",    callback_data="menu_referral", style="primary"),
+        Btn(f"Rᴇꜰᴇʀʀᴀʟ", callback_data="menu_referral", style="primary"),
         Btn(f"Pʀᴏꜰɪʟᴇ",      callback_data="menu_profile",  style="primary"),
     )
-    kb.add(
-        Btn("Fɪʟᴇ Cᴀᴛᴀʟᴏɢ", callback_data="menu_products", style="primary"),
-        Btn("Aᴄʜɪᴇᴠᴇᴍᴇɴᴛꜱ", callback_data="menu_achievements", style="primary"),
-    )
+    if _ff_get("file_catalog"):
+        kb.add(
+            Btn("Fɪʟᴇ Cᴀᴛᴀʟᴏɢ", callback_data="menu_products", style="primary"),
+            Btn("Aᴄʜɪᴇᴠᴇᴍᴇɴᴛꜱ", callback_data="menu_achievements", style="primary"),
+        )
+    else:
+        kb.add(Btn("Aᴄʜɪᴇᴠᴇᴍᴇɴᴛꜱ", callback_data="menu_achievements", style="primary"))
     kb.add(
         Btn(f" Wᴀʟʟᴇᴛ",     callback_data="menu_wallet",   style="success"),
         Btn(f"Tɪᴄᴋᴇᴛꜱ",    callback_data="menu_tickets",  style="success"),
@@ -8244,6 +8247,7 @@ _FEATURE_FLAG_DEFAULTS: Dict[str, bool] = {
     "github_backup":        True,   # enable GitHub backup
     "cloudflare_tunnel":    True,   # enable Cloudflare tunnel feature
     "ai_scanner":           True,   # enable AI security scan
+    "file_catalog":         True,   # show the community file catalog to users
     "approval_system":      True,   # require admin approval for uploads
     "maintenance_bypass":   False,  # admins bypass maintenance mode
     "sandbox_wipe":         True,   # wipe source files after start
@@ -17575,6 +17579,9 @@ def _product_plan_ok(user: Dict[str, Any], required: str) -> bool:
 
 
 def render_products(call: types.CallbackQuery) -> None:
+    if not _ff_get("file_catalog"):
+        ack(call, "The file catalog is currently unavailable.", show_alert=True)
+        return
     uid = call.from_user.id
     d = db_load(); products = [p for p in d.get("product_files", {}).values() if p.get("active")]
     if not products:
@@ -17590,6 +17597,9 @@ def render_products(call: types.CallbackQuery) -> None:
 
 
 def render_product_view(call: types.CallbackQuery, product_id: str) -> None:
+    if not _ff_get("file_catalog"):
+        ack(call, "The file catalog is currently unavailable.", show_alert=True)
+        return
     p = db_load().get("product_files", {}).get(product_id)
     if not p or not p.get("active"):
         ack(call, "Product unavailable"); return
@@ -17614,6 +17624,9 @@ def _send_product_file(uid: int, product: Dict[str, Any]) -> None:
 
 
 def action_product_referral(call: types.CallbackQuery, product_id: str) -> None:
+    if not _ff_get("file_catalog"):
+        ack(call, "The file catalog is currently unavailable.", show_alert=True)
+        return
     uid = call.from_user.id; d = db_load(); u = d["users"].get(str(uid), {})
     ok, msg, product = product_access(d, uid, product_id, plan_active=lambda plan: _product_plan_ok(u, plan), referral_count=len(u.get("referrals", []) or []))
     if not ok:
@@ -17625,6 +17638,9 @@ def action_product_referral(call: types.CallbackQuery, product_id: str) -> None:
 
 
 def action_product_purchase(call: types.CallbackQuery, product_id: str) -> None:
+    if not _ff_get("file_catalog"):
+        ack(call, "The file catalog is currently unavailable.", show_alert=True)
+        return
     p = db_load().get("product_files", {}).get(product_id)
     if not p: ack(call, "Product unavailable"); return
     if not OXAPAY_KEY:
@@ -21322,17 +21338,18 @@ def get_ai_model(uid: int) -> str:
     
     # Check if the current plan (which includes trialed plans) is still active
     current_plan = u.get("plan", "free")
+    # Administrative permissions control the admin panel; they must not grant
+    # enterprise AI to an account whose subscription is still Free. This is
+    # also the single tier lookup used by chat, model selection, and file
+    # analysis, so every AI entry point observes the same entitlement.
     if current_plan == "free":
-        # Admins retain enterprise access by default, but an explicitly
-        # assigned paid plan must remain visible in the user panel so its
-        # plan-specific model pool can be previewed and used consistently.
-        return "enterprise" if (is_owner(uid) or is_admin(uid)) else "free"
-        
-    if user_plan_active(u):
+        return "free"
+
+    if current_plan in PLAN_LIMITS and user_plan_active(u):
         return current_plan
-        
-    # Plan expired, immediate downgrade to free
-    return "enterprise" if (is_owner(uid) or is_admin(uid)) else "free"
+
+    # Plan expired or contains an invalid value: immediately downgrade to free.
+    return "free"
 
 def get_plan_primary_model(plan: str) -> str:
     """First operative in the plan pool."""

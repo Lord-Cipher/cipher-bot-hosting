@@ -78,6 +78,13 @@ assert bot.get_plan_ai_models("lifetime") == all_models
 assert bot.get_ai_model(42) == "lifetime"
 assert bot.get_ai_model(9001) == "lifetime"
 
+# Owner/admin status must not bypass the user's subscription tier. A Free
+# owner sees the Free pool rather than Enterprise operatives.
+users["9001"]["plan"] = "free"
+assert bot.get_ai_model(9001) == "free"
+assert bot.get_plan_ai_models(bot.get_ai_model(9001)) == bot.get_plan_ai_models("free")
+users["9001"]["plan"] = "lifetime"
+
 # No user-side three-model truncation remains, either for defaults or saved
 # choices. A saved choice is preserved without deleting later fallbacks.
 assert bot.get_user_ai_models(42, "lifetime") == all_models
