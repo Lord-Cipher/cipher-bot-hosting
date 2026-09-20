@@ -20523,10 +20523,25 @@ def main() -> int:
         except Exception as e:
             print(f"[bot] webhook clear warning: {e}", flush=True)
             
+        # Keep the original deployment behavior: managed hosted environments
+        # use short polling, while a VPS uses long polling.
+        # An explicit POLLING_TIMEOUT remains available for other hosts.
+        is_managed_host = bool(
+            os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+            or os.environ.get("RAILWAY_ENVIRONMENT_ID")
+            or os.environ.get("RAILWAY_PROJECT_ID")
+            or os.environ.get("RENDER_EXTERNAL_URL")
+            or os.environ.get("HEROKU_DYNO_ID")
+            or os.environ.get("DYNO")
+            or os.environ.get("FLY_APP_NAME")
+            or os.environ.get("KOYEB_APP_NAME")
+            or os.environ.get("K_SERVICE")
+        )
+        default_polling_timeout = "1" if is_managed_host else "80"
         try:
-            polling_timeout = max(0, int(os.environ.get("POLLING_TIMEOUT", "80")))
+            polling_timeout = max(0, int(os.environ.get("POLLING_TIMEOUT", default_polling_timeout)))
         except (TypeError, ValueError):
-            polling_timeout = 80
+            polling_timeout = 1 if is_managed_host else 80
         mode_label = "short polling" if polling_timeout <= 1 else "long polling"
         print(f"[bot] starting {mode_label} (timeout={polling_timeout}s)…", flush=True)
         while True:
