@@ -72,6 +72,9 @@ assert 'OxaPay Payment History' in BOT
 assert 'def action_adm_oxapay_export' in BOT
 assert '"status": status' in BOT
 assert 'Export CSV' in BOT
+assert 'getUpdates conflicts (409)' in BOT
+assert 'elif is_managed_host and pub_url:' in BOT
+assert 'refusing polling fallback to avoid Telegram 409 conflicts' in BOT
 assert 'await_adm_oxapay_key' in BOT
 assert 'bot.delete_message(m.chat.id, m.message_id)' in BOT
 assert '"amount": float(usd_amount)' in BOT

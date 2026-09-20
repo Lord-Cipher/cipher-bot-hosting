@@ -20435,6 +20435,18 @@ def main() -> int:
         if pub_url and not pub_url.startswith("http"):
             pub_url = f"https://{pub_url}"
 
+    is_managed_host = bool(
+        os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+        or os.environ.get("RAILWAY_ENVIRONMENT_ID")
+        or os.environ.get("RAILWAY_PROJECT_ID")
+        or os.environ.get("RENDER_EXTERNAL_URL")
+        or os.environ.get("HEROKU_DYNO_ID")
+        or os.environ.get("DYNO")
+        or os.environ.get("FLY_APP_NAME")
+        or os.environ.get("KOYEB_APP_NAME")
+        or os.environ.get("K_SERVICE")
+    )
+
     # Check if admin explicitly enabled webhook or if we have a valid domain
     wh_enabled = get_setting("webhook_enabled", False)
     # On multi-replica hosts such as Railway, explicitly enabling webhooks
@@ -20442,6 +20454,10 @@ def main() -> int:
     webhook_env = os.environ.get("WEBHOOK_ENABLED")
     if webhook_env is not None:
         wh_enabled = webhook_env.lower() in ("true", "1", "yes", "on")
+    elif is_managed_host and pub_url:
+        # A public managed deployment may have overlapping replicas during
+        # deploys. Webhook mode avoids Telegram getUpdates conflicts (409).
+        wh_enabled = True
     
     # If FORCE_POLLING is active, respect it
     force_polling = os.environ.get("FORCE_POLLING", "false").lower() in ("true", "1", "yes")
@@ -20507,9 +20523,15 @@ def main() -> int:
                 while True:
                     time.sleep(3600)
             else:
+                if is_managed_host and pub_url and not force_polling:
+                    print("[bot] webhook setup failed on managed public deployment; refusing polling fallback to avoid Telegram 409 conflicts", flush=True)
+                    return 1
                 print("[bot] webhook failed after retries, falling back to polling", flush=True)
                 wh_enabled = False
         except Exception as e:
+            if is_managed_host and pub_url and not force_polling:
+                print(f"[bot] webhook fatal error on managed public deployment; refusing polling fallback: {e}", flush=True)
+                return 1
             print(f"[bot] webhook fatal error: {e}, falling back to polling", flush=True)
             wh_enabled = False
 
@@ -20526,17 +20548,6 @@ def main() -> int:
         # Keep the original deployment behavior: managed hosted environments
         # use short polling, while a VPS uses long polling.
         # An explicit POLLING_TIMEOUT remains available for other hosts.
-        is_managed_host = bool(
-            os.environ.get("RAILWAY_PUBLIC_DOMAIN")
-            or os.environ.get("RAILWAY_ENVIRONMENT_ID")
-            or os.environ.get("RAILWAY_PROJECT_ID")
-            or os.environ.get("RENDER_EXTERNAL_URL")
-            or os.environ.get("HEROKU_DYNO_ID")
-            or os.environ.get("DYNO")
-            or os.environ.get("FLY_APP_NAME")
-            or os.environ.get("KOYEB_APP_NAME")
-            or os.environ.get("K_SERVICE")
-        )
         default_polling_timeout = "1" if is_managed_host else "80"
         try:
             polling_timeout = max(0, int(os.environ.get("POLLING_TIMEOUT", default_polling_timeout)))
