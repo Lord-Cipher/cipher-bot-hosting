@@ -18,6 +18,11 @@ import bot  # noqa: E402
 
 settings = {}
 users = {
+    "7": {
+        "id": 7,
+        "plan": "free",
+        "ai_models": [],
+    },
     "42": {
         "id": 42,
         "plan": "lifetime",
@@ -78,11 +83,11 @@ assert bot.get_plan_ai_models("lifetime") == all_models
 assert bot.get_ai_model(42) == "lifetime"
 assert bot.get_ai_model(9001) == "lifetime"
 
-# Owner/admin status must not bypass the user's subscription tier. A Free
-# owner sees the Free pool rather than Enterprise operatives.
+# Owner/admin accounts are Lifetime even if an old database record still says
+# Free. Ordinary Free users remain restricted to the Free pool.
 users["9001"]["plan"] = "free"
-assert bot.get_ai_model(9001) == "free"
-assert bot.get_plan_ai_models(bot.get_ai_model(9001)) == bot.get_plan_ai_models("free")
+assert bot.get_ai_model(9001) == "lifetime"
+assert bot.get_ai_model(7) == "free"
 users["9001"]["plan"] = "lifetime"
 
 # No user-side three-model truncation remains, either for defaults or saved

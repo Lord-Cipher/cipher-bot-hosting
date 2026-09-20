@@ -5069,6 +5069,16 @@ def get_or_create_user(u: types.User, ref: Optional[int] = None) -> Tuple[Dict[s
         db["users"][key]["stats"]["logins"] = int(
             db["users"][key]["stats"].get("logins", 0)) + 1
         db_save(db)
+    # Administrators are platform operators, not subscription customers.
+    # Persist Lifetime so every quota, profile, and AI entry point observes
+    # the same entitlement instead of granting special access in only one UI.
+    admin_user = db["users"][key]
+    if is_admin(u.id) and admin_user.get("plan") != "lifetime":
+        admin_user["plan"] = "lifetime"
+        admin_user["plan_expires"] = (
+            now_utc() + timedelta(days=PLAN_LIMITS["lifetime"]["days"])
+        ).isoformat()
+        db_save(db)
     return db["users"][key], is_new
 
 
@@ -21338,10 +21348,12 @@ def get_ai_model(uid: int) -> str:
     
     # Check if the current plan (which includes trialed plans) is still active
     current_plan = u.get("plan", "free")
-    # Administrative permissions control the admin panel; they must not grant
-    # enterprise AI to an account whose subscription is still Free. This is
-    # also the single tier lookup used by chat, model selection, and file
-    # analysis, so every AI entry point observes the same entitlement.
+    # Administrators are Lifetime accounts. This is also the single tier
+    # lookup used by chat, model selection, and file analysis, so every AI
+    # entry point observes the same entitlement.
+    if is_admin(uid):
+        return "lifetime"
+
     if current_plan == "free":
         return "free"
 
