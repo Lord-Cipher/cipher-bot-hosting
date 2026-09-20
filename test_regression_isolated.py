@@ -62,9 +62,12 @@ assert "await_vault_token" in BOT
 assert "_store_vault_runtime_token" in BOT
 assert "Authorization" in BOT
 assert "CIPHER_VAULT_TOKEN" in BOT
-assert "def _local_amount_to_usd" in BOT
+assert 'def _local_amount_to_usd' in BOT
 assert "https://api.oxapay.com/v1/payment/invoice" in BOT
-assert '"merchant_api_key": OXAPAY_KEY' in BOT
+assert '"merchant_api_key": _configured_oxapay_key()' in BOT
+assert 'def _test_oxapay_connection' in BOT
+assert 'await_adm_oxapay_key' in BOT
+assert 'bot.delete_message(m.chat.id, m.message_id)' in BOT
 assert '"amount": float(usd_amount)' in BOT
 assert 'def _create_oxapay_invoice(local_amount: float, currency_code: str' in BOT
 assert '_local_amount_to_usd(local_amount, currency_code)' in BOT

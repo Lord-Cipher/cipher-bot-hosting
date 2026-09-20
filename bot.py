@@ -1650,6 +1650,57 @@ def set_setting(key: str, value: Any) -> None:
     settings_save(s)
 
 
+def _oxapay_cipher() -> Fernet:
+    """Create the local application cipher used for admin-entered secrets."""
+    material = f"{TOKEN}|{OWNER_ID}|oxapay".encode("utf-8")
+    key = base64.urlsafe_b64encode(hashlib.sha256(material).digest())
+    return Fernet(key)
+
+
+def _configured_oxapay_key() -> str:
+    """Return the admin-configured key, falling back to the deployment env."""
+    encrypted = str(get_setting("oxapay_key_cipher", "") or "")
+    if encrypted:
+        try:
+            return _oxapay_cipher().decrypt(encrypted.encode("ascii")).decode("utf-8").strip()
+        except Exception:
+            logging.warning("[oxapay] stored merchant key could not be decrypted")
+    return OXAPAY_KEY
+
+
+def _save_oxapay_key(value: str) -> None:
+    cipher = _oxapay_cipher().encrypt(value.strip().encode("utf-8")).decode("ascii")
+    set_setting("oxapay_key_cipher", cipher)
+
+
+def _mask_oxapay_key(value: str) -> str:
+    value = value or ""
+    return f"{value[:4]}…{value[-4:]}" if len(value) >= 10 else "configured"
+
+
+def _test_oxapay_connection(key: str) -> Tuple[bool, str]:
+    """Validate a merchant key without creating an invoice or charging anyone."""
+    if not key:
+        return False, "No OxaPay merchant key is configured."
+    try:
+        response = requests.get(
+            "https://api.oxapay.com/v1/payment",
+            headers={"merchant_api_key": key, "Accept": "application/json"},
+            params={"page": 1, "size": 1},
+            timeout=15,
+        )
+        body = response.json() if response.content else {}
+        if response.status_code == 200 and int(body.get("status", 200)) == 200:
+            total = ((body.get("data") or {}).get("meta") or {}).get("total", 0)
+            return True, f"Connection successful. Merchant history is accessible ({total} payment(s))."
+        error = body.get("error") or body.get("message") or f"HTTP {response.status_code}"
+        if isinstance(error, dict):
+            error = error.get("message") or str(error)
+        return False, str(error)[:240]
+    except requests.RequestException as exc:
+        return False, f"Connection failed: {exc}"
+
+
 def cache_clear_all() -> None:
     """Drop every cached load so the next read re-parses from disk.
     Used by the Settings → Reload button after manual file edits."""
@@ -2841,7 +2892,7 @@ def _create_oxapay_invoice(local_amount: float, currency_code: str, uid: int, pl
     response = requests.post(
         "https://api.oxapay.com/v1/payment/invoice",
         headers={
-            "merchant_api_key": OXAPAY_KEY,
+            "merchant_api_key": _configured_oxapay_key(),
             "Content-Type": "application/json",
             "Accept": "application/json",
         },
@@ -2864,7 +2915,7 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
     p = PLAN_LIMITS.get(plan)
     if not p: ack(call, "Unknown plan"); return
     
-    if not OXAPAY_KEY:
+    if not _configured_oxapay_key():
         bot.answer_callback_query(call.id, "⚠️ Automatic payments are not configured by admin.", show_alert=True)
         return
 
@@ -6677,6 +6728,16 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_security_log":        return render_adm_security_log(call)
     # Payment Config
     if data == "adm_pay_config":          return render_adm_pay_config(call)
+    if data == "adm_oxapay":              return render_adm_oxapay(call)
+    if data == "adm_oxapay_test":         return action_adm_oxapay_test(call)
+    if data == "adm_oxapay_set":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_oxapay_key"}
+        bot.send_message(
+            call.message.chat.id,
+            "Send your OxaPay Merchant API key now. The message containing it will be deleted immediately after receipt and the key will be stored encrypted.",
+            parse_mode="HTML",
+        )
+        return
     if data == "adm_ai_config":           return render_adm_ai_config(call)
     if data == "adm_ai_scanner_model":    return render_adm_ai_scanner_model(call)
     if data.startswith("adm_ai_scanner_"):
@@ -8722,6 +8783,40 @@ def action_adm_gh_dl_file(call: types.CallbackQuery, repo: str, path: str) -> No
 # PAYMENT CONFIG PANEL
 # ─────────────────────────────────────────────────────────────────────────────
 
+def render_adm_oxapay(call: types.CallbackQuery) -> None:
+    key = _configured_oxapay_key()
+    source = "admin integration" if get_setting("oxapay_key_cipher", "") else "environment"
+    cap = (
+        f"<b>🪙 {sc('OxaPay Integration')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"{bullet('Status', '✅ Configured' if key else '❌ Not configured')}\n"
+        f"{bullet('Source', source if key else '—')}\n"
+        f"{bullet('Key', _mask_oxapay_key(key) if key else '—')}\n"
+        f"{G['div']}\n"
+        f"{sc('Enter a Merchant API key below. The Telegram message containing the key is deleted immediately after receipt, and the stored value is encrypted.')}"
+        f"{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        Btn("🔐  Sᴇᴛ / Rᴇᴘʟᴀᴄᴇ Kᴇʏ", callback_data="adm_oxapay_set", style="primary"),
+        Btn("🔌  Tᴇꜱᴛ Cᴏɴɴᴇᴄᴛɪᴏɴ", callback_data="adm_oxapay_test", style="success"),
+    )
+    kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
+
+
+def action_adm_oxapay_test(call: types.CallbackQuery) -> None:
+    if not is_admin(call.from_user.id):
+        ack(call, "Admin access required.", show_alert=True)
+        return
+    key = _configured_oxapay_key()
+    ack(call, "Testing OxaPay connection…")
+    ok, message = _test_oxapay_connection(key)
+    audit(call.from_user.id, "oxapay_connection_test", "success" if ok else "failed")
+    ack(call, message, show_alert=True)
+    render_adm_oxapay(call)
+
+
 def render_adm_pay_config(call: types.CallbackQuery) -> None:
     """Full payment configuration panel."""
     auto_approve = bool(get_setting("auto_approve_payments", False))
@@ -8759,6 +8854,11 @@ def render_adm_pay_config(call: types.CallbackQuery) -> None:
         Btn("💰  Pᴀʏ Mᴇᴛʜᴏᴅꜱ",   callback_data="adm_pay_methods",      style="primary"),
         Btn("📊  Aᴍᴏᴜɴᴛ Lɪᴍɪᴛꜱ",  callback_data="adm_pay_limits",       style="primary"),
     )
+    kb.add(Btn(
+        f"🪙  OxaPay: {'✅' if _configured_oxapay_key() else '❌'}",
+        callback_data="adm_oxapay",
+        style="primary",
+    ))
     kb.add(
         Btn("💱  Cᴜʀʀᴇɴᴄʏ",        callback_data="adm_pay_currency",     style="primary"),
         Btn("🧾  Rᴇᴄᴇɪᴘᴛ Tᴇᴍᴘʟ",  callback_data="adm_pay_receipt_tmpl", style="primary"),
@@ -12294,6 +12394,28 @@ def on_text(m: types.Message) -> None:
                 f"{G['div']}\n{rows}"
             )
             bot.reply_to(m, cap, parse_mode="HTML")
+            return
+
+        if flow == "await_adm_oxapay_key":
+            if not is_admin(uid):
+                USER_STATES.pop(uid, None)
+                return
+            USER_STATES.pop(uid, None)
+            key = text.strip()
+            try:
+                bot.delete_message(m.chat.id, m.message_id)
+            except Exception:
+                pass
+            if not key or len(key) > 256 or any(ch.isspace() for ch in key):
+                bot.send_message(m.chat.id, f"{G['no']} Invalid OxaPay key format.")
+                return
+            _save_oxapay_key(key)
+            audit(uid, "oxapay_key_saved", "encrypted key stored")
+            bot.send_message(
+                m.chat.id,
+                f"{G['ok']} OxaPay key saved securely as <code>{esc(_mask_oxapay_key(key))}</code>.\nUse <b>Test connection</b> to verify it.",
+                parse_mode="HTML",
+            )
             return
 
         if flow == "await_adm_pay_number":
@@ -17653,7 +17775,7 @@ def action_product_purchase(call: types.CallbackQuery, product_id: str) -> None:
         return
     p = db_load().get("product_files", {}).get(product_id)
     if not p: ack(call, "Product unavailable"); return
-    if not OXAPAY_KEY:
+    if not _configured_oxapay_key():
         ack(call, "Automatic payments are not configured", show_alert=True); return
     amount = float(p.get("price", 0) or 0)
     if amount <= 0:

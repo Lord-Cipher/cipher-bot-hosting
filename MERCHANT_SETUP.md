@@ -33,6 +33,10 @@ Once the key is set, you can manage payment modes via the **Admin Panel**:
     *   **Blue/Primary:** Manual payments (User sends proof).
     *   **Green/Success:** Automatic payments (OxaPay generates links).
 
+### In-bot integration
+
+Instead of using an environment variable, open **Admin Panel → Payment Configuration → OxaPay Integration**, choose **Set / Replace Key**, and send the Merchant API key. The bot deletes the message containing the key immediately, encrypts the key before saving it, and only displays a masked suffix afterward. Use **Test Connection** on the same screen to query the merchant payment history without creating an invoice or charging funds.
+
 ---
 
 ## 4. How It Works
