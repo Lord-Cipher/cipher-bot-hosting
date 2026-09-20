@@ -80,6 +80,7 @@ assert 'bot.delete_message(m.chat.id, m.message_id)' in BOT
 assert 'adm_product_toggle_catalog' in BOT
 assert 'products_cat_' in BOT
 assert 'requested_filename' in BOT
+assert 'product file in any format' in BOT
 assert 'file_coins' in BOT
 assert 'f"{prefix}_slot_{uid}"' in BOT
 assert 'adm_ref_redeem' in BOT

@@ -6156,7 +6156,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         state = USER_STATES.get(call.from_user.id, {})
         if state.get("flow") != "adm_product_builder": return render_adm_product_files(call)
         USER_STATES[call.from_user.id] = {**state, "flow": "await_adm_product_file"}
-        bot.send_message(call.message.chat.id, "Now send the product document. It will be security-scanned before publication."); return
+        bot.send_message(call.message.chat.id, "Now send the product document in any format (for example ZIP, 7z, FOR, PDF, or another file type). It will be security-scanned before publication."); return
     if data.startswith("adm_product_save_"):
         pid = data[len("adm_product_save_"):]; state = USER_STATES.get(call.from_user.id, {}); db = db_load(); product = db.get("product_files", {}).get(pid)
         if product and state.get("spec"):
@@ -18138,7 +18138,7 @@ def _handle_adm_product_command(m: types.Message, text: str) -> None:
     except ValueError:
         bot.reply_to(m, "Referral count, price, slots, and days must be valid non-negative numbers."); return
     USER_STATES[m.from_user.id] = {"flow": "await_adm_product_file", "spec": spec}
-    bot.reply_to(m, f"{G['ok']} Specification saved. Now send the .py/.zip product file.")
+    bot.reply_to(m, f"{G['ok']} Specification saved. Now send the product file in any format (ZIP, 7z, FOR, PDF, or any other document type).")
 
 
 def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
