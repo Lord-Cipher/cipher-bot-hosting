@@ -37,6 +37,8 @@ Once the key is set, you can manage payment modes via the **Admin Panel**:
 
 Instead of using an environment variable, open **Admin Panel → Payment Configuration → OxaPay Integration**, choose **Set / Replace Key**, and send the Merchant API key. The bot deletes the message containing the key immediately, encrypts the key before saving it, and only displays a masked suffix afterward. Use **Test Connection** on the same screen to query the merchant payment history without creating an invoice or charging funds.
 
+The same screen includes **Payment History**, which displays recent OxaPay payments with status, amount, currency, order ID, timestamp, total count, refresh, and pagination controls.
+
 ---
 
 ## 4. How It Works

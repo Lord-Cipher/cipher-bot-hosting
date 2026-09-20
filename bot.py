@@ -1678,27 +1678,35 @@ def _mask_oxapay_key(value: str) -> str:
     return f"{value[:4]}…{value[-4:]}" if len(value) >= 10 else "configured"
 
 
-def _test_oxapay_connection(key: str) -> Tuple[bool, str]:
-    """Validate a merchant key without creating an invoice or charging anyone."""
+def _fetch_oxapay_payment_history(key: str, page: int = 1, size: int = 10) -> Tuple[bool, List[Dict[str, Any]], Dict[str, Any], str]:
+    """Fetch merchant history without creating an invoice or charging anyone."""
     if not key:
-        return False, "No OxaPay merchant key is configured."
+        return False, [], {}, "No OxaPay merchant key is configured."
     try:
         response = requests.get(
             "https://api.oxapay.com/v1/payment",
             headers={"merchant_api_key": key, "Accept": "application/json"},
-            params={"page": 1, "size": 1},
+            params={"page": max(1, int(page)), "size": max(1, min(200, int(size)))},
             timeout=15,
         )
         body = response.json() if response.content else {}
         if response.status_code == 200 and int(body.get("status", 200)) == 200:
-            total = ((body.get("data") or {}).get("meta") or {}).get("total", 0)
-            return True, f"Connection successful. Merchant history is accessible ({total} payment(s))."
+            data = body.get("data") or {}
+            return True, data.get("list") or [], data.get("meta") or {}, ""
         error = body.get("error") or body.get("message") or f"HTTP {response.status_code}"
         if isinstance(error, dict):
             error = error.get("message") or str(error)
-        return False, str(error)[:240]
+        return False, [], {}, str(error)[:240]
     except requests.RequestException as exc:
-        return False, f"Connection failed: {exc}"
+        return False, [], {}, f"Connection failed: {exc}"
+
+
+def _test_oxapay_connection(key: str) -> Tuple[bool, str]:
+    """Validate a merchant key without creating an invoice or charging anyone."""
+    ok, _rows, meta, error = _fetch_oxapay_payment_history(key, size=1)
+    if ok:
+        return True, f"Connection successful. Merchant history is accessible ({meta.get('total', 0)} payment(s))."
+    return False, error
 
 
 def cache_clear_all() -> None:
@@ -6730,6 +6738,11 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_pay_config":          return render_adm_pay_config(call)
     if data == "adm_oxapay":              return render_adm_oxapay(call)
     if data == "adm_oxapay_test":         return action_adm_oxapay_test(call)
+    if data.startswith("adm_oxapay_history_"):
+        try:
+            return render_adm_oxapay_history(call, max(1, int(data.rsplit("_", 1)[1])))
+        except (TypeError, ValueError):
+            return render_adm_oxapay_history(call, 1)
     if data == "adm_oxapay_set":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_oxapay_key"}
         bot.send_message(
@@ -8783,6 +8796,53 @@ def action_adm_gh_dl_file(call: types.CallbackQuery, repo: str, path: str) -> No
 # PAYMENT CONFIG PANEL
 # ─────────────────────────────────────────────────────────────────────────────
 
+def render_adm_oxapay_history(call: types.CallbackQuery, page: int = 1) -> None:
+    key = _configured_oxapay_key()
+    ok, rows, meta, error = _fetch_oxapay_payment_history(key, page=page, size=8)
+    if not ok:
+        ack(call, error or "Could not load OxaPay payment history.", show_alert=True)
+        return render_adm_oxapay(call)
+
+    def _date(value: Any) -> str:
+        try:
+            return datetime.fromtimestamp(int(value), timezone.utc).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return str(value or "—")[:16]
+
+    lines = []
+    for payment in rows:
+        status = str(payment.get("status", "—"))
+        mark = "✅" if status.lower() in ("paid", "completed", "success") else "⏳"
+        track = str(payment.get("track_id", "—"))
+        order = str(payment.get("order_id", "—"))
+        amount = f"{payment.get('amount', '—')} {payment.get('currency', '')}".strip()
+        lines.append(
+            f"{mark} <code>{esc(track[:18])}</code> {esc(amount)}\n"
+            f"   {esc(status)} · {esc(order[:28])} · {_date(payment.get('date'))}"
+        )
+    body = "\n".join(lines) or f"<i>{sc('No OxaPay payments found')}</i>"
+    total = meta.get("total", len(rows))
+    last_page = int(meta.get("last_page", page) or page)
+    cap = (
+        f"<b>📜 {sc('OxaPay Payment History')}</b>\n"
+        f"{G['div_eq']}\n"
+        f"{bullet('Page', f'{page} / {last_page}')}\n"
+        f"{bullet('Total', total)}\n"
+        f"{G['div']}\n{body}{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    nav = []
+    if page > 1:
+        nav.append(Btn("‹ Previous", callback_data=f"adm_oxapay_history_{page - 1}", style="primary"))
+    if page < last_page:
+        nav.append(Btn("Next ›", callback_data=f"adm_oxapay_history_{page + 1}", style="primary"))
+    if nav:
+        kb.add(*nav)
+    kb.add(Btn("🔄  Refresh", callback_data=f"adm_oxapay_history_{page}", style="success"))
+    kb.add(Btn(f"{G['back']}  OxaPay", callback_data="adm_oxapay", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
+
+
 def render_adm_oxapay(call: types.CallbackQuery) -> None:
     key = _configured_oxapay_key()
     source = "admin integration" if get_setting("oxapay_key_cipher", "") else "environment"
@@ -8801,6 +8861,7 @@ def render_adm_oxapay(call: types.CallbackQuery) -> None:
         Btn("🔐  Sᴇᴛ / Rᴇᴘʟᴀᴄᴇ Kᴇʏ", callback_data="adm_oxapay_set", style="primary"),
         Btn("🔌  Tᴇꜱᴛ Cᴏɴɴᴇᴄᴛɪᴏɴ", callback_data="adm_oxapay_test", style="success"),
     )
+    kb.add(Btn("📜  Pᴀʏᴍᴇɴᴛ Hɪꜱᴛᴏʀʏ", callback_data="adm_oxapay_history_1", style="primary"))
     kb.add(Btn(f"{G['back']}  Pᴀʏ Cᴏɴꜰɪɢ", callback_data="adm_pay_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
