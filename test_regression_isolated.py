@@ -69,6 +69,9 @@ assert 'def _test_oxapay_connection' in BOT
 assert 'def _fetch_oxapay_payment_history' in BOT
 assert 'adm_oxapay_history_' in BOT
 assert 'OxaPay Payment History' in BOT
+assert 'def action_adm_oxapay_export' in BOT
+assert '"status": status' in BOT
+assert 'Export CSV' in BOT
 assert 'await_adm_oxapay_key' in BOT
 assert 'bot.delete_message(m.chat.id, m.message_id)' in BOT
 assert '"amount": float(usd_amount)' in BOT

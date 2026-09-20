@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 import copy
 import hashlib
 import hmac
@@ -1678,7 +1679,7 @@ def _mask_oxapay_key(value: str) -> str:
     return f"{value[:4]}…{value[-4:]}" if len(value) >= 10 else "configured"
 
 
-def _fetch_oxapay_payment_history(key: str, page: int = 1, size: int = 10) -> Tuple[bool, List[Dict[str, Any]], Dict[str, Any], str]:
+def _fetch_oxapay_payment_history(key: str, page: int = 1, size: int = 10, status: str = "") -> Tuple[bool, List[Dict[str, Any]], Dict[str, Any], str]:
     """Fetch merchant history without creating an invoice or charging anyone."""
     if not key:
         return False, [], {}, "No OxaPay merchant key is configured."
@@ -1686,7 +1687,11 @@ def _fetch_oxapay_payment_history(key: str, page: int = 1, size: int = 10) -> Tu
         response = requests.get(
             "https://api.oxapay.com/v1/payment",
             headers={"merchant_api_key": key, "Accept": "application/json"},
-            params={"page": max(1, int(page)), "size": max(1, min(200, int(size)))},
+            params={
+                "page": max(1, int(page)),
+                "size": max(1, min(200, int(size))),
+                **({"status": status} if status in ("Paid", "Paying") else {}),
+            },
             timeout=15,
         )
         body = response.json() if response.content else {}
@@ -6738,9 +6743,16 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_pay_config":          return render_adm_pay_config(call)
     if data == "adm_oxapay":              return render_adm_oxapay(call)
     if data == "adm_oxapay_test":         return action_adm_oxapay_test(call)
+    if data.startswith("adm_oxapay_export_"):
+        code = data[len("adm_oxapay_export_"):].lower()
+        return action_adm_oxapay_export(call, {"paid": "Paid", "paying": "Paying"}.get(code, ""))
     if data.startswith("adm_oxapay_history_"):
+        parts = data[len("adm_oxapay_history_"):].split("_")
         try:
-            return render_adm_oxapay_history(call, max(1, int(data.rsplit("_", 1)[1])))
+            if len(parts) == 1:
+                return render_adm_oxapay_history(call, max(1, int(parts[0])))
+            status = {"paid": "Paid", "paying": "Paying"}.get(parts[0], "")
+            return render_adm_oxapay_history(call, max(1, int(parts[1])), status)
         except (TypeError, ValueError):
             return render_adm_oxapay_history(call, 1)
     if data == "adm_oxapay_set":
@@ -8796,9 +8808,47 @@ def action_adm_gh_dl_file(call: types.CallbackQuery, repo: str, path: str) -> No
 # PAYMENT CONFIG PANEL
 # ─────────────────────────────────────────────────────────────────────────────
 
-def render_adm_oxapay_history(call: types.CallbackQuery, page: int = 1) -> None:
+def action_adm_oxapay_export(call: types.CallbackQuery, status: str = "") -> None:
     key = _configured_oxapay_key()
-    ok, rows, meta, error = _fetch_oxapay_payment_history(key, page=page, size=8)
+    all_rows: List[Dict[str, Any]] = []
+    page = 1
+    last_page = 1
+    while page <= last_page and page <= 100:
+        ok, rows, meta, error = _fetch_oxapay_payment_history(key, page=page, size=200, status=status)
+        if not ok:
+            return ack(call, error or "Could not export OxaPay payment history.", show_alert=True)
+        all_rows.extend(rows)
+        last_page = int(meta.get("last_page", page) or page)
+        page += 1
+
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream)
+    writer.writerow(["date_utc", "status", "track_id", "order_id", "amount", "currency", "type", "description"])
+    for payment in all_rows:
+        try:
+            date_utc = datetime.fromtimestamp(int(payment.get("date")), timezone.utc).isoformat()
+        except Exception:
+            date_utc = str(payment.get("date", ""))
+        writer.writerow([
+            date_utc,
+            payment.get("status", ""),
+            payment.get("track_id", ""),
+            payment.get("order_id", ""),
+            payment.get("amount", ""),
+            payment.get("currency", ""),
+            payment.get("type", ""),
+            payment.get("description", ""),
+        ])
+    filename = f"oxapay-payments-{status.lower() or 'all'}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.csv"
+    document = types.InputFile(io.BytesIO(stream.getvalue().encode("utf-8-sig")), file_name=filename)
+    bot.send_document(call.message.chat.id, document, caption=f"OxaPay payment export ({status or 'all'}): {len(all_rows)} payment(s)")
+    audit(call.from_user.id, "oxapay_history_export", f"status={status or 'all'} count={len(all_rows)}")
+    ack(call, "CSV export sent.")
+
+
+def render_adm_oxapay_history(call: types.CallbackQuery, page: int = 1, status: str = "") -> None:
+    key = _configured_oxapay_key()
+    ok, rows, meta, error = _fetch_oxapay_payment_history(key, page=page, size=8, status=status)
     if not ok:
         ack(call, error or "Could not load OxaPay payment history.", show_alert=True)
         return render_adm_oxapay(call)
@@ -8826,6 +8876,7 @@ def render_adm_oxapay_history(call: types.CallbackQuery, page: int = 1) -> None:
     cap = (
         f"<b>📜 {sc('OxaPay Payment History')}</b>\n"
         f"{G['div_eq']}\n"
+        f"{bullet('Filter', status or 'All')}\n"
         f"{bullet('Page', f'{page} / {last_page}')}\n"
         f"{bullet('Total', total)}\n"
         f"{G['div']}\n{body}{FOOTER}"
@@ -8833,12 +8884,20 @@ def render_adm_oxapay_history(call: types.CallbackQuery, page: int = 1) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     nav = []
     if page > 1:
-        nav.append(Btn("‹ Previous", callback_data=f"adm_oxapay_history_{page - 1}", style="primary"))
+        nav.append(Btn("‹ Previous", callback_data=f"adm_oxapay_history_{status.lower() or 'all'}_{page - 1}", style="primary"))
     if page < last_page:
-        nav.append(Btn("Next ›", callback_data=f"adm_oxapay_history_{page + 1}", style="primary"))
+        nav.append(Btn("Next ›", callback_data=f"adm_oxapay_history_{status.lower() or 'all'}_{page + 1}", style="primary"))
     if nav:
         kb.add(*nav)
-    kb.add(Btn("🔄  Refresh", callback_data=f"adm_oxapay_history_{page}", style="success"))
+    kb.add(
+        Btn("All", callback_data="adm_oxapay_history_all_1", style="primary"),
+        Btn("Paid", callback_data="adm_oxapay_history_paid_1", style="success"),
+        Btn("Paying", callback_data="adm_oxapay_history_paying_1", style="primary"),
+    )
+    kb.add(
+        Btn("🔄  Refresh", callback_data=f"adm_oxapay_history_{status.lower() or 'all'}_{page}", style="success"),
+        Btn("📤  Export CSV", callback_data=f"adm_oxapay_export_{status.lower() or 'all'}", style="primary"),
+    )
     kb.add(Btn(f"{G['back']}  OxaPay", callback_data="adm_oxapay", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("pay_config", PHOTOS["admin"]), cap, kb, call=call)
 
