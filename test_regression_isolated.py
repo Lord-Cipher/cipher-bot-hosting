@@ -84,6 +84,11 @@ assert 'product file in any format' in BOT
 assert 'file_coins' in BOT
 assert 'f"{prefix}_slot_{uid}"' in BOT
 assert 'adm_ref_redeem' in BOT
+assert 'render_referral_confirmation' in BOT
+assert 'referral_file_coin_credits' in BOT
+assert 'Redeem All Possible Coins' in BOT
+assert 'adm_ref_adjust' in BOT
+assert 'referral_manual_adjust' in BOT
 assert '"amount": float(usd_amount)' in BOT
 assert 'def _create_oxapay_invoice(local_amount: float, currency_code: str' in BOT
 assert '_local_amount_to_usd(local_amount, currency_code)' in BOT

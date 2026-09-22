@@ -7065,14 +7065,36 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_ref_set_slot_refs":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_slot_refs"}
         bot.send_message(call.message.chat.id, "Send the number of referrals required to unlock one slot."); return
+    if data == "adm_ref_set_coin_rate":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_coin_rate"}
+        bot.send_message(call.message.chat.id, "Send the number of referral credits required for one file coin."); return
     if data == "adm_ref_redeem":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_redeem_user"}
         bot.send_message(call.message.chat.id, "Send the user ID whose referral credits should be redeemed."); return
+    if data == "adm_ref_adjust":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_adjust_user"}
+        bot.send_message(call.message.chat.id, "Send the user ID to adjust."); return
+    if data.startswith("adm_ref_adjust_"):
+        parts = data.split("_")
+        if len(parts) == 6:
+            try:
+                kind, direction, target = parts[3], parts[4], int(parts[5])
+                USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_adjust_amount", "target": target, "kind": kind, "direction": direction}
+                bot.send_message(call.message.chat.id, "Send the amount (positive integer)." if kind != "slot" else "Send the number of slots to add.")
+            except (TypeError, ValueError):
+                ack(call, "Invalid adjustment", show_alert=True)
+        return
     if data.startswith("adm_ref_redeem_"):
         parts = data.split("_")
-        if len(parts) == 5:
-            try: return action_referral_redeem(call, parts[3], int(parts[4]), admin_mode=True)
-            except (TypeError, ValueError): ack(call, "Invalid redemption", show_alert=True)
+        try:
+            if len(parts) == 5:
+                return render_referral_confirmation(call, parts[3], int(parts[4]), 1, admin_mode=True)
+            if len(parts) == 6 and parts[3] == "bulk":
+                return render_referral_confirmation(call, parts[4], int(parts[5]), 0, admin_mode=True)
+            if len(parts) == 7 and parts[3] == "do":
+                return action_referral_redeem(call, parts[4], int(parts[6]), int(parts[5]), admin_mode=True)
+        except (TypeError, ValueError):
+            ack(call, "Invalid redemption", show_alert=True)
     # Janitor
     if data == "adm_janitor":             return render_adm_janitor(call)
     if data == "adm_jan_run_now":
@@ -9700,6 +9722,7 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
     min_plan  = get_setting("referral_min_plan", "free")
     slot_days = get_setting("referral_slot_days", 30)
     slot_refs = get_setting("referral_slot_referrals", 1)
+    coin_refs = get_setting("referral_file_coin_credits", 1)
     d = db_load()
     total_refs = sum(len(u.get("referrals", [])) for u in d["users"].values())
     total_paid = sum(u.get("referral_earnings", 0) for u in d["users"].values())
@@ -9711,6 +9734,7 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
         f"{bullet('Min Plan',      min_plan)}\n"
         f"{bullet('Slot Duration', f'{slot_days} days')}\n"
         f"{bullet('Refs per Slot',  slot_refs)}\n"
+        f"{bullet('Refs per File Coin', coin_refs)}\n"
         f"{bullet('Total Referrals', total_refs)}\n"
         f"{bullet('Total Paid Out',  f'{total_paid}{cur_sym()}')}\n"
         f"{G['div']}{FOOTER}"
@@ -9734,7 +9758,9 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
         Btn("⏱️  Sᴇᴛ Sʟᴏᴛ Dᴀʏꜱ", callback_data="adm_ref_set_slot_days", style="primary"),
         Btn("🔢  Sᴇᴛ Rᴇꜰꜱ/Sʟᴏᴛ", callback_data="adm_ref_set_slot_refs", style="primary"),
     )
+    kb.add(Btn("🪙  Sᴇᴛ Rᴇꜰꜱ/Fɪʟᴇ Cᴏɪɴ", callback_data="adm_ref_set_coin_rate", style="primary"))
     kb.add(Btn("🎁  Rᴇꜰᴇʀʀᴀʟ Rᴇᴅᴇᴍᴘᴛɪᴏɴ", callback_data="adm_ref_redeem", style="success"))
+    kb.add(Btn("🛠️  Mᴀɴᴜᴀʟ Aᴅᴊᴜꜱᴛᴍᴇɴᴛ", callback_data="adm_ref_adjust", style="primary"))
     kb.add(Btn("📈  Rᴇꜰᴇʀʀᴀʟ Aɴᴀʟʏᴛɪᴄꜱ", callback_data="adm_referral_detail", style="primary"))
     kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("referral_adm", PHOTOS["referral"]), cap, kb, call=call)
@@ -11501,6 +11527,51 @@ def on_text(m: types.Message) -> None:
             USER_STATES.pop(uid, None)
             fake = type("AdminRedeemCall", (), {"from_user": m.from_user, "message": m})()
             return render_referral_redeem(fake, target, admin_mode=True)
+        if flow == "await_adm_ref_adjust_user":
+            if not is_admin(uid):
+                USER_STATES.pop(uid, None); return
+            try: target = int(text.strip())
+            except (TypeError, ValueError):
+                bot.reply_to(m, "Send a numeric user ID."); return
+            if str(target) not in db_load().get("users", {}):
+                bot.reply_to(m, "User not found."); return
+            USER_STATES.pop(uid, None)
+            fake = type("AdminAdjustCall", (), {"from_user": m.from_user, "message": m})()
+            return render_referral_adjust(fake, target)
+        if flow == "await_adm_ref_adjust_amount":
+            if st.get("choose"):
+                bot.reply_to(m, "Use the adjustment buttons on the admin panel."); return
+            try: amount = int(text.strip()); assert amount > 0
+            except (TypeError, ValueError, AssertionError):
+                bot.reply_to(m, "Send a positive integer."); return
+            target = int(st["target"]); kind = st["kind"]; direction = st["direction"]
+            d = db_load(); target_user = d.get("users", {}).get(str(target))
+            if not target_user:
+                USER_STATES.pop(uid, None); bot.reply_to(m, "User not found."); return
+            if kind == "credit":
+                current = int(target_user.get("ref_credit", 0) or 0)
+                target_user["ref_credit"] = max(0, current + (amount if direction == "add" else -amount))
+            elif kind == "coin":
+                current = int(target_user.get("file_coins", 0) or 0)
+                target_user["file_coins"] = max(0, current + (amount if direction == "add" else -amount))
+            elif kind == "slot":
+                grants = target_user.setdefault("bot_slot_grants", [])
+                if direction == "add":
+                    days = max(1, int(get_setting("referral_slot_days", 30) or 30))
+                    for _ in range(amount):
+                        grants.append({"granted": ts_iso(), "expires": (now_utc() + timedelta(days=days)).isoformat(), "manual": True})
+                else:
+                    active = [g for g in grants if isinstance(g, dict) and str(g.get("expires", "")) > now_utc().isoformat()]
+                    if len(active) < amount:
+                        bot.reply_to(m, f"Only {len(active)} active slot grant(s) are available."); return
+                    remove_ids = {id(g) for g in active[-amount:]}
+                    target_user["bot_slot_grants"] = [g for g in grants if id(g) not in remove_ids]
+            else:
+                bot.reply_to(m, "Unknown adjustment."); return
+            db_save(d); audit(uid, "referral_manual_adjust", f"target={target} kind={kind} direction={direction} amount={amount}")
+            USER_STATES.pop(uid, None)
+            bot.reply_to(m, f"{G['ok']} Adjustment applied to user {target}.")
+            return
 
         if flow == "await_adm_ref_slot_days":
             try: value = int(text); assert value > 0
@@ -11514,6 +11585,12 @@ def on_text(m: types.Message) -> None:
                 bot.reply_to(m, "Send a positive referral count."); return
             set_setting("referral_slot_referrals", value); USER_STATES.pop(uid, None)
             bot.reply_to(m, f"Referrals required per slot set to {value}."); return
+        if flow == "await_adm_ref_coin_rate":
+            try: value = int(text); assert value > 0
+            except (TypeError, ValueError, AssertionError):
+                bot.reply_to(m, "Send a positive referral count."); return
+            set_setting("referral_file_coin_credits", value); USER_STATES.pop(uid, None)
+            bot.reply_to(m, f"Referral credits required per file coin set to {value}."); return
         if flow == "await_admin_admins":
             return _handle_admin_admins(m)
         if flow == "await_ticket_subject":
@@ -16826,35 +16903,50 @@ def render_profile(call: types.CallbackQuery) -> None:
     show_menu(call.message.chat.id, PHOTOS.get("profile", PHOTOS["main"]), cap, back_main_kb(), call=call)
 
 
-def _referral_redeem(uid: int, mode: str) -> Tuple[bool, str]:
-    """Redeem configured referral credits for one slot or one file coin."""
+def _referral_redeem(uid: int, mode: str, quantity: int = 1) -> Tuple[bool, str]:
+    """Redeem referral credits for one or more configured entitlements."""
     d = db_load()
     u = d.get("users", {}).get(str(uid))
     if not u:
         return False, "User not found"
+    quantity = max(1, int(quantity))
     credits = int(u.get("ref_credit", 0) or 0)
     if mode == "slot":
-        cost = max(1, int(get_setting("referral_slot_referrals", 1) or 1))
+        rate = max(1, int(get_setting("referral_slot_referrals", 1) or 1))
+        quantity = min(quantity, credits // rate)
+        if quantity < 1:
+            return False, f"You need {rate} referral credit(s) for a bot slot"
+        cost = rate * quantity
         if credits < cost:
-            return False, f"You need {cost} referral credit(s) for a bot slot"
+            return False, f"You need {cost} referral credit(s) for {quantity} bot slot(s)"
         days = max(1, int(get_setting("referral_slot_days", 30) or 30))
-        u.setdefault("bot_slot_grants", []).append({
-            "granted": ts_iso(),
-            "expires": (now_utc() + timedelta(days=days)).isoformat(),
-        })
+        for _ in range(quantity):
+            u.setdefault("bot_slot_grants", []).append({
+                "granted": ts_iso(),
+                "expires": (now_utc() + timedelta(days=days)).isoformat(),
+            })
         u["ref_credit"] = credits - cost
-        result = f"Redeemed {cost} referral credit(s) for a bot slot valid {days} days"
+        result = f"Redeemed {cost} referral credit(s) for {quantity} bot slot(s) valid {days} days"
     elif mode == "file":
-        if credits < 1:
-            return False, "You need at least 1 referral credit for a file coin"
-        u["ref_credit"] = credits - 1
-        u["file_coins"] = int(u.get("file_coins", 0) or 0) + 1
-        result = "Redeemed 1 referral credit for 1 file coin"
+        rate = max(1, int(get_setting("referral_file_coin_credits", 1) or 1))
+        quantity = min(quantity, credits // rate)
+        if quantity < 1:
+            return False, f"You need {rate} referral credit(s) for a file coin"
+        cost = rate * quantity
+        u["ref_credit"] = credits - cost
+        u["file_coins"] = int(u.get("file_coins", 0) or 0) + quantity
+        result = f"Redeemed {cost} referral credit(s) for {quantity} file coin(s)"
     else:
         return False, "Unknown redemption type"
     db_save(d)
     audit(uid, "referral_redeem", f"mode={mode}")
     return True, result
+
+
+def _referral_rate_summary() -> str:
+    slot_rate = max(1, int(get_setting("referral_slot_referrals", 1) or 1))
+    coin_rate = max(1, int(get_setting("referral_file_coin_credits", 1) or 1))
+    return f"{slot_rate} credit(s) = 1 slot\n{coin_rate} credit(s) = 1 file coin"
 
 
 def render_referral_redeem(call: types.CallbackQuery, target_uid: Optional[int] = None, admin_mode: bool = False) -> None:
@@ -16869,21 +16961,67 @@ def render_referral_redeem(call: types.CallbackQuery, target_uid: Optional[int] 
         f"{bullet('User', uid)}\n"
         f"{bullet('Referral credits', credits)}\n"
         f"{bullet('File coins', int(u.get('file_coins', 0) or 0))}\n"
-        f"{G['div']}Choose how to redeem available referral credits.{FOOTER}"
+        f"{G['div']}{_referral_rate_summary()}\nChoose how to redeem available referral credits.{FOOTER}"
     )
     prefix = "adm_ref_redeem" if admin_mode else "ref_redeem"
     back = "adm_referral_sys" if admin_mode else "menu_referral"
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(Btn("🎟️ Redeem for Bot Slot", callback_data=f"{prefix}_slot_{uid}", style="success"))
-    kb.add(Btn("🪙 Redeem for File Coin", callback_data=f"{prefix}_file_{uid}", style="primary"))
+    kb.add(Btn("🎟️ Redeem 1 Bot Slot", callback_data=f"{prefix}_slot_{uid}", style="success"))
+    kb.add(Btn("🎟️ Redeem All Possible Slots", callback_data=f"{prefix}_bulk_slot_{uid}", style="success"))
+    kb.add(Btn("🪙 Redeem 1 File Coin", callback_data=f"{prefix}_file_{uid}", style="primary"))
+    kb.add(Btn("🪙 Redeem All Possible Coins", callback_data=f"{prefix}_bulk_file_{uid}", style="primary"))
     kb.add(Btn(f"{G['back']} Back", callback_data=back, style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, kb, call=call)
 
 
-def action_referral_redeem(call: types.CallbackQuery, mode: str, uid: int, admin_mode: bool = False) -> None:
+def render_referral_confirmation(call: types.CallbackQuery, mode: str, uid: int, quantity: int, admin_mode: bool = False) -> None:
+    u = db_load().get("users", {}).get(str(uid), {})
+    credits = int(u.get("ref_credit", 0) or 0)
+    slot_rate = max(1, int(get_setting("referral_slot_referrals", 1) or 1))
+    coin_rate = max(1, int(get_setting("referral_file_coin_credits", 1) or 1))
+    rate = slot_rate if mode == "slot" else coin_rate
+    if quantity <= 0:
+        quantity = credits // rate
+    quantity = max(1, quantity)
+    cost = quantity * rate
+    if credits < cost:
+        ack(call, f"Not enough referral credits. Required: {cost}; available: {credits}.", show_alert=True)
+        return
+    label = f"{quantity} bot slot(s)" if mode == "slot" else f"{quantity} file coin(s)"
+    prefix = "adm_ref" if admin_mode else "ref"
+    back = "adm_referral_sys" if admin_mode else "menu_referral"
+    cap = (f"<b>⚠️ Confirm Referral Redemption</b>\n{G['div_eq']}\n"
+           f"{bullet('User', uid)}\n{bullet('Redeem', label)}\n"
+           f"{bullet('Cost', f'{cost} referral credit(s)')}\n"
+           f"{bullet('Remaining', max(0, credits - cost))}\n"
+           f"{G['div']}This action cannot be undone. Confirm to continue.{FOOTER}")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("✅ Confirm", callback_data=f"{prefix}_redeem_do_{mode}_{quantity}_{uid}", style="success"),
+           Btn("❌ Cancel", callback_data=back, style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, kb, call=call)
+
+
+def render_referral_adjust(call: types.CallbackQuery, target_uid: int) -> None:
+    u = db_load().get("users", {}).get(str(target_uid), {})
+    if not u:
+        ack(call, "User not found", show_alert=True); return
+    cap = (f"<b>🛠️ Manual Referral Adjustment</b>\n{G['div_eq']}\n"
+           f"{bullet('User', target_uid)}\n{bullet('Referral credits', u.get('ref_credit', 0))}\n"
+           f"{bullet('File coins', u.get('file_coins', 0))}\n{bullet('Active slot grants', len(u.get('bot_slot_grants', []) or []))}\n"
+           f"{G['div']}Choose an adjustment. The amount will be requested next.{FOOTER}")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for label, kind, direction in (("➕ Credit", "credit", "add"), ("➖ Credit", "credit", "remove"),
+                                   ("➕ File Coin", "coin", "add"), ("➖ File Coin", "coin", "remove"),
+                                   ("🎟️ Add Slot", "slot", "add"), ("🗑️ Remove Slot", "slot", "remove")):
+        kb.add(Btn(label, callback_data=f"adm_ref_adjust_{kind}_{direction}_{target_uid}", style="success" if direction == "add" else "danger"))
+    kb.add(Btn(f"{G['back']} Referral System", callback_data="adm_referral_sys", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("referral_adm", PHOTOS["referral"]), cap, kb, call=call)
+
+
+def action_referral_redeem(call: types.CallbackQuery, mode: str, uid: int, quantity: int = 1, admin_mode: bool = False) -> None:
     if admin_mode and not admin_only_call(call, "full_access"):
         return
-    ok, message = _referral_redeem(uid, mode)
+    ok, message = _referral_redeem(uid, mode, quantity)
     ack(call, message, show_alert=not ok)
     render_referral_redeem(call, uid, admin_mode=admin_mode)
 
@@ -16904,7 +17042,7 @@ def render_referral(call: types.CallbackQuery) -> None:
         f"{bullet('Referral credits', u.get('ref_credit', 0))}\n"
         f"{bullet('File coins', u.get('file_coins', 0))}\n"
         f"{G['div']}\n"
-        f"{sc('Each friend who joins via your link gives you +1 bot slot')}.\n{FOOTER}"
+        f"{sc('Each friend who joins via your link gives you +1 redeemable referral credit')}.\n{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(Btn(f"{sc('Copy Referral Link')}", callback_data="referral_copy", style="success"))
@@ -20179,9 +20317,15 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
         render_referral_redeem(call); return
     if data.startswith("ref_redeem_"):
         parts = data.split("_")
-        if len(parts) == 4:
-            try: action_referral_redeem(call, parts[2], int(parts[3]))
-            except (TypeError, ValueError): ack(call, "Invalid redemption", show_alert=True)
+        try:
+            if len(parts) == 4:
+                render_referral_confirmation(call, parts[2], int(parts[3]), 1)
+            elif len(parts) == 5 and parts[2] == "bulk":
+                render_referral_confirmation(call, parts[3], int(parts[4]), 0)
+            elif len(parts) == 6 and parts[2] == "do":
+                action_referral_redeem(call, parts[3], int(parts[5]), int(parts[4]))
+        except (TypeError, ValueError):
+            ack(call, "Invalid redemption", show_alert=True)
         return
     if data == "menu_wallet":   render_wallet(call); return
     if data == "menu_help":     render_help(call); return
