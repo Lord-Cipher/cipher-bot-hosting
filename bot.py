@@ -21815,7 +21815,14 @@ def render_ai_models(call: types.CallbackQuery) -> None:
     if not pool:
         cap += f"\n⚠️ {sc('No models are currently assigned to this plan')}."
     cap += f"\n{G['div']}{FOOTER}"
-    USER_STATES.pop(uid, None)
+    # Keep text input routed to the AI while the picker is visible. Previously
+    # this screen cleared USER_STATES, so a message sent before tapping a
+    # model button was silently ignored despite the screen saying to send a
+    # message or code below.
+    if pool:
+        USER_STATES[uid] = {"flow": "ai_chat", "ai_model": selected[0], "ai_plan": plan}
+    else:
+        USER_STATES.pop(uid, None)
     kb = types.InlineKeyboardMarkup(row_width=1)
     for model in pool:
         active = model == (selected[0] if selected else None)
