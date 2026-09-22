@@ -18220,10 +18220,12 @@ def render_adm_catalog_analytics(call: types.CallbackQuery) -> None:
     credit_balance = sum(int(u.get("ref_credit", 0) or 0) for u in d.get("users", {}).values())
     top = sorted(products, key=lambda p: (int(p.get("download_count", 0) or 0), len(p.get("buyers", {}) or {})), reverse=True)[:8]
     rows = "\n".join(f"{i}. {esc(p.get('filename','file'))} — {int(p.get('download_count',0) or 0)} downloads / {len(p.get('buyers',{}) or {})} unlocks" for i, p in enumerate(top, 1)) or f"<i>{sc('No catalog activity yet')}</i>"
+    file_coins_label = "Users' file coins"
+    referral_credits_label = "Users' referral credits"
     cap = (f"<b>📊 {sc('Catalog Analytics')}</b>\n{G['div_eq']}\n"
            f"{bullet('Active files', len(active))}\n{bullet('Total unlocks', unlocks)}\n"
            f"{bullet('Referral unlocks', referral_unlocks)}\n{bullet('Downloads', downloads)}\n"
-           f"{bullet('Users\' file coins', coin_balance)}\n{bullet('Users\' referral credits', credit_balance)}\n"
+           f"{bullet(file_coins_label, coin_balance)}\n{bullet(referral_credits_label, credit_balance)}\n"
            f"{G['div']}<b>{sc('Top files')}</b>\n{rows}{FOOTER}")
     show_menu(call.message.chat.id, PHOTOS.get("stats", PHOTOS["admin"]), cap, _adm_back("adm_product_files"), call=call)
 
