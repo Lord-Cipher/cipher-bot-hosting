@@ -89,6 +89,11 @@ assert 'referral_file_coin_credits' in BOT
 assert 'Redeem All Possible Coins' in BOT
 assert 'adm_ref_adjust' in BOT
 assert 'referral_manual_adjust' in BOT
+assert '_catalog_expiry_reminders' in BOT
+assert 'adm_catalog_analytics' in BOT
+assert 'download_count' in BOT
+assert 'referral_campaign' in BOT
+assert 'bonus_coins' in BOT
 assert '"amount": float(usd_amount)' in BOT
 assert 'def _create_oxapay_invoice(local_amount: float, currency_code: str' in BOT
 assert '_local_amount_to_usd(local_amount, currency_code)' in BOT

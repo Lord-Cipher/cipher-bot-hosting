@@ -6111,6 +6111,10 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_trial(call)
     if data == "adm_product_files":
         return render_adm_product_files(call)
+    if data == "adm_catalog_analytics":
+        if not admin_only_call(call, "full_access"):
+            return
+        return render_adm_catalog_analytics(call)
     if data == "adm_product_toggle_catalog":
         if not admin_only_call(call, "full_access"):
             return
@@ -7068,6 +7072,10 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_ref_set_coin_rate":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_coin_rate"}
         bot.send_message(call.message.chat.id, "Send the number of referral credits required for one file coin."); return
+    if data == "adm_ref_campaign":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_campaign"}
+        bot.send_message(call.message.chat.id, "Send campaign as: name|bonus file coins per redeemed coin|end date YYYY-MM-DD. Send OFF to disable.")
+        return
     if data == "adm_ref_redeem":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_redeem_user"}
         bot.send_message(call.message.chat.id, "Send the user ID whose referral credits should be redeemed."); return
@@ -9723,6 +9731,7 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
     slot_days = get_setting("referral_slot_days", 30)
     slot_refs = get_setting("referral_slot_referrals", 1)
     coin_refs = get_setting("referral_file_coin_credits", 1)
+    campaign = get_setting("referral_campaign", {}) or {}
     d = db_load()
     total_refs = sum(len(u.get("referrals", [])) for u in d["users"].values())
     total_paid = sum(u.get("referral_earnings", 0) for u in d["users"].values())
@@ -9735,6 +9744,7 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
         f"{bullet('Slot Duration', f'{slot_days} days')}\n"
         f"{bullet('Refs per Slot',  slot_refs)}\n"
         f"{bullet('Refs per File Coin', coin_refs)}\n"
+        f"{bullet('Promotion', campaign.get('name', 'None') if campaign.get('enabled') else 'None')}\n"
         f"{bullet('Total Referrals', total_refs)}\n"
         f"{bullet('Total Paid Out',  f'{total_paid}{cur_sym()}')}\n"
         f"{G['div']}{FOOTER}"
@@ -9759,6 +9769,7 @@ def render_adm_referral_sys(call: types.CallbackQuery) -> None:
         Btn("🔢  Sᴇᴛ Rᴇꜰꜱ/Sʟᴏᴛ", callback_data="adm_ref_set_slot_refs", style="primary"),
     )
     kb.add(Btn("🪙  Sᴇᴛ Rᴇꜰꜱ/Fɪʟᴇ Cᴏɪɴ", callback_data="adm_ref_set_coin_rate", style="primary"))
+    kb.add(Btn("🎉  Pʀᴏᴍᴏ Cᴀᴍᴘᴀɪɢɴ", callback_data="adm_ref_campaign", style="primary"))
     kb.add(Btn("🎁  Rᴇꜰᴇʀʀᴀʟ Rᴇᴅᴇᴍᴘᴛɪᴏɴ", callback_data="adm_ref_redeem", style="success"))
     kb.add(Btn("🛠️  Mᴀɴᴜᴀʟ Aᴅᴊᴜꜱᴛᴍᴇɴᴛ", callback_data="adm_ref_adjust", style="primary"))
     kb.add(Btn("📈  Rᴇꜰᴇʀʀᴀʟ Aɴᴀʟʏᴛɪᴄꜱ", callback_data="adm_referral_detail", style="primary"))
@@ -11591,6 +11602,23 @@ def on_text(m: types.Message) -> None:
                 bot.reply_to(m, "Send a positive referral count."); return
             set_setting("referral_file_coin_credits", value); USER_STATES.pop(uid, None)
             bot.reply_to(m, f"Referral credits required per file coin set to {value}."); return
+        if flow == "await_adm_ref_campaign":
+            raw = text.strip()
+            if raw.upper() == "OFF":
+                set_setting("referral_campaign", {"enabled": False}); USER_STATES.pop(uid, None)
+                bot.reply_to(m, "Referral promotion disabled."); return
+            parts = [p.strip() for p in raw.split("|", 2)]
+            try:
+                if len(parts) != 3: raise ValueError("Use name|bonus|YYYY-MM-DD")
+                name, bonus, ends = parts[0], int(parts[1]), parts[2]
+                datetime.strptime(ends, "%Y-%m-%d")
+                if not name or bonus < 0: raise ValueError("Invalid campaign values")
+                set_setting("referral_campaign", {"enabled": True, "name": name[:80], "bonus_coins": bonus, "ends": ends})
+                USER_STATES.pop(uid, None)
+                bot.reply_to(m, f"Promotion enabled: {name} (+{bonus} bonus file coin(s), ends {ends}).")
+            except (TypeError, ValueError) as exc:
+                bot.reply_to(m, f"Invalid campaign: {esc(exc)}", parse_mode="HTML")
+            return
         if flow == "await_admin_admins":
             return _handle_admin_admins(m)
         if flow == "await_ticket_subject":
@@ -14056,6 +14084,35 @@ def _sub_renewal_reminders():
     return sent
 
 
+def _catalog_expiry_reminders() -> int:
+    now = now_utc(); threshold = now + timedelta(days=7); today = now.strftime("%Y-%m-%d")
+    d = db_load(); sent = 0; changed = False
+    for uid_s, user in d.get("users", {}).items():
+        candidates = []
+        if user.get("plan_expires"):
+            candidates.append(("plan", "Your plan", user.get("plan_expires")))
+        for index, grant in enumerate(user.get("bot_slot_grants", []) or []):
+            if isinstance(grant, dict) and grant.get("expires"):
+                candidates.append((f"slot_{index}", "A bot slot", grant.get("expires")))
+        for product_id, access in (user.get("product_access", {}) or {}).items():
+            if isinstance(access, dict) and access.get("expires"):
+                candidates.append((f"file_{product_id}", "A catalog file", access.get("expires")))
+        for key, label in (("ref_credit_expires", "Referral credits"), ("file_coin_expires", "File coins")):
+            if user.get(key):
+                candidates.append((key, label, user.get(key)))
+        notices = user.setdefault("expiry_notices", {})
+        for kind, label, raw_expiry in candidates:
+            try: expiry = datetime.fromisoformat(str(raw_expiry).replace("Z", "+00:00"))
+            except (TypeError, ValueError): continue
+            if now < expiry <= threshold and notices.get(kind) != today:
+                try:
+                    bot.send_message(int(uid_s), f"<b>⚠️ Expiring soon</b>\n{esc(label)} expires on <b>{expiry.strftime('%Y-%m-%d')}</b>.", parse_mode="HTML")
+                    notices[kind] = today; sent += 1; changed = True
+                except Exception: pass
+    if changed: db_save(d)
+    return sent
+
+
 def _sub_reminder_loop():
     while True:
         time.sleep(3600)
@@ -14065,6 +14122,10 @@ def _sub_reminder_loop():
             pass
         try:
             _sub_renewal_reminders()
+        except Exception:
+            pass
+        try:
+            _catalog_expiry_reminders()
         except Exception:
             pass
 
@@ -16934,8 +16995,11 @@ def _referral_redeem(uid: int, mode: str, quantity: int = 1) -> Tuple[bool, str]
             return False, f"You need {rate} referral credit(s) for a file coin"
         cost = rate * quantity
         u["ref_credit"] = credits - cost
-        u["file_coins"] = int(u.get("file_coins", 0) or 0) + quantity
-        result = f"Redeemed {cost} referral credit(s) for {quantity} file coin(s)"
+        campaign = _active_referral_campaign()
+        bonus = max(0, int(campaign.get("bonus_coins", 0) or 0))
+        awarded = quantity + (bonus * quantity)
+        u["file_coins"] = int(u.get("file_coins", 0) or 0) + awarded
+        result = f"Redeemed {cost} referral credit(s) for {awarded} file coin(s)"
     else:
         return False, "Unknown redemption type"
     db_save(d)
@@ -16949,6 +17013,16 @@ def _referral_rate_summary() -> str:
     return f"{slot_rate} credit(s) = 1 slot\n{coin_rate} credit(s) = 1 file coin"
 
 
+def _active_referral_campaign() -> Dict[str, Any]:
+    campaign = get_setting("referral_campaign", {}) or {}
+    if not isinstance(campaign, dict) or not campaign.get("enabled"):
+        return {}
+    ends = str(campaign.get("ends", ""))
+    if ends and ends < now_utc().strftime("%Y-%m-%d"):
+        return {}
+    return campaign
+
+
 def render_referral_redeem(call: types.CallbackQuery, target_uid: Optional[int] = None, admin_mode: bool = False) -> None:
     uid = int(target_uid if target_uid is not None else call.from_user.id)
     u = db_load().get("users", {}).get(str(uid), {})
@@ -16956,12 +17030,16 @@ def render_referral_redeem(call: types.CallbackQuery, target_uid: Optional[int] 
         ack(call, "User not found", show_alert=True); return
     credits = int(u.get("ref_credit", 0) or 0)
     title = "Admin Referral Redemption" if admin_mode else "Redeem Referral"
+    campaign = _active_referral_campaign()
+    promo_line = ""
+    if campaign:
+        promo_line = "\n" + bullet("Promotion", f"{campaign.get('name')} (+{campaign.get('bonus_coins', 0)} coin/coin)")
     cap = (
         f"<b>🎁 {sc(title)}</b>\n{G['div_eq']}\n"
         f"{bullet('User', uid)}\n"
         f"{bullet('Referral credits', credits)}\n"
         f"{bullet('File coins', int(u.get('file_coins', 0) or 0))}\n"
-        f"{G['div']}{_referral_rate_summary()}\nChoose how to redeem available referral credits.{FOOTER}"
+        f"{G['div']}{_referral_rate_summary()}{promo_line}\nChoose how to redeem available referral credits.{FOOTER}"
     )
     prefix = "adm_ref_redeem" if admin_mode else "ref_redeem"
     back = "adm_referral_sys" if admin_mode else "menu_referral"
@@ -18125,6 +18203,29 @@ def _send_product_file(uid: int, product: Dict[str, Any]) -> None:
         bot.send_message(uid, f"{G['no']} Product file is temporarily unavailable."); return
     with path.open("rb") as fh:
         bot.send_document(uid, fh, caption=f"📦 {esc(product.get('filename','file'))}", parse_mode="HTML")
+    d = db_load()
+    stored = d.get("product_files", {}).get(product.get("id"))
+    if stored is not None:
+        stored["download_count"] = int(stored.get("download_count", 0) or 0) + 1
+        db_save(d)
+
+
+def render_adm_catalog_analytics(call: types.CallbackQuery) -> None:
+    d = db_load(); products = list(d.get("product_files", {}).values())
+    active = [p for p in products if p.get("active")]
+    unlocks = sum(len(p.get("buyers", {}) or {}) for p in products)
+    downloads = sum(int(p.get("download_count", 0) or 0) for p in products)
+    referral_unlocks = sum(len(p.get("referral_claims", {}) or {}) for p in products)
+    coin_balance = sum(int(u.get("file_coins", 0) or 0) for u in d.get("users", {}).values())
+    credit_balance = sum(int(u.get("ref_credit", 0) or 0) for u in d.get("users", {}).values())
+    top = sorted(products, key=lambda p: (int(p.get("download_count", 0) or 0), len(p.get("buyers", {}) or {})), reverse=True)[:8]
+    rows = "\n".join(f"{i}. {esc(p.get('filename','file'))} — {int(p.get('download_count',0) or 0)} downloads / {len(p.get('buyers',{}) or {})} unlocks" for i, p in enumerate(top, 1)) or f"<i>{sc('No catalog activity yet')}</i>"
+    cap = (f"<b>📊 {sc('Catalog Analytics')}</b>\n{G['div_eq']}\n"
+           f"{bullet('Active files', len(active))}\n{bullet('Total unlocks', unlocks)}\n"
+           f"{bullet('Referral unlocks', referral_unlocks)}\n{bullet('Downloads', downloads)}\n"
+           f"{bullet('Users\' file coins', coin_balance)}\n{bullet('Users\' referral credits', credit_balance)}\n"
+           f"{G['div']}<b>{sc('Top files')}</b>\n{rows}{FOOTER}")
+    show_menu(call.message.chat.id, PHOTOS.get("stats", PHOTOS["admin"]), cap, _adm_back("adm_product_files"), call=call)
 
 
 def action_product_referral(call: types.CallbackQuery, product_id: str) -> None:
@@ -18192,6 +18293,7 @@ def render_adm_product_files(call: types.CallbackQuery) -> None:
     cap = f"<b>📦 {sc('Product File Manager')}</b>\n{G['div_eq']}\n{bullet('User Catalog', '✅ ON' if enabled else '❌ OFF')}\n{rows}\n{G['div']}Create and manage downloadable files with guided controls.{FOOTER}"
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn(f"{'✅' if enabled else '❌'} User Catalog", callback_data="adm_product_toggle_catalog", style="success" if enabled else "danger"))
+    kb.add(Btn("📊 Catalog Analytics", callback_data="adm_catalog_analytics", style="primary"))
     kb.add(Btn("➕ Add Product File", callback_data="adm_product_add", style="success"))
     for pid, product in list(products.items())[:20]:
         label = str(product.get("filename", "file"))[:24]
