@@ -18353,6 +18353,10 @@ def _apply_seasonal_event_reward(db: Dict[str, Any], user: Dict[str, Any], event
     return ", ".join(rewards)
 
 
+def _seasonal_bundle_discount(db: Dict[str, Any]) -> float:
+    return 0.75 if any(e.get("active") and e.get("reward") == "bundle" for e in (db.get("seasonal_events", {}) or {}).values()) else 1.0
+
+
 def _notify_product_waitlist(product: Dict[str, Any], reason: str) -> int:
     waitlist = list(product.get("waitlist", []) or [])
     if not waitlist:
@@ -18489,11 +18493,13 @@ def action_product_referral(call: types.CallbackQuery, product_id: str) -> None:
         ack(call, "The file catalog is currently unavailable.", show_alert=True)
         return
     uid = call.from_user.id; d = db_load(); u = d["users"].get(str(uid), {})
-    cost = int(d.get("product_files", {}).get(product_id, {}).get("referral_cost", 0) or 0)
+    event_credits = int(u.get("event_free_file_credits", 0) or 0)
+    original_cost = int(d.get("product_files", {}).get(product_id, {}).get("referral_cost", 0) or 0)
+    cost = 0 if event_credits else original_cost
     if cost and int(u.get("file_coins", 0) or 0) < cost:
         ack(call, f"You need {cost} file coin(s) to unlock this file. Redeem referrals first.", show_alert=True)
         return
-    ok, msg, product = product_access(d, uid, product_id, plan_active=lambda plan: _product_plan_ok(u, plan), referral_count=cost)
+    ok, msg, product = product_access(d, uid, product_id, plan_active=lambda plan: True if event_credits else _product_plan_ok(u, plan), referral_count=original_cost if event_credits else cost)
     if not ok:
         if msg == "Your access has expired" and product:
             _notify_product_waitlist(product, "A previous access period ended and released a slot.")
@@ -18501,6 +18507,8 @@ def action_product_referral(call: types.CallbackQuery, product_id: str) -> None:
         ack(call, msg, show_alert=True); return
     if cost:
         u["file_coins"] = int(u.get("file_coins", 0) or 0) - cost
+    if event_credits:
+        u["event_free_file_credits"] = event_credits - 1
     u.setdefault("product_access", {})[product_id] = product["buyers"][str(uid)]
     award_for_event(d, u, "product")
     seasonal_reward = _apply_seasonal_event_reward(d, u, "product_unlock")
@@ -18516,7 +18524,7 @@ def action_product_purchase(call: types.CallbackQuery, product_id: str) -> None:
     if not p: ack(call, "Product unavailable"); return
     if not _configured_oxapay_key():
         ack(call, "Automatic payments are not configured", show_alert=True); return
-    amount = float(p.get("price", 0) or 0)
+    amount = float(p.get("price", 0) or 0) * _seasonal_bundle_discount(db_load())
     if amount <= 0:
         ack(call, "This file has no purchase price; use the referral unlock", show_alert=True); return
     currency_code = str(get_setting("payment_currency", "USD") or "USD").upper()
