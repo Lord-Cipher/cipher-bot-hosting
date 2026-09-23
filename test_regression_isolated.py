@@ -89,6 +89,11 @@ assert 'referral_file_coin_credits' in BOT
 assert 'Redeem All Possible Coins' in BOT
 assert 'adm_ref_adjust' in BOT
 assert 'referral_manual_adjust' in BOT
+assert '_create_referral_gift' in BOT
+assert '_claim_referral_gift' in BOT
+assert 'ref_gifts' in BOT
+assert 'Gift Referral Credits' in BOT
+assert 'ref_gift_claim_' in BOT
 assert '_catalog_expiry_reminders' in BOT
 assert 'adm_catalog_analytics' in BOT
 assert 'download_count' in BOT
