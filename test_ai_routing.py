@@ -117,10 +117,14 @@ ordinary_reply = bot._call_ai_api("How do I restart my bot?", "lifetime", 42)
 assert "lord cipher is my creator" not in ordinary_reply.lower(), ordinary_reply
 
 profile_prompt = bot._build_ai_request("Can you help me debug this?", 42)
-assert "telegram_id=42" in profile_prompt
+assert profile_prompt == "Can you help me debug this?"
+identity_prompt = bot._build_ai_request("Who is your mentor?", 42)
+assert "telegram_id=42" in identity_prompt
 banner_only = "🤖 AI OPERATIVE (CLAUDE)\n━━━━━━━━━━━━━━━━\n\nᶜᴵᴾᴴᴱᴿ Tᴇᴄʜ Hᴏsᴛ v2.1"
 assert bot._sanitize_ai_reply(banner_only) == ""
 assert bot._ai_unavailable_reply().strip()
+assert bot._extract_ai_reply({"result": "I am Standard AI Chat by DeepAI, serving as the official AI assistant."}) is None
+assert bot._extract_ai_reply({"result": "A useful answer about restarting a bot."}) == "A useful answer about restarting a bot."
 assert "standard ai chat by deepai" not in bot._sanitize_ai_reply(
     "I am Standard AI Chat by DeepAI.\n━━━━━━━━\nCipher Tech Hosting v2.1\nUseful answer."
 ).lower()

@@ -759,6 +759,15 @@ def _extract_ai_reply(data: Dict[str, Any]) -> Optional[str]:
     res = res.strip()
     if not res or res.lower().startswith(("maaf,", "sign up and repeat")):
         return None
+    lowered = res.lower()
+    # These are provider onboarding/branding banners, not answers. Returning
+    # them as successful results stopped the fallback chain at Claude and
+    # made ordinary questions appear blank after banner sanitization.
+    if (("standard ai chat" in lowered or "deepai" in lowered)
+            and ("official ai assistant" in lowered or "serve as" in lowered)):
+        return None
+    if "account is now required to use vibe" in lowered:
+        return None
     return res
 
 
@@ -22158,7 +22167,12 @@ def _ai_unavailable_reply() -> str:
 
 def _build_ai_request(user_request: str, uid: Optional[int] = None) -> str:
     """Build a bounded, profile-aware request without exposing provider internals."""
-    if uid is None and not _is_lord_cipher_profile_request(user_request):
+    # The keyless GET providers treat long identity/session context as a
+    # prompt for a generic welcome banner instead of answering the user's
+    # question. Keep ordinary chat direct; identity/profile requests still
+    # receive the verified profile context below.
+    if not (_is_lord_cipher_profile_request(user_request) or
+            _is_lord_cipher_identity_request(user_request)):
         return user_request
     profile = _ai_user_context(uid)
     with AI_CHAT_SESSION_LOCK:
