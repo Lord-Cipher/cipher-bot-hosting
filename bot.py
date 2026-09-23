@@ -22139,10 +22139,21 @@ def _sanitize_ai_reply(text: str) -> str:
     clean = re.sub(r"<(think|thought)>.*?</\1>", "", text or "", flags=re.DOTALL | re.IGNORECASE)
     clean = re.sub(r"</?(think|thought)>", "", clean, flags=re.IGNORECASE)
     clean = re.sub(r"(?im)^\s*.*(?:standard\s+ai\s+chat|deepai).*\s*$", "", clean)
+    clean = re.sub(r"(?im)^\s*.*ai\s+operative.*$", "", clean)
     clean = re.sub(r"(?im)^\s*.*cipher\s+tech\s+hosting\s+v?\d+(?:\.\d+)*.*\s*$", "", clean)
+    clean = re.sub(r"(?im)^\s*.*v\d+(?:\.\d+)+\s*$", "", clean)
     clean = re.sub(r"(?im)^\s*[━─═_]{4,}\s*$", "", clean)
     clean = re.sub(r"(?is)\[SYSTEM DIRECTIVE:.*?\]\s*", "", clean)
     return clean.strip()
+
+
+def _ai_unavailable_reply() -> str:
+    """Return a useful non-empty response when every provider is unavailable."""
+    return (
+        "I received your message, but the AI provider returned no usable text. "
+        "Please try again in a moment. If this continues, the AI uplink needs "
+        "administrator attention."
+    )
 
 
 def _build_ai_request(user_request: str, uid: Optional[int] = None) -> str:
@@ -22214,6 +22225,11 @@ def handle_ai_chat_message(m: types.Message) -> None:
                 clean_res = re.sub(rf'\b{word}\b', '***', clean_res, flags=re.IGNORECASE)
             
             clean_res = clean_res.strip()
+            # Providers can return only their branding banner. Sanitization
+            # correctly removes that leak, but the old flow then rendered an
+            # empty AI card. Always give the user a visible response.
+            if not clean_res:
+                clean_res = _ai_unavailable_reply()
             clean_res = _enforce_lord_cipher_identity(m.text, clean_res)
             with AI_CHAT_SESSION_LOCK:
                 session = AI_CHAT_SESSIONS.setdefault(int(m.from_user.id), [])

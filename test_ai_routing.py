@@ -118,6 +118,9 @@ assert "lord cipher is my creator" not in ordinary_reply.lower(), ordinary_reply
 
 profile_prompt = bot._build_ai_request("Can you help me debug this?", 42)
 assert "telegram_id=42" in profile_prompt
+banner_only = "🤖 AI OPERATIVE (CLAUDE)\n━━━━━━━━━━━━━━━━\n\nᶜᴵᴾᴴᴱᴿ Tᴇᴄʜ Hᴏsᴛ v2.1"
+assert bot._sanitize_ai_reply(banner_only) == ""
+assert bot._ai_unavailable_reply().strip()
 assert "standard ai chat by deepai" not in bot._sanitize_ai_reply(
     "I am Standard AI Chat by DeepAI.\n━━━━━━━━\nCipher Tech Hosting v2.1\nUseful answer."
 ).lower()
