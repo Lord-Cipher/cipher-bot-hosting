@@ -113,5 +113,14 @@ identity_reply = bot._call_ai_api("Who is your master and creator?", "lifetime",
 identity_lower = identity_reply.lower()
 for term in ("lord cipher", "creator", "mentor", "master"):
     assert term in identity_lower, identity_reply
+ordinary_reply = bot._call_ai_api("How do I restart my bot?", "lifetime", 42)
+assert "lord cipher is my creator" not in ordinary_reply.lower(), ordinary_reply
+
+profile_prompt = bot._build_ai_request("Can you help me debug this?", 42)
+assert "telegram_id=42" in profile_prompt
+assert "standard ai chat by deepai" not in bot._sanitize_ai_reply(
+    "I am Standard AI Chat by DeepAI.\n━━━━━━━━\nCipher Tech Hosting v2.1\nUseful answer."
+).lower()
+assert bot._lord_cipher_profile_answer().lower().count("lord cipher") >= 2
 
 print("AI routing regression tests passed")
