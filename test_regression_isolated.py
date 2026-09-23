@@ -97,6 +97,10 @@ assert 'ref_gift_claim_' in BOT
 assert '"GIFT" + secrets.token_hex(3).upper()' in BOT
 assert 'await_ref_gift_code' in BOT
 assert 'No recipient ID is required' in BOT
+assert '_referral_gift_receipt' in BOT
+assert 'Amount Redeemed' in BOT
+assert 'Remaining Referrals' in BOT
+assert 'Referral Gift Receipt' in BOT
 assert '_catalog_expiry_reminders' in BOT
 assert 'adm_catalog_analytics' in BOT
 assert 'download_count' in BOT

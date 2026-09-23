@@ -11426,7 +11426,9 @@ def on_text(m: types.Message) -> None:
             if not ok or not gift:
                 bot.reply_to(m, f"{G['no']} {message}"); return
             gift_code = str(gift.get("id", ""))
-            bot.reply_to(m, f"{G['ok']} {message}\nGift code: <code>{gift_code}</code>\nShare this code with anyone you choose.", parse_mode="HTML")
+            remaining = int(db_load().get("users", {}).get(str(uid), {}).get("ref_credit", 0) or 0)
+            receipt = _referral_gift_receipt(gift, remaining)
+            bot.reply_to(m, f"{G['ok']} {message}\nShare this code with anyone you choose.\n\n{receipt}", parse_mode="HTML")
             return
         if flow == "await_ref_gift_code":
             code = text.upper().strip()
@@ -11435,7 +11437,10 @@ def on_text(m: types.Message) -> None:
             ok, message = _claim_referral_gift(uid, code)
             if ok:
                 USER_STATES.pop(uid, None)
-                bot.reply_to(m, f"{G['ok']} {message}")
+                d = db_load(); gifts = d.get("referral_gifts", []) or []
+                gift = next((g for g in gifts if g.get("id") == code), {"id": code, "credits": 0})
+                remaining = int(d.get("users", {}).get(str(uid), {}).get("ref_credit", 0) or 0)
+                bot.reply_to(m, f"{G['ok']} {message}\n\n{_referral_gift_receipt(gift, remaining, claimed=True)}", parse_mode="HTML")
             else:
                 bot.reply_to(m, f"{G['no']} {message}")
             return
@@ -17069,6 +17074,19 @@ def _create_referral_gift(sender: int, recipient: Optional[int], amount: int) ->
     return True, f"Gift created: {amount} referral credit(s) converted to a shareable code", gift
 
 
+def _referral_gift_receipt(gift: Dict[str, Any], remaining: int, claimed: bool = False) -> str:
+    """Return a user-facing receipt for creating or redeeming a referral gift."""
+    title = "Referral Gift Redemption Receipt" if claimed else "Referral Gift Receipt"
+    label = "Amount Redeemed" if claimed else "Amount Gifted"
+    return (
+        f"<b>🎁 {title}</b>\n{G['div_eq']}\n"
+        f"{bullet('Code', gift.get('id'))}\n"
+        f"{bullet(label, int(gift.get('credits', 0) or 0))}\n"
+        f"{bullet('Remaining Referrals', int(remaining or 0))}\n"
+        f"{G['div']}Keep this receipt for your records."
+    )
+
+
 def _claim_referral_gift(uid: int, gift_id: str) -> Tuple[bool, str]:
     d = db_load(); gift = next((g for g in d.get("referral_gifts", []) or [] if g.get("id") == gift_id), None)
     if not gift or gift.get("status") != "pending":
@@ -20525,6 +20543,10 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
         ok, message = _claim_referral_gift(call.from_user.id, gift_id)
         ack(call, message, show_alert=not ok)
         if ok:
+            d = db_load(); gifts = d.get("referral_gifts", []) or []
+            gift = next((g for g in gifts if g.get("id") == gift_id), {"id": gift_id, "credits": 0})
+            remaining = int(d.get("users", {}).get(str(call.from_user.id), {}).get("ref_credit", 0) or 0)
+            bot.send_message(call.message.chat.id, _referral_gift_receipt(gift, remaining, claimed=True), parse_mode="HTML")
             render_referral_redeem(call)
         else:
             render_referral_gifts(call)
