@@ -11430,12 +11430,26 @@ def on_text(m: types.Message) -> None:
             if text.upper() != "YES":
                 bot.reply_to(m, f"{G['no']} Gift cancelled."); return
             ok, message, gift = _create_referral_gift(uid, int(st["target"]), int(st["amount"]))
-            bot.reply_to(m, f"{G['ok']} {message}")
+            if not ok or not gift:
+                bot.reply_to(m, f"{G['no']} {message}"); return
+            gift_code = str(gift.get("id", ""))
+            bot.reply_to(m, f"{G['ok']} {message}\nGift code: <code>{gift_code}</code>\nShare this code with the intended recipient.", parse_mode="HTML")
             if ok and gift:
                 try:
-                    bot.send_message(int(gift["recipient"]), f"🎁 <b>You received a referral gift</b>\n{bullet('From', uid)}\n{bullet('Credits', gift['credits'])}\nOpen <b>Referral → Redemption → Gift Redemption</b> to claim and spend it on bot slots or file coins.", parse_mode="HTML")
+                    bot.send_message(int(gift["recipient"]), f"🎁 <b>You received a referral gift</b>\n{bullet('From', uid)}\n{bullet('Credits', gift['credits'])}\nGift code: <code>{gift_code}</code>\nOpen <b>Referral → Redemption → Gift Redemption</b> to claim and spend it on bot slots or file coins.", parse_mode="HTML")
                 except Exception:
                     pass
+            return
+        if flow == "await_ref_gift_code":
+            code = text.upper().strip()
+            if not re.fullmatch(r"GIFT[A-F0-9]{12}", code):
+                bot.reply_to(m, f"{G['no']} Invalid gift code. It must look like GIFTXXXXXXXXXXXX."); return
+            ok, message = _claim_referral_gift(uid, code)
+            if ok:
+                USER_STATES.pop(uid, None)
+                bot.reply_to(m, f"{G['ok']} {message}")
+            else:
+                bot.reply_to(m, f"{G['no']} {message}")
             return
         if flow == "adm_product_field":
             state = dict(st); field = state.get("field"); spec = dict(state.get("spec", {}))
@@ -17063,7 +17077,7 @@ def _create_referral_gift(sender: int, recipient: int, amount: int) -> Tuple[boo
         return False, f"You need {amount} referral credits to create this gift", None
     source["ref_credit"] = int(source.get("ref_credit", 0) or 0) - amount
     gift = {
-        "id": secrets.token_hex(5), "sender": sender, "recipient": recipient,
+        "id": "GIFT" + secrets.token_hex(6).upper(), "sender": sender, "recipient": recipient,
         "credits": amount, "status": "pending", "created": ts_iso(),
     }
     d.setdefault("referral_gifts", []).append(gift)
@@ -17096,6 +17110,7 @@ def render_referral_gifts(call: types.CallbackQuery) -> None:
     rows = "\n".join(f"{bullet('From', g.get('sender'))} {bullet('Credits', g.get('credits'))}" for g in gifts)
     cap = f"<b>🎁 {sc('Gift Redemption')}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Claim a gift to add its credits to your referral balance, then redeem for slots or file coins.{FOOTER}"
     kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🔑 Redeem Gift Code", callback_data="ref_gift_code", style="primary"))
     for gift in gifts[:8]:
         kb.add(Btn(f"✅ Claim {int(gift.get('credits', 0))} Credits", callback_data=f"ref_gift_claim_{gift.get('id')}", style="success"))
     kb.add(Btn(f"{G['back']} Redemption", callback_data="ref_redeem", style="danger"))
@@ -20513,6 +20528,9 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
         render_referral_redeem(call); return
     if data == "ref_gifts":
         render_referral_gifts(call); return
+    if data == "ref_gift_code":
+        USER_STATES[call.from_user.id] = {"flow": "await_ref_gift_code"}
+        bot.send_message(call.message.chat.id, "Send your gift code, for example: GIFTXXXXXXXXXXXX"); return
     if data == "ref_gift_create":
         USER_STATES[call.from_user.id] = {"flow": "await_ref_gift_target"}
         bot.send_message(call.message.chat.id, "Send the recipient's Telegram user ID."); return
