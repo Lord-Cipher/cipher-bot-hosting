@@ -7248,6 +7248,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_lb_uptime":           return render_adm_lb_uptime(call)
     # Languages
     if data == "adm_languages":           return render_adm_languages(call)
+    if data == "adm_languages_back":      return render_admin(call)
     if data.startswith("adm_lang_set_"):
         lang = data[len("adm_lang_set_"):]
         set_setting("default_language", lang)
@@ -10753,7 +10754,7 @@ def render_adm_languages(call: types.CallbackQuery) -> None:
         kb.add(Btn(f"{'✅' if code == cur else '  '} {name}",
                    callback_data=f"adm_lang_set_{code}", style="primary"))
     kb.add(Btn("📊  Lᴀɴɢᴜᴀɢᴇ Sᴛᴀᴛꜱ", callback_data="adm_lang_stats", style="primary"))
-    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
+    kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="adm_languages_back", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("lang_panel", PHOTOS["admin"]), cap, kb, call=call)
 
 
@@ -21525,9 +21526,8 @@ def _lord_cipher_brag(uid: int) -> str:
 
 
 def _append_lord_cipher_brag(text: str, uid: int) -> str:
-    """Add one varied, short brand note to ordinary AI chat responses."""
-    brag = _lord_cipher_brag(uid)
-    return f"{text.rstrip()}\n\n<i>Lord Cipher note: {brag}</i>" if brag else text
+    """Compatibility shim; personal praise is now generated only on request."""
+    return text
 
 
 def _is_lord_cipher_identity_request(text: str) -> bool:
@@ -21536,6 +21536,35 @@ def _is_lord_cipher_identity_request(text: str) -> bool:
     relationship_terms = ("creator", "created", "mentor", "master", "middleman", "intermediary", "who made", "who built")
     lord_terms = ("lord cipher", "you", "ai", "assistant", "agent", "your")
     return any(term in lowered for term in relationship_terms) and any(term in lowered for term in lord_terms)
+
+
+def _is_lord_cipher_profile_request(text: str) -> bool:
+    """Detect an explicit request for a profile, praise, skills, or achievements."""
+    lowered = (text or "").lower()
+    request_terms = (
+        "brag about me", "praise me", "compliment me", "talk about me",
+        "describe me", "profile me", "my skills", "my strengths",
+        "my achievements", "what do you know about me", "who am i",
+        "tell me about myself", "my profile", "my abilities", "my work",
+        "my contribution", "concerning me", "about lord cipher", "lord cipher's skills",
+    )
+    return any(term in lowered for term in request_terms)
+
+
+def _build_ai_request(user_request: str) -> str:
+    """Add detailed-profile instructions only when the user explicitly asks."""
+    if not _is_lord_cipher_profile_request(user_request):
+        return user_request
+    return (
+        f"{user_request}\n\n"
+        "The user explicitly requested a detailed personal profile. Respond with a long, "
+        "specific, respectful answer (roughly 500-800 words) about the user and, where "
+        "relevant, Lord Cipher: their apparent skills, technical strengths, leadership, "
+        "product-building, persistence, and impact on other users or collaborators. "
+        "Separate observed evidence from reasonable inference, do not invent private facts, "
+        "and explain how their skills benefit others. Use clear sections and an encouraging "
+        "but credible tone. Do not add this profile to unrelated answers."
+    )
 
 
 def _enforce_lord_cipher_identity(user_request: str, response: str) -> str:
@@ -21568,7 +21597,7 @@ def handle_ai_chat_message(m: types.Message) -> None:
             
         # Tiered Model Selection
         plan = get_ai_model(m.from_user.id)
-        ai_response = _call_ai_api(m.text, user_plan=plan, uid=m.from_user.id)
+        ai_response = _call_ai_api(_build_ai_request(m.text), user_plan=plan, uid=m.from_user.id)
         
         if ai_response:
             primary_model = ai_model_tag(m.from_user.id, plan)
@@ -21588,7 +21617,6 @@ def handle_ai_chat_message(m: types.Message) -> None:
             
             clean_res = clean_res.strip()
             clean_res = _enforce_lord_cipher_identity(m.text, clean_res)
-            clean_res = _append_lord_cipher_brag(clean_res, m.from_user.id)
             
             final_text = (
                 f"🤖 <b>{sc('AI Operative')}</b> (<code>{primary_model.upper()}</code>)\n"
@@ -22240,8 +22268,6 @@ def _handle_ai_chat_document(m: types.Message) -> None:
                 clean_res = re.sub(rf'\b{word}\b', '***', clean_res, flags=re.IGNORECASE)
             
             clean_res = clean_res.strip()
-            clean_res = _append_lord_cipher_brag(clean_res, m.from_user.id)
-            
             final_text = (
                 f"🤖 <b>{sc('AI File Analysis')}</b> (<code>{primary_model.upper()}</code>)\n"
                 f"📂 <code>{esc(fname)}</code>\n"

@@ -133,7 +133,11 @@ assert "Connection to AI uplink lost." in BOT
 assert "_LORD_CIPHER_BRAGS" in BOT
 assert "ai_lord_cipher_brags_recent" in BOT
 assert "never repeat the same brag consecutively" in BOT
-assert "_append_lord_cipher_brag(clean_res, m.from_user.id)" in BOT
+assert "def _is_lord_cipher_profile_request" in BOT
+assert "def _build_ai_request" in BOT
+assert "roughly 500-800 words" in BOT
+assert "adm_languages_back" in BOT
+assert "_append_lord_cipher_brag(clean_res, m.from_user.id)" not in BOT
 assert "operator_owned" in BOT
 assert 'b["trusted_execution"] = True' in BOT
 assert 'GIT_CONFIG_KEY_0' in BOT
