@@ -10,6 +10,7 @@ from community_products import (
     product_access,
     record_activity,
     rename_project_file,
+    safe_filename,
 )
 
 
@@ -56,9 +57,21 @@ def test_safe_rename_updates_text_references_and_rejects_traversal():
         assert not ok
 
 
+def test_custom_catalog_name_preserves_uploaded_extension():
+    assert safe_filename("mybot", "original.zip") == "mybot.zip"
+    assert safe_filename("mybot.7z", "original.7z") == "mybot.7z"
+    try:
+        safe_filename("mybot.py", "original.zip")
+    except ValueError as exc:
+        assert "extension cannot be changed" in str(exc)
+    else:
+        raise AssertionError("changing a product extension must remain blocked")
+
+
 if __name__ == "__main__":
     test_product_referral_slots_and_expiry()
     test_product_purchase_reuses_access_without_consuming_second_slot()
     test_purchase_can_unlock_higher_plan_but_referral_cannot()
     test_safe_rename_updates_text_references_and_rejects_traversal()
+    test_custom_catalog_name_preserves_uploaded_extension()
     print("community product tests passed")

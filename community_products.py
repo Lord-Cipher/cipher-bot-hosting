@@ -70,6 +70,8 @@ def safe_filename(name: str, original: Optional[str] = None) -> str:
     name = Path(raw_name).name.strip()
     if not name or name in {".", ".."} or not SAFE_NAME_RE.fullmatch(name):
         raise ValueError("Invalid filename. Use letters, numbers, dots, underscores, or hyphens only.")
+    if original and not Path(name).suffix:
+        name = f"{name}{Path(original).suffix}"
     if name.startswith(".") or name.lower() in {".env", "passwd", "shadow"}:
         raise ValueError("That filename is not allowed.")
     if original and Path(original).suffix.lower() != Path(name).suffix.lower():
