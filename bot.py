@@ -7103,9 +7103,33 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_coin_rate"}
         bot.send_message(call.message.chat.id, "Send the number of referral credits required for one file coin."); return
     if data == "adm_ref_campaign":
-        USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_campaign"}
-        bot.send_message(call.message.chat.id, "Send campaign as: name|bonus file coins per redeemed coin|end date YYYY-MM-DD. Send OFF to disable.")
+        return render_adm_ref_campaign(call)
+    if data.startswith("adm_ref_campaign_field_"):
+        field = data[len("adm_ref_campaign_field_"):]
+        if field not in {"name", "bonus_coins", "ends"}:
+            ack(call, "Unknown campaign field", show_alert=True); return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_campaign_field", "field": field}
+        prompts = {
+            "name": "Send the campaign name (for example: Black Friday Coins).",
+            "bonus_coins": "Send the bonus file coins per redeemed coin as a non-negative whole number.",
+            "ends": "Send the campaign end date as YYYY-MM-DD.",
+        }
+        bot.send_message(call.message.chat.id, f"✏️ {prompts[field]}\nSend /cancel to stop.")
         return
+    if data == "adm_ref_campaign_toggle":
+        campaign = dict(get_setting("referral_campaign", {}) or {})
+        if not campaign.get("name") or "bonus_coins" not in campaign or not campaign.get("ends"):
+            ack(call, "Set the name, bonus, and end date first.", show_alert=True)
+            return render_adm_ref_campaign(call)
+        campaign["enabled"] = not bool(campaign.get("enabled")); set_setting("referral_campaign", campaign)
+        audit(call.from_user.id, "referral_campaign_toggle", f"enabled={campaign['enabled']}")
+        ack(call, f"Campaign {'enabled' if campaign['enabled'] else 'paused'}")
+        return render_adm_ref_campaign(call)
+    if data == "adm_ref_campaign_disable":
+        set_setting("referral_campaign", {"enabled": False})
+        audit(call.from_user.id, "referral_campaign_disabled", "")
+        ack(call, "Campaign disabled")
+        return render_adm_ref_campaign(call)
     if data == "adm_ref_redeem":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_redeem_user"}
         bot.send_message(call.message.chat.id, "Send the user ID whose referral credits should be redeemed."); return
@@ -9755,6 +9779,32 @@ def render_adm_templates(call: types.CallbackQuery) -> None:
 # REFERRAL SYSTEM
 # ─────────────────────────────────────────────────────────────────────────────
 
+def render_adm_ref_campaign(call: types.CallbackQuery) -> None:
+    campaign = get_setting("referral_campaign", {}) or {}
+    if not isinstance(campaign, dict):
+        campaign = {}
+    enabled = bool(campaign.get("enabled")) and bool(_active_referral_campaign())
+    name = str(campaign.get("name") or "Not set")
+    bonus = campaign.get("bonus_coins", "Not set")
+    ends = str(campaign.get("ends") or "Not set")
+    status = "ACTIVE" if enabled else ("PAUSED" if campaign else "NOT CONFIGURED")
+    cap = (
+        f"<b>🎉 {sc('Referral Coin Campaign')}</b>\n{G['div_eq']}\n"
+        f"{bullet('Status', status)}\n{bullet('Name', esc(name))}\n"
+        f"{bullet('Bonus', f'+{bonus} bonus coin(s) per redeemed coin' if bonus != 'Not set' else bonus)}\n"
+        f"{bullet('End date', ends)}\n{G['div']}"
+        f"{sc('Configure each field with buttons below. The campaign affects referral-credit-to-file-coin redemptions only.')}\n{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("✏️ Set Name", callback_data="adm_ref_campaign_field_name", style="primary"),
+           Btn("🪙 Set Bonus", callback_data="adm_ref_campaign_field_bonus_coins", style="primary"))
+    kb.add(Btn("📅 Set End Date", callback_data="adm_ref_campaign_field_ends", style="primary"))
+    kb.add(Btn(f"{'⏸️ Pause' if enabled else '▶️ Enable'} Campaign", callback_data="adm_ref_campaign_toggle", style="danger" if enabled else "success"),
+           Btn("🗑️ Disable", callback_data="adm_ref_campaign_disable", style="danger"))
+    kb.add(Btn("⬅️ Referral System", callback_data="adm_referral_sys", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("referral_adm", PHOTOS["referral"]), cap, kb, call=call)
+
+
 def render_adm_referral_sys(call: types.CallbackQuery) -> None:
     enabled   = _ff_get("referral_system")
     reward    = get_setting("referral_reward_amount", 20)
@@ -11671,6 +11721,29 @@ def on_text(m: types.Message) -> None:
                 bot.reply_to(m, "Send a positive referral count."); return
             set_setting("referral_file_coin_credits", value); USER_STATES.pop(uid, None)
             bot.reply_to(m, f"Referral credits required per file coin set to {value}."); return
+        if flow == "await_adm_ref_campaign_field":
+            field = st.get("field")
+            campaign = dict(get_setting("referral_campaign", {}) or {})
+            try:
+                if field == "name":
+                    value = text.strip()
+                    if not value or len(value) > 80: raise ValueError("Campaign name must be 1-80 characters")
+                    campaign["name"] = value
+                elif field == "bonus_coins":
+                    value = int(text)
+                    if value < 0 or value > 1000: raise ValueError("Bonus must be between 0 and 1000")
+                    campaign["bonus_coins"] = value
+                elif field == "ends":
+                    value = text.strip(); datetime.strptime(value, "%Y-%m-%d"); campaign["ends"] = value
+                else:
+                    raise ValueError("Unknown campaign field")
+            except (TypeError, ValueError) as exc:
+                bot.reply_to(m, f"{G['no']} Invalid campaign value: {esc(exc)}", parse_mode="HTML"); return
+            campaign.setdefault("enabled", False)
+            set_setting("referral_campaign", campaign); USER_STATES.pop(uid, None)
+            bot.reply_to(m, f"{G['ok']} Campaign {esc(field)} updated.", parse_mode="HTML")
+            fake = type("CampaignCall", (), {"from_user": m.from_user, "message": m})()
+            return render_adm_ref_campaign(fake)
         if flow == "await_adm_ref_campaign":
             raw = text.strip()
             if raw.upper() == "OFF":
