@@ -2843,6 +2843,7 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f"Hᴇʟᴘ",          callback_data="menu_help",     style="primary"),
         Btn(f"Sᴜᴘᴘᴏʀᴛ", callback_data="menu_support",  style="primary"),
     )
+    kb.add(Btn("🌍 Lᴀɴɢᴜᴀɢᴇ", callback_data="menu_language", style="primary"))
     kb.add(
         Btn(f" AI Aɢᴇɴᴛ", callback_data="menu_ai_chat",  style="success"),
         Btn(f" Mʏ Sᴛᴀᴛꜱ",    callback_data="menu_stats",    style="primary"),
@@ -14783,6 +14784,10 @@ _TRANSLATIONS = {
            "bot_started": "Bot {name} is now running!", "bot_crashed": "Bot {name} crashed.",
            "payment_received": "Payment received! Plan will be updated shortly.",
            "referral_earned": "You earned {amount} credits for referring {user}!"},
+    "bn": {"welcome": "{brand}-এ আপনাকে স্বাগতম!", "plan_expired": "আপনার প্ল্যানের মেয়াদ শেষ হয়েছে।",
+           "bot_started": "{name} বট এখন চালু আছে!", "bot_crashed": "{name} বট বন্ধ হয়ে গেছে।",
+           "payment_received": "পেমেন্ট গ্রহণ করা হয়েছে! প্ল্যান শীঘ্রই আপডেট হবে।",
+           "referral_earned": "{user}-কে রেফার করে আপনি {amount} ক্রেডিট পেয়েছেন!"},
     "hi": {"welcome": "{brand} में आपका स्वागत है!", "plan_expired": "आपका प्लान समाप्त हो गया।",
            "bot_started": "बॉट {name} चल रहा है!", "bot_crashed": "बॉट {name} क्रैश हो गया।",
            "payment_received": "भुगतान प्राप्त हुआ!", "referral_earned": "{user} रेफर पर {amount} क्रेडिट मिले!"},
@@ -14802,15 +14807,35 @@ _TRANSLATIONS = {
 
 
 def _lang_get_user(uid):
-    d = db_load()
-    return d["users"].get(str(uid), {}).get("lang", get_setting("ui_language", "en") or "en")
+    d = db_load_ro()
+    lang = d.get("users", {}).get(str(uid), {}).get("lang")
+    lang = lang or get_setting("default_language", get_setting("ui_language", "en")) or "en"
+    return lang if lang in _SUPPORTED_LANGUAGES else "en"
 
 
 def _lang_set_user(uid, lang):
+    lang = str(lang or "").lower().strip()
+    if lang not in _SUPPORTED_LANGUAGES:
+        return False
     d = db_load()
     if str(uid) in d["users"]:
         d["users"][str(uid)]["lang"] = lang
         db_save(d)
+        return True
+    return False
+
+
+def render_user_languages(call: types.CallbackQuery) -> None:
+    uid = call.from_user.id
+    current = _lang_get_user(uid)
+    cap = (f"<b>🌍 {sc('Choose your language')}</b>\n{G['div_eq']}\n"
+           f"{bullet('Current language', _SUPPORTED_LANGUAGES.get(current, current))}\n"
+           f"{sc('Your choice is saved to your profile and used for translated messages and notifications.')}{FOOTER}")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for code, name in _SUPPORTED_LANGUAGES.items():
+        kb.add(Btn(f"{'✅ ' if code == current else ''}{name}", callback_data=f"lang_set_{code}", style="success" if code == current else "primary"))
+    kb.add(Btn(f"{G['back']} Main Menu", callback_data="menu_main", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("lang_panel", PHOTOS["main"]), cap, kb, call=call)
 
 
 def _tr(uid, key, **ctx):
@@ -15901,10 +15926,20 @@ _VAULT_LAST_SYNC = 0.0
 _FX_RATE_CACHE: Dict[str, Tuple[float, float]] = {}
 _FX_RATE_TTL_SECONDS = 900
 
+_CURRENCY_ALIASES = {
+    "$": "USD", "US$": "USD", "৳": "BDT", "TK": "BDT", "টাকা": "BDT",
+    "€": "EUR", "£": "GBP", "₹": "INR", "₨": "PKR", "¥": "JPY",
+}
+
+
+def _normalize_currency_code(currency: str) -> str:
+    raw = str(currency or "USD").strip().upper()
+    return _CURRENCY_ALIASES.get(raw, raw)
+
 
 def _local_amount_to_usd(amount: float, currency: str) -> Tuple[Optional[float], str]:
     """Convert a local display amount to USD, failing closed on missing FX."""
-    code = str(currency or "USD").strip().upper()
+    code = _normalize_currency_code(currency)
     try:
         local = Decimal(str(amount))
     except Exception:
@@ -15919,9 +15954,11 @@ def _local_amount_to_usd(amount: float, currency: str) -> Tuple[Optional[float],
     if rate is None:
         try:
             response = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
+            if not response.ok:
+                return None, f"Exchange-rate service returned HTTP {response.status_code} for {code}."
             data = response.json()
             rate = float((data.get("rates") or {}).get(code, 0))
-            if not response.ok or rate <= 0:
+            if rate <= 0:
                 return None, f"No current USD exchange rate is available for {code}."
             _FX_RATE_CACHE[code] = (rate, now)
         except Exception:
@@ -17039,7 +17076,9 @@ def render_main_menu(chat_id: int, uid: int,
     running = sum(1 for b in bots if b["_id"] in RUNNING and RUNNING[b["_id"]]["proc"].poll() is None)
     intro_block = f"{intro}\n{G['div']}\n" if intro else ""
     custom_welcome = get_setting("custom_welcome", None)
-    welcome_line = esc(custom_welcome) if custom_welcome else f"{sc('Welcome')}, <b>{esc(u.get('name') or 'friend')}</b>"
+    welcome_line = (esc(custom_welcome) if custom_welcome else
+                    f"{esc(_tr(uid, 'welcome', brand=BRAND_TAG))} "
+                    f"<b>{esc(u.get('name') or 'friend')}</b>")
     wallet_txt = f"{u.get('wallet', 0)}{cur_sym()}"
     cap = (
         f"<b>{esc(BRAND_TAG)}</b>\n"
@@ -20880,11 +20919,16 @@ def _handle_payment_proof(m: types.Message, st: Dict[str, Any]) -> None:
     if bundle_discount:
         price = round(price * (1 - bundle_discount / 100), 2)
 
+    currency_code = _normalize_currency_code(get_setting("payment_currency", "USD"))
+    usd_amount, fx_error = _local_amount_to_usd(price, currency_code)
+
     pid = rand_token(8)
     d = db_load()
     d["payments"].append({
         "id": pid, "uid": uid, "method": method, "plan": plan,
         "amount": price,
+        "currency": currency_code,
+        "amount_usd": usd_amount,
         "status": "pending", "ts": ts_iso(), "telegram_msg_id": m.message_id,
         "coupon": active_coupon, "bundle_discount": bundle_discount
     })
@@ -20897,7 +20941,11 @@ def _handle_payment_proof(m: types.Message, st: Dict[str, Any]) -> None:
         Btn(f"{G['ok']}  Approve", callback_data=f"payapprove_{pid}"),
         Btn(f"{G['no']}  Reject",  callback_data=f"payreject_{pid}"),
     )
-    amt_txt = f"{(p or {}).get('price', 0)}{cur_sym()}"
+    amt_txt = f"{price:g}{cur_sym()} {currency_code}"
+    if usd_amount is not None:
+        amt_txt += f" (~${usd_amount:.2f})"
+    elif fx_error:
+        amt_txt += f" (USD conversion unavailable: {fx_error[:80]})"
     notify_owner(
         f"<b>{G['wallet']} New Payment Proof</b>\n"
         f"{bullet('ID', pid)}\n{bullet('From', m.from_user.id)}\n"
@@ -20926,10 +20974,13 @@ def _handle_topup_proof(m: types.Message) -> None:
     ms = re.search(r"\d+", cap)
     if ms:
         amt = int(ms.group(0))
+    currency_code = _normalize_currency_code(get_setting("payment_currency", "USD"))
+    usd_amount, fx_error = _local_amount_to_usd(amt, currency_code)
     d = db_load()
     d["payments"].append({
         "id": pid, "uid": m.from_user.id, "method": "topup", "plan": None,
-        "amount": amt, "status": "pending", "ts": ts_iso(), "kind": "wallet_topup",
+        "amount": amt, "currency": currency_code, "amount_usd": usd_amount,
+        "status": "pending", "ts": ts_iso(), "kind": "wallet_topup",
     })
     db_save(d)
     USER_STATES.pop(m.from_user.id, None)
@@ -20943,7 +20994,7 @@ def _handle_topup_proof(m: types.Message) -> None:
     notify_owner(
         f"<b>{G['wallet']} Wallet Top-up</b>\n"
         f"{bullet('ID', pid)}\n{bullet('From', m.from_user.id)}\n"
-        f"{bullet('Amount', f'{amt}{cur_sym()}')}"
+        f"{bullet('Amount', f'{amt}{cur_sym()} {currency_code}' + (f' (~${usd_amount:.2f})' if usd_amount is not None else ''))}"
     )
     try: bot.send_message(OWNER_ID, f"<b>Decide #{pid}</b>", parse_mode="HTML", reply_markup=kb)
     except Exception: pass
@@ -21072,6 +21123,13 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
         return
     if data == "menu_wallet":   render_wallet(call); return
     if data == "menu_help":     render_help(call); return
+    if data == "menu_language": render_user_languages(call); return
+    if data.startswith("lang_set_"):
+        lang = data[len("lang_set_"):]
+        if not _lang_set_user(call.from_user.id, lang):
+            ack(call, "Unsupported language", show_alert=True); return
+        ack(call, f"Language changed to {_SUPPORTED_LANGUAGES[lang]}")
+        return render_user_languages(call)
     if data == "menu_support":  render_support(call); return
     if data == "menu_tickets":  render_user_tickets(call); return
     if data == "menu_trial":    render_trial(call); return
@@ -22089,6 +22147,8 @@ def _sanitize_ai_reply(text: str) -> str:
 
 def _build_ai_request(user_request: str, uid: Optional[int] = None) -> str:
     """Build a bounded, profile-aware request without exposing provider internals."""
+    if uid is None and not _is_lord_cipher_profile_request(user_request):
+        return user_request
     profile = _ai_user_context(uid)
     with AI_CHAT_SESSION_LOCK:
         history = list(AI_CHAT_SESSIONS.get(int(uid), []))[-6:] if uid is not None else []
@@ -22100,7 +22160,7 @@ def _build_ai_request(user_request: str, uid: Optional[int] = None) -> str:
         context += ("The user asked for a detailed Lord Cipher profile. Respond with roughly 500-800 words. "
                     "Explain his skills in hosting, "
                     "Python/Node.js, AI, automation, security, architecture, debugging, and product building. "
-                    "Do not invent private facts.\n")
+                    "do not invent private facts.\n")
     return f"{context}\nCURRENT USER REQUEST:\n{user_request}"
 
 
