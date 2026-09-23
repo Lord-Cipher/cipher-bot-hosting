@@ -30,6 +30,7 @@ def ensure_db(db: Dict[str, Any]) -> Dict[str, Any]:
     db.setdefault("product_files", {})
     db.setdefault("activity_feed", [])
     db.setdefault("achievement_defs", {})
+    db.setdefault("seasonal_events", {})
     return db
 
 
@@ -110,7 +111,7 @@ def rename_project_file(project_dir: str | Path, old_name: str, new_name: str) -
 def create_product(db: Dict[str, Any], *, path: str, filename: str, description: str, category: str, plan: str, referral_cost: int, price: float, slots: int, access_days: int) -> Dict[str, Any]:
     ensure_db(db)
     pid = secrets.token_hex(8)
-    product = {"id": pid, "path": path, "filename": safe_filename(filename), "description": str(description)[:1000], "category": str(category or "general")[:40], "plan": str(plan or "free"), "referral_cost": max(0, int(referral_cost)), "price": max(0.0, float(price)), "slot_limit": max(0, int(slots)), "slots_remaining": max(0, int(slots)), "access_days": max(1, int(access_days)), "buyers": {}, "referral_claims": {}, "created": utc_now().isoformat(), "active": True}
+    product = {"id": pid, "path": path, "filename": safe_filename(filename), "description": str(description)[:1000], "category": str(category or "general")[:40], "plan": str(plan or "free"), "referral_cost": max(0, int(referral_cost)), "price": max(0.0, float(price)), "slot_limit": max(0, int(slots)), "slots_remaining": max(0, int(slots)), "access_days": max(1, int(access_days)), "buyers": {}, "referral_claims": {}, "waitlist": [], "version": 1, "created": utc_now().isoformat(), "active": True}
     db["product_files"][pid] = product
     return product
 
@@ -131,6 +132,9 @@ def product_access(db: Dict[str, Any], uid: int, product_id: str, *, plan_active
     if existing and datetime.fromisoformat(existing["expires"]) > now:
         return True, "Access granted", p
     if existing:
+        p.setdefault("buyers", {}).pop(key, None)
+        p.setdefault("referral_claims", {}).pop(key, None)
+        p["slots_remaining"] = min(int(p.get("slot_limit", 0)), int(p.get("slots_remaining", 0)) + 1)
         return False, "Your access has expired", p
     if int(p.get("slots_remaining", 0)) <= 0:
         return False, "No access slots remain", p

@@ -44,7 +44,7 @@ from remote_worker import deploy as remote_deploy, control as remote_control, Re
 from ai_preflight import run_preflight
 from community_products import (
     award_for_event, create_product, developer_level, ensure_db as ensure_community_db,
-    product_access, record_activity, rename_project_file,
+    product_access, record_activity, rename_project_file, safe_filename,
 )
 
 _REQUIRED_PKGS = [
@@ -3086,6 +3086,7 @@ def admin_kb(uid: int = 0) -> types.InlineKeyboardMarkup:
             Btn("🧹  Jᴀɴɪᴛᴏʀ",          callback_data="adm_janitor",        style="danger"),
         )
         kb.add(Btn("📦  Pʀᴏᴅᴜᴄᴛ Fɪʟᴇꜱ", callback_data="adm_product_files", style="success"))
+        kb.add(Btn("🎉  Sᴇᴀsᴏɴᴀʟ Eᴠᴇɴᴛs", callback_data="adm_seasonal_events", style="success"))
         kb.add(
             Btn("🌐  Wᴇʙʜᴏᴏᴋꜱ",         callback_data="adm_webhooks",       style="primary"),
             Btn("🎯  Fᴇᴀᴛᴜʀᴇ Fʟᴀɢꜱ",    callback_data="adm_feature_flags",  style="primary"),
@@ -6111,6 +6112,14 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_trial(call)
     if data == "adm_product_files":
         return render_adm_product_files(call)
+    if data == "adm_seasonal_events":
+        if not admin_only_call(call, "full_access"):
+            return
+        return render_adm_seasonal_events(call)
+    if data.startswith("adm_event_toggle_"):
+        if not admin_only_call(call, "full_access"):
+            return
+        return action_adm_event_toggle(call, data[len("adm_event_toggle_"):])
     if data == "adm_catalog_analytics":
         if not admin_only_call(call, "full_access"):
             return
@@ -6123,7 +6132,24 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         ack(call, f"File Catalog: {'ON' if enabled else 'OFF'}")
         return render_adm_product_files(call)
     if data == "adm_product_add":
-        USER_STATES[call.from_user.id] = {"flow": "adm_product_builder", "spec": {}}
+        cap = (f"<b>📤 {sc('Upload Product File')}</b>\n{G['div_eq']}\n"
+               f"{sc('Choose the plan category for this file. The user catalog will list it under this plan.')}\n"
+               f"{G['div']}{FOOTER}")
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        for plan_key, plan_data in PLAN_LIMITS.items():
+            kb.add(Btn(f"📂 {plan_data.get('name', plan_key.title())}",
+                       callback_data=f"adm_product_add_plan_{plan_key}", style="primary"))
+        kb.add(Btn("⬅️ Product Files", callback_data="adm_product_files", style="danger"))
+        show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
+        return
+    if data.startswith("adm_product_add_plan_"):
+        plan = data[len("adm_product_add_plan_"):].lower()
+        if plan not in PLAN_LIMITS:
+            ack(call, "Unknown plan category", show_alert=True); return
+        USER_STATES[call.from_user.id] = {
+            "flow": "adm_product_builder",
+            "spec": {"plan": plan, "category": plan},
+        }
         return render_adm_product_builder(call)
     if data.startswith("adm_product_edit_"):
         return render_adm_product_builder(call, data[len("adm_product_edit_"):])
@@ -6164,12 +6190,16 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("adm_product_save_"):
         pid = data[len("adm_product_save_"):]; state = USER_STATES.get(call.from_user.id, {}); db = db_load(); product = db.get("product_files", {}).get(pid)
         if product and state.get("spec"):
+            old_slots = int(product.get("slot_limit", 0) or 0)
             allowed = {"filename", "plan", "referral_cost", "price", "slots", "access_days", "description"}
             product.update({k: v for k, v in state["spec"].items() if k in allowed})
             if "filename" in state["spec"]:
                 product["filename"] = safe_filename(state["spec"]["filename"], product.get("filename", ""))
             product["category"] = str(product.get("plan", "free"))
             product["slot_limit"] = int(product.get("slots", product.get("slot_limit", 1))); product["slots_remaining"] = min(int(product.get("slots_remaining", 0)), product["slot_limit"])
+            if product["slot_limit"] > old_slots:
+                product["slots_remaining"] = max(product["slots_remaining"], product["slot_limit"] - len(product.get("buyers", {}) or {}))
+                _notify_product_waitlist(product, "The admin increased the available slot limit.")
             db_save(db); audit(call.from_user.id, "product_edit", pid); ack(call, "Product saved")
         return render_adm_product_files(call)
     if data == "adm_tickets":
@@ -18249,9 +18279,116 @@ def action_bot_download(call: types.CallbackQuery, bot_id: str) -> None:
 def _product_plan_ok(user: Dict[str, Any], required: str) -> bool:
     if required in ("", "free", None):
         return True
+    temporary = user.get("temporary_lifetime_access_until")
+    if temporary:
+        try:
+            if now_utc() < datetime.fromisoformat(str(temporary).replace("Z", "+00:00")):
+                return True
+        except (TypeError, ValueError):
+            pass
     order = {"free": 0, "starter": 1, "basic": 2, "pro": 3, "enterprise": 4, "lifetime": 5}
     current = str(user.get("plan", "free"))
     return order.get(current, 0) >= order.get(str(required), 99) and user_plan_active(user)
+
+
+_SEASONAL_EVENT_TEMPLATES = {
+    "new_year": ("New Year", "double_coins", "Double file coins on catalog unlocks"),
+    "product_launch": ("Product Launch", "free_file", "One free premium-file credit"),
+    "black_friday": ("Black Friday", "bundle", "Limited-time file bundle pricing"),
+    "bot_anniversary": ("Bot Anniversary", "badge", "Exclusive anniversary badge"),
+    "enterprise_promotion": ("Enterprise Promotion", "temporary_lifetime", "Temporary lifetime access"),
+}
+
+
+def render_adm_seasonal_events(call: types.CallbackQuery) -> None:
+    d = db_load(); events = d.setdefault("seasonal_events", {})
+    rows = []
+    for key, (name, reward, description) in _SEASONAL_EVENT_TEMPLATES.items():
+        event = events.get(key, {})
+        rows.append(f"{'🟢' if event.get('active') else '⚪'} <b>{name}</b> — {esc(description)}")
+    cap = (f"<b>🎉 {sc('Seasonal Events')}</b>\n{G['div_eq']}\n"
+           f"{sc('Create limited-time campaigns for New Year, product launches, Black Friday, bot anniversaries, and Enterprise promotions.')}\n\n"
+           + "\n".join(rows) + f"\n{G['div']}Toggle an event to activate or pause it.{FOOTER}")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for key, (name, _, _) in _SEASONAL_EVENT_TEMPLATES.items():
+        active = bool(events.get(key, {}).get("active"))
+        kb.add(Btn(f"{'⏸️ Pause' if active else '▶️ Activate'} {name}", callback_data=f"adm_event_toggle_{key}", style="danger" if active else "success"))
+    kb.add(Btn("⬅️ Admin Panel", callback_data="menu_admin", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
+
+
+def action_adm_event_toggle(call: types.CallbackQuery, key: str) -> None:
+    if key not in _SEASONAL_EVENT_TEMPLATES:
+        ack(call, "Unknown seasonal event", show_alert=True); return
+    d = db_load(); events = d.setdefault("seasonal_events", {})
+    name, reward, description = _SEASONAL_EVENT_TEMPLATES[key]
+    event = events.setdefault(key, {"name": name, "reward": reward, "description": description, "created": ts_iso()})
+    event["active"] = not bool(event.get("active"))
+    event["updated"] = ts_iso(); db_save(d)
+    ack(call, f"{name}: {'active' if event['active'] else 'paused'}")
+    render_adm_seasonal_events(call)
+
+
+def _apply_seasonal_event_reward(db: Dict[str, Any], user: Dict[str, Any], event_name: str) -> str:
+    rewards = []
+    for key, event in (db.get("seasonal_events", {}) or {}).items():
+        if not event.get("active") or key not in _SEASONAL_EVENT_TEMPLATES:
+            continue
+        reward = event.get("reward")
+        claimed = user.setdefault("seasonal_event_claims", {})
+        claim_key = f"{key}:{event_name}"
+        if reward == "double_coins":
+            user["file_coins"] = int(user.get("file_coins", 0) or 0) + 2
+            rewards.append("+2 event coins")
+        elif reward == "free_file" and not claimed.get(claim_key):
+            user["event_free_file_credits"] = int(user.get("event_free_file_credits", 0) or 0) + 1
+            claimed[claim_key] = ts_iso(); rewards.append("1 free premium-file credit")
+        elif reward == "badge" and key not in (user.get("badges") or []):
+            user.setdefault("badges", []).append(key); rewards.append("exclusive event badge")
+        elif reward == "bundle":
+            rewards.append("limited-time bundle pricing")
+        elif reward == "temporary_lifetime" and not claimed.get(claim_key):
+            user["temporary_lifetime_access_until"] = (now_utc() + timedelta(days=7)).isoformat()
+            claimed[claim_key] = ts_iso(); rewards.append("7-day temporary lifetime access")
+    return ", ".join(rewards)
+
+
+def _notify_product_waitlist(product: Dict[str, Any], reason: str) -> int:
+    waitlist = list(product.get("waitlist", []) or [])
+    if not waitlist:
+        return 0
+    sent = 0
+    for entry in waitlist:
+        uid = entry.get("uid") if isinstance(entry, dict) else entry
+        try:
+            bot.send_message(int(uid),
+                             f"📦 <b>{sc('File available')}</b>\n{G['div']}\n"
+                             f"<b>{esc(product.get('filename', 'Catalog file'))}</b> is available again.\n"
+                             f"{esc(reason)}\n\nTap below before the slots are used.",
+                             parse_mode="HTML",
+                             reply_markup=types.InlineKeyboardMarkup().add(
+                                 Btn("📄 Open File", callback_data=f"product_view_{product.get('id', '')}", style="success")))
+            sent += 1
+        except Exception:
+            pass
+    product["waitlist"] = []
+    return sent
+
+
+def action_product_waitlist(call: types.CallbackQuery, product_id: str) -> None:
+    d = db_load(); product = d.get("product_files", {}).get(product_id)
+    if not product or not product.get("active"):
+        ack(call, "Product unavailable", show_alert=True); return
+    if int(product.get("slots_remaining", 0) or 0) > 0:
+        ack(call, "A slot is available now. Open the file to unlock it.", show_alert=True); return
+    uid = int(call.from_user.id)
+    waitlist = product.setdefault("waitlist", [])
+    if any(int(x.get("uid", -1)) == uid for x in waitlist if isinstance(x, dict)):
+        ack(call, "You are already on the waitlist.", show_alert=True); return
+    waitlist.append({"uid": uid, "joined": ts_iso()})
+    db_save(d)
+    ack(call, "You are on the waitlist.")
+    bot.send_message(uid, f"✅ You are on the waitlist for <b>{esc(product.get('filename', 'this file'))}</b>. I will notify you when a slot, higher limit, or new version is available.", parse_mode="HTML")
 
 
 def render_products(call: types.CallbackQuery, category: str = "") -> None:
@@ -18261,8 +18398,10 @@ def render_products(call: types.CallbackQuery, category: str = "") -> None:
     d = db_load()
     products = [p for p in d.get("product_files", {}).values()
                 if p.get("active") and (not category or str(p.get("plan", p.get("category", "free"))) == category)]
-    if not products:
-        cap = f"<b>{sc('Product Files')}</b>\n{G['div_eq']}\n<i>{sc('No files are available in this category')}</i>{FOOTER}"
+    if not products and category:
+        label = PLAN_LIMITS.get(category, {}).get("name", category.title()) if category else "this category"
+        cap = (f"<b>{sc('Files')} · {esc(label)}</b>\n{G['div_eq']}\n"
+               f"<i>{sc('Files are not available in this category yet. New files will be uploaded soon.')}</i>{FOOTER}")
         kb = types.InlineKeyboardMarkup(row_width=1)
         kb.add(Btn(f"{G['back']} Plan Categories", callback_data="menu_products", style="danger"))
         show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call); return
@@ -18272,12 +18411,11 @@ def render_products(call: types.CallbackQuery, category: str = "") -> None:
             if p.get("active"):
                 plan = str(p.get("plan", p.get("category", "free")))
                 counts[plan] = counts.get(plan, 0) + 1
-        cap = f"<b>{sc('Product File Categories')}</b>\n{G['div_eq']}\n{sc('Choose a plan category to browse its files.')}{FOOTER}"
+        cap = f"<b>{sc('Product File Categories')}</b>\n{G['div_eq']}\n{sc('Choose a plan category to browse its files. Empty categories will tell you when files are coming soon.')}{FOOTER}"
         kb = types.InlineKeyboardMarkup(row_width=2)
         for plan in PLAN_LIMITS:
-            if counts.get(plan, 0):
-                label = PLAN_LIMITS.get(plan, {}).get("name", plan.title())
-                kb.add(Btn(f"📂 {label} ({counts[plan]})", callback_data=f"products_cat_{plan}", style="primary"))
+            label = PLAN_LIMITS.get(plan, {}).get("name", plan.title())
+            kb.add(Btn(f"📂 {label} ({counts.get(plan, 0)})", callback_data=f"products_cat_{plan}", style="primary"))
         kb.add(Btn(f"{G['back']} {sc('Main Menu')}", callback_data="menu_main", style="danger"))
         show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call); return
     rows = "\n".join(f"{G['bullet']} <b>{esc(p.get('filename','file'))}</b> — {p.get('slots_remaining', 0)} slots" for p in products[:30])
@@ -18303,7 +18441,11 @@ def render_product_view(call: types.CallbackQuery, product_id: str) -> None:
            f"{bullet('Referral unlock', p.get('referral_cost', 0))}\n{bullet('Purchase', purchase_display)}\n"
            f"{bullet('Remaining slots', p.get('slots_remaining', 0))}\n{G['div']}\n{esc(p.get('description','No description'))}{FOOTER}")
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(Btn("🔓 Unlock with referrals", callback_data=f"product_ref_{product_id}", style="success"))
+    if int(p.get("slots_remaining", 0) or 0) > 0:
+        kb.add(Btn("🔓 Unlock with referrals", callback_data=f"product_ref_{product_id}", style="success"))
+    else:
+        cap += f"\n\n⚠️ <i>{sc('All access slots are currently used. Join the waitlist to be notified when a slot opens, the limit increases, or a new version is released')}.</i>"
+        kb.add(Btn("🔔 Join waitlist", callback_data=f"product_waitlist_{product_id}", style="success"))
     kb.add(Btn("💳 Request purchase", callback_data=f"product_buy_{product_id}", style="primary"))
     kb.add(Btn(f"{G['back']} Files", callback_data="menu_products", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call)
@@ -18353,13 +18495,17 @@ def action_product_referral(call: types.CallbackQuery, product_id: str) -> None:
         return
     ok, msg, product = product_access(d, uid, product_id, plan_active=lambda plan: _product_plan_ok(u, plan), referral_count=cost)
     if not ok:
+        if msg == "Your access has expired" and product:
+            _notify_product_waitlist(product, "A previous access period ended and released a slot.")
+            db_save(d)
         ack(call, msg, show_alert=True); return
     if cost:
         u["file_coins"] = int(u.get("file_coins", 0) or 0) - cost
     u.setdefault("product_access", {})[product_id] = product["buyers"][str(uid)]
     award_for_event(d, u, "product")
+    seasonal_reward = _apply_seasonal_event_reward(d, u, "product_unlock")
     record_activity(d, uid, "product_unlock", f"{u.get('name','A user')} unlocked a product", public=False)
-    db_save(d); ack(call, "Unlocked"); _send_product_file(uid, product)
+    db_save(d); ack(call, f"Unlocked{f' — {seasonal_reward}' if seasonal_reward else ''}"); _send_product_file(uid, product)
 
 
 def action_product_purchase(call: types.CallbackQuery, product_id: str) -> None:
@@ -18436,7 +18582,7 @@ def render_adm_product_builder(call: types.CallbackQuery, product_id: str = "") 
            f"{bullet('Slots', spec['slots'])}\n{bullet('Access days', spec['access_days'])}\n"
            f"{bullet('Description', spec['description'] or 'Not set')}\n{G['div']}Choose a field to edit.{FOOTER}")
     kb = types.InlineKeyboardMarkup(row_width=2)
-    fields = [("🏷️ Script Name", "filename"), ("💎 Required Plan", "plan"), ("🔗 Referral Count", "referral_cost"), ("💳 Price", "price"), ("🎟️ Slots", "slots"), ("⏱️ Access Days", "access_days"), ("📝 Description", "description")]
+    fields = [("🏷️ File Name (optional)", "filename"), ("🔗 Referral Count", "referral_cost"), ("💳 Price", "price"), ("🎟️ Slots", "slots"), ("⏱️ Access Days", "access_days"), ("📝 Description", "description")]
     for label, key in fields:
         kb.add(Btn(label, callback_data=f"adm_product_field_{key}", style="primary"))
     if product_id:
@@ -18466,10 +18612,13 @@ def _handle_adm_product_command(m: types.Message, text: str) -> None:
             bot.reply_to(m, f"{G['no']} Product or editable field not found."); return
         key, value = parts[2], parts[3]
         try:
+            old_slots = int(product.get("slot_limit", 0) or 0)
             product[key] = ((value.lower() == "true") if key == "active" else int(value) if key in {"referral_cost", "slot_limit", "access_days"} else float(value) if key == "price" else value)
             if key == "slot_limit": product["slots_remaining"] = max(0, int(value))
         except ValueError:
             bot.reply_to(m, f"{G['no']} Invalid value."); return
+        if key == "slot_limit" and int(value) > old_slots:
+            _notify_product_waitlist(product, "The admin increased the available slot limit.")
         db_save(db); audit(m.from_user.id, "product_edit", f"id={parts[1]} field={key}")
         bot.reply_to(m, f"{G['ok']} Product updated."); USER_STATES.pop(m.from_user.id, None); return
     if parts and parts[0].lower() == "delete" and len(parts) >= 2:
@@ -18541,6 +18690,12 @@ def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
         product = create_product(db_load(), path="", filename=filename, **product_spec)
         path = product_dir / f"{product['id']}_{filename}"; path.write_bytes(raw); product["path"] = str(path)
         db = db_load(); db.setdefault("product_files", {})[product["id"]] = product
+        for previous in db.get("product_files", {}).values():
+            if str(previous.get("id", "")) == str(product.get("id", "")):
+                continue
+            if (str(previous.get("filename", "")).lower() == filename.lower()
+                    and str(previous.get("plan", "free")) == str(product.get("plan", "free"))):
+                _notify_product_waitlist(previous, "A new version of this file has been released.")
         record_activity(db, uid, "product_published", f"A new {product.get('category','general')} file was published")
         db_save(db); audit(uid, "product_add", f"id={product['id']} filename={filename}")
         _product_progress(100, "Published successfully")
@@ -20515,6 +20670,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_achievements": render_achievements(call); return
     if data.startswith("product_view_"): render_product_view(call, data[len("product_view_"):]); return
     if data.startswith("product_ref_"): action_product_referral(call, data[len("product_ref_"):]); return
+    if data.startswith("product_waitlist_"): action_product_waitlist(call, data[len("product_waitlist_"):]); return
     if data.startswith("product_buy_"): action_product_purchase(call, data[len("product_buy_"):]); return
     if data == "referral_copy":
         uid = call.from_user.id
