@@ -2939,6 +2939,7 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
     active_coupon = u_doc.get("active_coupon")
     final_price_local = float(p.get("price", 0))
     discount_txt = ""
+    bundle_discount = _active_bundle_discount(plan)
     
     if active_coupon:
         c_doc = db_load_ro().get("coupons", {}).get(active_coupon.upper())
@@ -2948,6 +2949,9 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
             if pct: final_price_local = round(final_price_local * (1 - pct / 100), 2)
             if flat: final_price_local = max(0, round(final_price_local - flat, 2))
             discount_txt = f" (Promo: {active_coupon} applied)"
+    if bundle_discount:
+        final_price_local = round(final_price_local * (1 - bundle_discount / 100), 2)
+        discount_txt += f" (Bundle: {bundle_discount:.0f}% off)"
 
     ack(call, "Generating invoice...")
     try:
@@ -7036,6 +7040,23 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         bot.send_message(call.message.chat.id, f"Send emoji for <code>{esc(key)}</code>:", parse_mode="HTML"); return
     # Coupon Plus
     if data == "adm_coupon_plus":         return render_adm_coupon_plus(call)
+    if data == "adm_coupon_bundle":       return render_adm_coupon_bundle(call)
+    if data.startswith("adm_coupon_bundle_field_"):
+        field = data[len("adm_coupon_bundle_field_"):]
+        if field not in {"name", "discount_pct", "plan", "days"}:
+            ack(call, "Unknown bundle field", show_alert=True); return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_coupon_bundle_field", "field": field}
+        prompts = {"name": "Send the bundle campaign name.", "discount_pct": "Send a discount percentage from 1 to 90.", "plan": f"Send a plan ({', '.join(PLAN_LIMITS)}) or all.", "days": "Send the campaign duration in days."}
+        bot.send_message(call.message.chat.id, f"✏️ {prompts[field]} Send /cancel to stop."); return
+    if data == "adm_coupon_bundle_toggle":
+        campaign = dict(get_setting("bundle_campaign", {}) or {})
+        if not campaign.get("name") or not campaign.get("discount_pct"):
+            ack(call, "Set the name and discount first.", show_alert=True); return render_adm_coupon_bundle(call)
+        campaign["enabled"] = not bool(campaign.get("enabled")); set_setting("bundle_campaign", campaign)
+        ack(call, f"Bundle campaign {'enabled' if campaign['enabled'] else 'paused'}")
+        return render_adm_coupon_bundle(call)
+    if data == "adm_coupon_bundle_disable":
+        set_setting("bundle_campaign", {"enabled": False}); ack(call, "Bundle campaign disabled"); return render_adm_coupon_bundle(call)
     if data == "adm_coupon_create":       return render_adm_coupon_create(call)
     if data == "adm_coupon_bulk":         return render_adm_coupon_bulk(call)
     if data == "adm_coupon_analytics":    return render_adm_coupon_analytics(call)
@@ -7083,6 +7104,17 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_ref_stats":           return render_adm_ref_stats(call)
     if data == "adm_ref_rewards":         return render_adm_ref_rewards(call)
     if data == "adm_ref_leaderboard":     return render_adm_ref_leaderboard(call)
+    if data == "adm_ref_season_start":
+        set_setting("referral_season", {"active": True, "name": f"Referral Season {now_utc().strftime('%Y-%m-%d')}", "started": now_utc().strftime('%Y-%m-%d'), "ends": ""})
+        ack(call, "New referral season started")
+        return render_adm_ref_leaderboard(call)
+    if data == "adm_ref_season_end":
+        season = dict(get_setting("referral_season", {}) or {}); season["active"] = False; season["ended"] = now_utc().strftime('%Y-%m-%d'); set_setting("referral_season", season)
+        ack(call, "Referral season ended")
+        return render_adm_ref_leaderboard(call)
+    if data == "adm_ref_season_set_end":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_season_end"}
+        bot.send_message(call.message.chat.id, "Send the season end date as YYYY-MM-DD, or /cancel."); return
     if data == "adm_ref_set_reward":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_reward"}
         bot.send_message(call.message.chat.id,
@@ -9641,11 +9673,34 @@ def render_adm_coupon_plus(call: types.CallbackQuery) -> None:
         Btn("📊  Aɴᴀʟʏᴛɪᴄꜱ",        callback_data="adm_coupon_analytics", style="primary"),
         Btn("⏰  Exᴘɪʀʏ Mɢʀ",        callback_data="adm_coupon_expiry",    style="primary"),
     )
+    kb.add(Btn("🎁  Bᴜɴᴅʟᴇ Cᴀᴍᴘᴀɪɢɴ", callback_data="adm_coupon_bundle", style="success"))
     kb.add(
         Btn("🗑️  Cʟᴇᴀʀ Exᴘɪʀᴇᴅ",   callback_data="adm_coupon_clearexp",  style="danger"),
         Btn("📋  Aʟʟ Cᴏᴜᴘᴏɴꜱ",      callback_data="adm_coupons",          style="primary"),
     )
     kb.add(Btn(f"{G['back']}  Aᴅᴍɪɴ", callback_data="menu_admin", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("coupon_plus", PHOTOS["coupon"]), cap, kb, call=call)
+
+
+def render_adm_coupon_bundle(call: types.CallbackQuery) -> None:
+    campaign = get_setting("bundle_campaign", {}) or {}
+    if not isinstance(campaign, dict): campaign = {}
+    enabled = bool(campaign.get("enabled")); plan = campaign.get("plan", "all")
+    cap = (f"<b>🎁 {sc('Bundle Campaign')}</b>\n{G['div_eq']}\n"
+           f"{bullet('Status', 'ACTIVE' if enabled else 'PAUSED')}\n"
+           f"{bullet('Name', campaign.get('name') or 'Not set')}\n"
+           f"{bullet('Discount', str(campaign.get('discount_pct', 0)) + '%')}\n"
+           f"{bullet('Plan', plan)}\n{G['div']}"
+           "Apply a limited-time discount automatically to matching plan payments."
+           f"{FOOTER}")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("✏️ Set Name", callback_data="adm_coupon_bundle_field_name", style="primary"),
+           Btn("🏷️ Set Discount", callback_data="adm_coupon_bundle_field_discount_pct", style="primary"))
+    kb.add(Btn("💎 Set Plan", callback_data="adm_coupon_bundle_field_plan", style="primary"),
+           Btn("⏱️ Set Days", callback_data="adm_coupon_bundle_field_days", style="primary"))
+    kb.add(Btn(f"{'⏸️ Pause' if enabled else '▶️ Enable'} Bundle", callback_data="adm_coupon_bundle_toggle", style="danger" if enabled else "success"),
+           Btn("🗑️ Disable", callback_data="adm_coupon_bundle_disable", style="danger"))
+    kb.add(Btn("⬅️ Coupon Manager", callback_data="adm_coupon_plus", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("coupon_plus", PHOTOS["coupon"]), cap, kb, call=call)
 
 
@@ -9910,6 +9965,7 @@ def render_adm_ref_rewards(call: types.CallbackQuery) -> None:
 
 def render_adm_ref_leaderboard(call: types.CallbackQuery) -> None:
     users = db_load()["users"]
+    season = _active_referral_season()
     top = sorted(users.items(),
                  key=lambda x: len(x[1].get("referrals",[])), reverse=True)[:15]
     rows = "\n".join(
@@ -9918,12 +9974,18 @@ def render_adm_ref_leaderboard(call: types.CallbackQuery) -> None:
         f"{u.get('referral_earnings',0)}{cur_sym()} {sc('earned')}"
         for i, (uid, u) in enumerate(top, 1)
     ) or f"<i>{sc('No referrals yet')}</i>"
+    season_line = f"{bullet('Season', season.get('name'))}\n{bullet('Season ends', season.get('ends') or 'No end date')}\n" if season else f"{bullet('Season', 'No active season')}\n"
     cap = (
         f"<b>🏆 {sc('Referral Leaderboard')}</b>\n"
-        f"{G['div_eq']}\n{rows}\n{G['div']}{FOOTER}"
+        f"{G['div_eq']}\n{season_line}{G['div']}\n{rows}\n{G['div']}{FOOTER}"
     )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("▶️ Start New Season", callback_data="adm_ref_season_start", style="success"),
+           Btn("⏹️ End Season", callback_data="adm_ref_season_end", style="danger"))
+    kb.add(Btn("📅 Set End Date", callback_data="adm_ref_season_set_end", style="primary"))
+    kb.add(Btn(f"{G['back']} Referral Sys", callback_data="adm_referral_sys", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("referral_adm", PHOTOS["referral"]), cap,
-              _adm_back("adm_referral_sys"), call=call)
+              kb, call=call)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11721,6 +11783,14 @@ def on_text(m: types.Message) -> None:
                 bot.reply_to(m, "Send a positive referral count."); return
             set_setting("referral_file_coin_credits", value); USER_STATES.pop(uid, None)
             bot.reply_to(m, f"Referral credits required per file coin set to {value}."); return
+        if flow == "await_adm_ref_season_end":
+            try:
+                end_date = text.strip(); datetime.strptime(end_date, "%Y-%m-%d")
+                season = dict(get_setting("referral_season", {}) or {}); season["ends"] = end_date; set_setting("referral_season", season)
+                USER_STATES.pop(uid, None); bot.reply_to(m, f"{G['ok']} Season end date set to {end_date}.")
+                fake = type("SeasonCall", (), {"from_user": m.from_user, "message": m})(); return render_adm_ref_leaderboard(fake)
+            except (TypeError, ValueError):
+                bot.reply_to(m, "Invalid date. Use YYYY-MM-DD."); return
         if flow == "await_adm_ref_campaign_field":
             field = st.get("field")
             campaign = dict(get_setting("referral_campaign", {}) or {})
@@ -12673,6 +12743,29 @@ def on_text(m: types.Message) -> None:
                              parse_mode="HTML")
             return
 
+        if flow == "await_adm_coupon_bundle_field":
+            field = st.get("field"); campaign = dict(get_setting("bundle_campaign", {}) or {})
+            try:
+                if field == "name":
+                    value = text.strip();
+                    if not value or len(value) > 80: raise ValueError("Name must be 1-80 characters")
+                elif field == "discount_pct":
+                    value = int(text)
+                    if not 1 <= value <= 90: raise ValueError("Discount must be 1-90")
+                elif field == "plan":
+                    value = text.strip().lower()
+                    if value != "all" and value not in PLAN_LIMITS: raise ValueError("Unknown plan")
+                elif field == "days":
+                    value = int(text)
+                    if not 1 <= value <= 365: raise ValueError("Days must be 1-365")
+                    campaign["ends"] = (now_utc() + timedelta(days=value)).strftime("%Y-%m-%d")
+                else: raise ValueError("Unknown field")
+                campaign[field] = value
+            except (TypeError, ValueError) as exc:
+                bot.reply_to(m, f"{G['no']} {esc(exc)}", parse_mode="HTML"); return
+            campaign.setdefault("enabled", False); set_setting("bundle_campaign", campaign); USER_STATES.pop(uid, None)
+            bot.reply_to(m, f"{G['ok']} Bundle {esc(field)} updated.", parse_mode="HTML")
+            fake = type("BundleCall", (), {"from_user": m.from_user, "message": m})(); return render_adm_coupon_bundle(fake)
         if flow == "await_adm_coupon_bulk":
             if not is_admin(uid): USER_STATES.pop(uid, None); return
             raw = text.strip()
@@ -14304,6 +14397,17 @@ def _coupon_redeem(code, uid):
     _wh_fire("coupon_redeemed", {"code": code.upper(), "uid": uid,
                                   "discount_pct": discount, "discount_flat": flat})
     return True, f"Coupon applied! Discount: {discount}% / flat {flat}", discount
+
+
+def _active_bundle_discount(plan: str) -> float:
+    campaign = get_setting("bundle_campaign", {}) or {}
+    if not isinstance(campaign, dict) or not campaign.get("enabled"):
+        return 0.0
+    ends = str(campaign.get("ends", ""))
+    if ends and ends < now_utc().strftime("%Y-%m-%d"):
+        return 0.0
+    target = str(campaign.get("plan", "all"))
+    return float(campaign.get("discount_pct", 0) or 0) if target in {"all", str(plan)} else 0.0
 
 
 # ─── File Manager ───────────────────────────────────────────────────────────
@@ -17034,6 +17138,7 @@ def render_payment_screen(call: types.CallbackQuery, data: str) -> None:
     active_coupon = u_doc.get("active_coupon")
     discount = 0.0
     flat = 0.0
+    bundle_discount = _active_bundle_discount(plan or "")
     if active_coupon:
         c_doc = db_load_ro().get("coupons", {}).get(active_coupon.upper())
         if c_doc:
@@ -17050,10 +17155,13 @@ def render_payment_screen(call: types.CallbackQuery, data: str) -> None:
         price = float(p.get("price", 0))
         if discount: price = round(price * (1 - discount / 100), 2)
         if flat: price = max(0, round(price - flat, 2))
+        if bundle_discount: price = round(price * (1 - bundle_discount / 100), 2)
         
         price_txt = f"{price}{cur_sym()}"
         if discount or flat:
             price_txt += f" (Coupon: {active_coupon} applied)"
+        if bundle_discount:
+            price_txt += f" (Bundle: {bundle_discount:.0f}% off)"
             
         cap += f"{bullet('Plan', p['name'])}\n{bullet('Amount', price_txt)}\n"
     cap += (
@@ -17319,6 +17427,44 @@ def action_referral_redeem(call: types.CallbackQuery, mode: str, uid: int, quant
     render_referral_redeem(call, uid, admin_mode=admin_mode)
 
 
+def _active_referral_season() -> Dict[str, Any]:
+    season = get_setting("referral_season", {}) or {}
+    if not isinstance(season, dict) or not season.get("active"):
+        return {}
+    end = str(season.get("ends", ""))
+    if end and end < now_utc().strftime("%Y-%m-%d"):
+        return {}
+    return season
+
+
+def _season_referral_count(user: Dict[str, Any], season: Dict[str, Any], users: Optional[Dict[str, Any]] = None) -> int:
+    start = str(season.get("started", "")); end = str(season.get("ends", ""))
+    if not start:
+        return 0
+    total = 0
+    for ref in (user.get("referrals", []) or []):
+        record = ref if isinstance(ref, dict) else (users or {}).get(str(ref), {})
+        joined = str(record.get("joined") or record.get("created") or record.get("ts") or "")[:10]
+        if start <= joined <= (end or "9999-12-31"):
+            total += 1
+    return total
+
+
+def render_referral_leaderboard(call: types.CallbackQuery) -> None:
+    d = db_load(); season = _active_referral_season(); users = d.get("users", {})
+    if not season:
+        cap = f"<b>🏆 {sc('Referral Leaderboard')}</b>\n{G['div_eq']}\n<i>{sc('No referral season is active right now.')}</i>{FOOTER}"
+    else:
+        top = sorted(users.items(), key=lambda item: _season_referral_count(item[1], season, users), reverse=True)[:15]
+        rows = "\n".join(f"{i}. <b>{esc(u.get('name', '?')[:20])}</b> — {_season_referral_count(u, season, users)} referrals"
+                          for i, (_, u) in enumerate(top, 1) if _season_referral_count(u, season) > 0)
+        cap = (f"<b>🏆 {esc(season.get('name', 'Referral Season'))}</b>\n{G['div_eq']}\n"
+               f"{bullet('Ends', season.get('ends') or 'No end date')}\n{G['div']}\n"
+               f"{rows or '<i>No seasonal referrals yet.</i>'}{FOOTER}")
+    show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap,
+              types.InlineKeyboardMarkup().add(Btn(f"{G['back']} Referral", callback_data="menu_referral", style="danger")), call=call)
+
+
 def render_referral(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
     u = db_load()["users"][str(uid)]
@@ -17340,6 +17486,7 @@ def render_referral(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(Btn(f"{sc('Copy Referral Link')}", callback_data="referral_copy", style="success"))
     kb.add(Btn("🎁 Redemption of Referral", callback_data="ref_redeem", style="primary"))
+    kb.add(Btn("🏆 Seasonal Leaderboard", callback_data="ref_leaderboard", style="success"))
     kb.add(Btn(f"{G['back']}  {sc('Main Menu')}", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, kb, call=call)
 
@@ -18123,6 +18270,14 @@ def _clone_chat_id_is_valid(chat_id: str) -> bool:
                 re.fullmatch(r"@[A-Za-z0-9_]{5,32}", value))
 
 
+def _clone_progress(uid: int, stage: str, detail: str = "") -> None:
+    """Report clone stages so slow dependency installation never looks frozen."""
+    try:
+        bot.send_message(uid, f"🔄 <b>Clone: {esc(stage)}</b>" + (f"\n{esc(detail)}" if detail else ""), parse_mode="HTML")
+    except Exception:
+        pass
+
+
 def _finish_bot_clone(uid: int, bot_id: str, new_token: str, chat_id: str) -> None:
     """Thread entry: a failure here must reach the user, never just stdout."""
     try:
@@ -18131,7 +18286,8 @@ def _finish_bot_clone(uid: int, bot_id: str, new_token: str, chat_id: str) -> No
         print(f"[clone] {bot_id} failed: {e}", flush=True)
         traceback.print_exc()
         kb = types.InlineKeyboardMarkup(row_width=1)
-        kb.add(Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ", callback_data="menu_bots", style="primary"))
+        kb.add(Btn("🔁  Retry Clone", callback_data=f"bot_clone_retry_{bot_id}", style="primary"),
+               Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ", callback_data="menu_bots", style="primary"))
         try:
             bot.send_message(
                 uid,
@@ -18163,6 +18319,7 @@ def _clone_enc_files(uid: int, files: List[Dict[str, Any]]) -> List[Dict[str, An
 
 def _finish_bot_clone_inner(uid: int, bot_id: str, new_token: str, chat_id: str) -> None:
     """Clone files while assigning fresh credential environment values."""
+    _clone_progress(uid, "Validating source bot")
     b = find_bot(bot_id)
     if not b or (b.get("owner") != uid and not is_admin(uid)):
         bot.send_message(uid, f"{G['no']} {sc('Source bot not found or not yours')}.")
@@ -18175,6 +18332,7 @@ def _finish_bot_clone_inner(uid: int, bot_id: str, new_token: str, chat_id: str)
     new_id = secrets.token_hex(8)
     new_dir = DIRS["sandbox"] / f"{uid}_{new_id}"
     src_dir = Path(b.get("dir", ""))
+    _clone_progress(uid, "Copying bot files")
     try:
         if src_dir.exists():
             def _ignore(d, fs):
@@ -18202,6 +18360,7 @@ def _finish_bot_clone_inner(uid: int, bot_id: str, new_token: str, chat_id: str)
         "env": clone_env,
         "enc_files": _clone_enc_files(uid, b.get("enc_files") or []),
     })
+    _clone_progress(uid, "Copying encrypted files and assigning credentials")
     for k in ("token", "chat_id", "last_started", "last_exit_code", "last_error",
               "gh_synced_at", "pending_patch", "remote_node_id", "remote_container_id",
               "sandbox_expires_at", "crash_count", "crash_window_started", "last_crash_at",
@@ -18213,6 +18372,7 @@ def _finish_bot_clone_inner(uid: int, bot_id: str, new_token: str, chat_id: str)
     d["bots"][new_id] = new_doc
     db_save(d)
     audit(uid, "bot_clone", f"src={bot_id} new={new_id} chat_id_set=true")
+    _clone_progress(uid, "Starting cloned bot", "Installing dependencies and running health checks may take a moment.")
 
     # A clone is a normal hosted bot, so start it through the same runner
     # used by the Start button instead of leaving it permanently stopped.
@@ -18452,6 +18612,23 @@ def _notify_product_waitlist(product: Dict[str, Any], reason: str) -> int:
     return sent
 
 
+def _notify_product_version(previous: Dict[str, Any], product: Dict[str, Any]) -> int:
+    """Tell previous buyers that a newer catalog version is available."""
+    sent = 0
+    for uid in (previous.get("buyers", {}) or {}).keys():
+        try:
+            bot.send_message(int(uid),
+                             f"🆕 <b>New file version available</b>\n{G['div']}\n"
+                             f"<b>{esc(product.get('filename', 'Catalog file'))}</b> is now version {int(product.get('version', 1))}.\n"
+                             "Open the catalog to download the latest release.", parse_mode="HTML",
+                             reply_markup=types.InlineKeyboardMarkup().add(
+                                 Btn("📄 Open Latest Version", callback_data=f"product_view_{product.get('id', '')}", style="success")))
+            sent += 1
+        except Exception:
+            pass
+    return sent
+
+
 def action_product_waitlist(call: types.CallbackQuery, product_id: str) -> None:
     d = db_load(); product = d.get("product_files", {}).get(product_id)
     if not product or not product.get("active"):
@@ -18475,6 +18652,12 @@ def render_products(call: types.CallbackQuery, category: str = "") -> None:
     d = db_load()
     products = [p for p in d.get("product_files", {}).values()
                 if p.get("active") and (not category or str(p.get("plan", p.get("category", "free"))) == category)]
+    latest = {}
+    for product in products:
+        key = (str(product.get("filename", "file")).lower(), str(product.get("plan", "free")))
+        if key not in latest or int(product.get("version", 1) or 1) > int(latest[key].get("version", 1) or 1):
+            latest[key] = product
+    products = list(latest.values())
     if not products and category:
         label = PLAN_LIMITS.get(category, {}).get("name", category.title()) if category else "this category"
         cap = (f"<b>{sc('Files')} · {esc(label)}</b>\n{G['div_eq']}\n"
@@ -18484,10 +18667,9 @@ def render_products(call: types.CallbackQuery, category: str = "") -> None:
         show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call); return
     if not category:
         counts = {}
-        for p in d.get("product_files", {}).values():
-            if p.get("active"):
-                plan = str(p.get("plan", p.get("category", "free")))
-                counts[plan] = counts.get(plan, 0) + 1
+        for p in products:
+            plan = str(p.get("plan", p.get("category", "free")))
+            counts[plan] = counts.get(plan, 0) + 1
         cap = f"<b>{sc('Product File Categories')}</b>\n{G['div_eq']}\n{sc('Choose a plan category to browse its files. Empty categories will tell you when files are coming soon.')}{FOOTER}"
         kb = types.InlineKeyboardMarkup(row_width=2)
         for plan in PLAN_LIMITS:
@@ -18495,7 +18677,7 @@ def render_products(call: types.CallbackQuery, category: str = "") -> None:
             kb.add(Btn(f"📂 {label} ({counts.get(plan, 0)})", callback_data=f"products_cat_{plan}", style="primary"))
         kb.add(Btn(f"{G['back']} {sc('Main Menu')}", callback_data="menu_main", style="danger"))
         show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call); return
-    rows = "\n".join(f"{G['bullet']} <b>{esc(p.get('filename','file'))}</b> — {p.get('slots_remaining', 0)} slots" for p in products[:30])
+    rows = "\n".join(f"{G['bullet']} <b>{esc(p.get('filename','file'))}</b> v{int(p.get('version', 1) or 1)} — {p.get('slots_remaining', 0)} slots" for p in products[:30])
     label = PLAN_LIMITS.get(category, {}).get("name", category.title())
     cap = f"<b>{sc('Files')} · {esc(label)}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Choose a file to view its description and access options.{FOOTER}"
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -18513,7 +18695,7 @@ def render_product_view(call: types.CallbackQuery, product_id: str) -> None:
     if not p or not p.get("active"):
         ack(call, "Product unavailable"); return
     purchase_display = f"{p.get('price', 0)}{cur_sym()}"
-    cap = (f"<b>📄 {esc(p.get('filename','file'))}</b>\n{G['div_eq']}\n"
+    cap = (f"<b>📄 {esc(p.get('filename','file'))} v{int(p.get('version', 1) or 1)}</b>\n{G['div_eq']}\n"
            f"{bullet('Category', p.get('plan','free'))}\n{bullet('Plan', p.get('plan','free'))}\n"
            f"{bullet('Referral unlock', p.get('referral_cost', 0))}\n{bullet('Purchase', purchase_display)}\n"
            f"{bullet('Remaining slots', p.get('slots_remaining', 0))}\n{G['div']}\n{esc(p.get('description','No description'))}{FOOTER}")
@@ -18629,7 +18811,7 @@ def render_achievements(call: types.CallbackQuery) -> None:
 
 def render_adm_product_files(call: types.CallbackQuery) -> None:
     products = db_load().get("product_files", {})
-    rows = "\n".join(f"<code>{pid}</code> — {esc(p.get('filename','file'))} | {esc(p.get('plan','free'))} | {p.get('slots_remaining',0)} left" for pid, p in products.items()) or f"<i>{sc('No product files')}</i>"
+    rows = "\n".join(f"<code>{pid}</code> — {esc(p.get('filename','file'))} v{int(p.get('version', 1) or 1)} | {esc(p.get('plan','free'))} | {p.get('slots_remaining',0)} left" for pid, p in products.items()) or f"<i>{sc('No product files')}</i>"
     enabled = _ff_get("file_catalog")
     cap = f"<b>📦 {sc('Product File Manager')}</b>\n{G['div_eq']}\n{bullet('User Catalog', '✅ ON' if enabled else '❌ OFF')}\n{rows}\n{G['div']}Create and manage downloadable files with guided controls.{FOOTER}"
     kb = types.InlineKeyboardMarkup(row_width=2)
@@ -18768,7 +18950,11 @@ def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
         product_dir = DIRS["uploads"] / "products"; product_dir.mkdir(parents=True, exist_ok=True)
         product_spec = dict(st["spec"])
         product_spec.pop("filename", None)
+        existing_versions = [p for p in db_load().get("product_files", {}).values()
+                             if str(p.get("filename", "")).lower() == filename.lower()
+                             and str(p.get("plan", "free")) == str(product_spec.get("plan", "free"))]
         product = create_product(db_load(), path="", filename=filename, **product_spec)
+        product["version"] = max([int(p.get("version", 1) or 1) for p in existing_versions] or [0]) + 1
         path = product_dir / f"{product['id']}_{filename}"; path.write_bytes(raw); product["path"] = str(path)
         db = db_load(); db.setdefault("product_files", {})[product["id"]] = product
         for previous in db.get("product_files", {}).values():
@@ -18777,6 +18963,7 @@ def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
             if (str(previous.get("filename", "")).lower() == filename.lower()
                     and str(previous.get("plan", "free")) == str(product.get("plan", "free"))):
                 _notify_product_waitlist(previous, "A new version of this file has been released.")
+                _notify_product_version(previous, product)
         record_activity(db, uid, "product_published", f"A new {product.get('category','general')} file was published")
         db_save(db); audit(uid, "product_add", f"id={product['id']} filename={filename}")
         _product_progress(100, "Published successfully")
@@ -20611,6 +20798,9 @@ def _handle_payment_proof(m: types.Message, st: Dict[str, Any]) -> None:
             flat = float(c_doc.get("discount_flat", 0))
             if discount: price = round(price * (1 - discount / 100), 2)
             if flat: price = max(0, round(price - flat, 2))
+    bundle_discount = _active_bundle_discount(plan or "")
+    if bundle_discount:
+        price = round(price * (1 - bundle_discount / 100), 2)
 
     pid = rand_token(8)
     d = db_load()
@@ -20618,7 +20808,7 @@ def _handle_payment_proof(m: types.Message, st: Dict[str, Any]) -> None:
         "id": pid, "uid": uid, "method": method, "plan": plan,
         "amount": price,
         "status": "pending", "ts": ts_iso(), "telegram_msg_id": m.message_id,
-        "coupon": active_coupon
+        "coupon": active_coupon, "bundle_discount": bundle_discount
     })
     db_save(d)
     USER_STATES.pop(m.from_user.id, None)
@@ -20742,6 +20932,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_buy":      render_buy_menu(call); return
     if data == "menu_profile":  render_profile(call); return
     if data == "menu_referral": render_referral(call); return
+    if data == "ref_leaderboard": render_referral_leaderboard(call); return
     if data == "menu_products": render_products(call); return
     if data.startswith("products_cat_"):
         category = data[len("products_cat_"):]
@@ -20846,6 +21037,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
         parts = data.split("_", 3)
         if len(parts) >= 4: action_env_delete(call, parts[2], parts[3]); return
     if data.startswith("bot_cron_"):        render_cron(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_clone_retry_"): action_bot_clone(call, data[len("bot_clone_retry_"):]); return
     if data.startswith("bot_clone_"):       action_bot_clone(call, data.split("_", 2)[2]); return
     if data.startswith("bot_dl_"):          action_bot_download(call, data.split("_", 2)[2]); return
     if data.startswith("bot_webhook_"):     render_bot_webhook(call, data.split("_", 2)[2]); return
