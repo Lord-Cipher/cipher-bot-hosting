@@ -19030,7 +19030,7 @@ def _handle_adm_product_command(m: types.Message, text: str) -> None:
     except ValueError:
         bot.reply_to(m, "Referral count, price, slots, and days must be valid non-negative numbers."); return
     USER_STATES[m.from_user.id] = {"flow": "await_adm_product_file", "spec": spec}
-    bot.reply_to(m, f"{G['ok']} Specification saved. Now send the product file in any format (ZIP, 7z, FOR, PDF, or any other document type).")
+    bot.reply_to(m, f"{G['ok']} Specification saved. Now send the product file in any format. ZIP, 7z, FOR, PDF, and all other file types are accepted. Names may use letters, numbers, underscores, hyphens, and extensions.")
 
 
 def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
@@ -19066,7 +19066,11 @@ def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
         _product_progress(15, "File downloaded")
         original_filename = Path(m.document.file_name or "product.bin").name
         requested_filename = str(st.get("spec", {}).get("filename", "") or "").strip()
-        filename = safe_filename(requested_filename, original_filename) if requested_filename else safe_filename(original_filename)
+        # Catalog labels are independent of the uploaded file type: any safe
+        # extension is allowed, including .zip, .7z, .for, .py, and custom
+        # names containing underscores or hyphens. Project-file renaming keeps
+        # its stricter extension rule through rename_project_file().
+        filename = safe_filename(requested_filename) if requested_filename else safe_filename(original_filename)
         scan = _run_security_scan([(original_filename, raw)], uploader_uid=uid,
                                   progress_cb=lambda pct, status: _product_progress(15 + int(pct * 0.75), status))
         if scan.get("recommendation") == "REJECT":

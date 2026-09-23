@@ -68,10 +68,17 @@ def test_custom_catalog_name_preserves_uploaded_extension():
         raise AssertionError("changing a product extension must remain blocked")
 
 
+def test_catalog_accepts_all_safe_extensions_and_name_separators():
+    assert safe_filename("my_bot-v2.py") == "my_bot-v2.py"
+    assert safe_filename("payload.for") == "payload.for"
+    assert safe_filename("archive.7z") == "archive.7z"
+
+
 if __name__ == "__main__":
     test_product_referral_slots_and_expiry()
     test_product_purchase_reuses_access_without_consuming_second_slot()
     test_purchase_can_unlock_higher_plan_but_referral_cannot()
     test_safe_rename_updates_text_references_and_rejects_traversal()
     test_custom_catalog_name_preserves_uploaded_extension()
+    test_catalog_accepts_all_safe_extensions_and_name_separators()
     print("community product tests passed")
