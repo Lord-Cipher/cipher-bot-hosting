@@ -138,6 +138,8 @@ assert "def _build_ai_request" in BOT
 assert "roughly 500-800 words" in BOT
 assert "adm_languages_back" in BOT
 assert "_append_lord_cipher_brag(clean_res, m.from_user.id)" not in BOT
+assert 'callback_data="adm_seasonal_events"' in BOT
+assert "Product Campaigns" in BOT
 assert "operator_owned" in BOT
 assert 'b["trusted_execution"] = True' in BOT
 assert 'GIT_CONFIG_KEY_0' in BOT

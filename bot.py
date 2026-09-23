@@ -18940,6 +18940,7 @@ def render_adm_product_files(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn(f"{'✅' if enabled else '❌'} User Catalog", callback_data="adm_product_toggle_catalog", style="success" if enabled else "danger"))
     kb.add(Btn("📊 Catalog Analytics", callback_data="adm_catalog_analytics", style="primary"))
+    kb.add(Btn("🎉 Product Campaigns", callback_data="adm_seasonal_events", style="success"))
     kb.add(Btn("➕ Add Product File", callback_data="adm_product_add", style="success"))
     for pid, product in list(products.items())[:20]:
         label = str(product.get("filename", "file"))[:24]
