@@ -5109,6 +5109,9 @@ def get_or_create_user(u: types.User, ref: Optional[int] = None) -> Tuple[Dict[s
         if ref and ref != u.id and str(ref) in db["users"]:
             db["users"][str(ref)]["ref_count"] = int(db["users"][str(ref)].get("ref_count", 0)) + 1
             db["users"][str(ref)]["ref_credit"] = int(db["users"][str(ref)].get("ref_credit", 0)) + 1
+            referrals = db["users"][str(ref)].setdefault("referrals", [])
+            if not any((item.get("uid") if isinstance(item, dict) else item) == u.id for item in referrals):
+                referrals.append({"uid": u.id, "joined": ts_iso()})
             ref_user = db["users"][str(ref)]
             new_achievements = award_for_event(db, ref_user, "referral")
             record_activity(db, int(ref), "referral", f"{ref_user.get('name', 'A user')} earned a referral bonus")
@@ -6206,6 +6209,18 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
                 _notify_product_waitlist(product, "The admin increased the available slot limit.")
             db_save(db); audit(call.from_user.id, "product_edit", pid); ack(call, "Product saved")
         return render_adm_product_files(call)
+    if data.startswith("adm_product_rollback_"):
+        pid = data[len("adm_product_rollback_"):]; d = db_load(); target = d.get("product_files", {}).get(pid)
+        if not target:
+            ack(call, "Product version not found", show_alert=True); return render_adm_product_files(call)
+        group = [p for p in d.get("product_files", {}).values()
+                 if str(p.get("filename", "")).lower() == str(target.get("filename", "")).lower()
+                 and str(p.get("plan", "free")) == str(target.get("plan", "free"))]
+        for product in group:
+            product["active"] = str(product.get("id")) == str(pid)
+        db_save(d); audit(call.from_user.id, "product_version_rollback", f"id={pid} version={target.get('version', 1)}")
+        ack(call, f"Rolled back to version {target.get('version', 1)}")
+        return render_adm_product_files(call)
     if data == "adm_tickets":
         return render_adm_tickets(call)
     if data == "adm_admins":
@@ -7109,8 +7124,10 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         ack(call, "New referral season started")
         return render_adm_ref_leaderboard(call)
     if data == "adm_ref_season_end":
-        season = dict(get_setting("referral_season", {}) or {}); season["active"] = False; season["ended"] = now_utc().strftime('%Y-%m-%d'); set_setting("referral_season", season)
-        ack(call, "Referral season ended")
+        season = dict(get_setting("referral_season", {}) or {})
+        awarded = _finalize_referral_season(season)
+        season["active"] = False; season["ended"] = now_utc().strftime('%Y-%m-%d'); set_setting("referral_season", season)
+        ack(call, f"Referral season ended; rewarded {awarded} winner(s)")
         return render_adm_ref_leaderboard(call)
     if data == "adm_ref_season_set_end":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_season_end"}
@@ -9966,11 +9983,10 @@ def render_adm_ref_rewards(call: types.CallbackQuery) -> None:
 def render_adm_ref_leaderboard(call: types.CallbackQuery) -> None:
     users = db_load()["users"]
     season = _active_referral_season()
-    top = sorted(users.items(),
-                 key=lambda x: len(x[1].get("referrals",[])), reverse=True)[:15]
+    top = sorted(users.items(), key=lambda x: _season_referral_count(x[1], season, users) if season else len(x[1].get("referrals", [])), reverse=True)[:15]
     rows = "\n".join(
         f"{i}. <b>{esc(u.get('name','?')[:20])}</b> — "
-        f"{len(u.get('referrals',[]))} {sc('refs')} | "
+        f"{_season_referral_count(u, season, users) if season else len(u.get('referrals', []))} {sc('refs')} | "
         f"{u.get('referral_earnings',0)}{cur_sym()} {sc('earned')}"
         for i, (uid, u) in enumerate(top, 1)
     ) or f"<i>{sc('No referrals yet')}</i>"
@@ -17437,6 +17453,32 @@ def _active_referral_season() -> Dict[str, Any]:
     return season
 
 
+def _finalize_referral_season(season: Dict[str, Any]) -> int:
+    if not season or season.get("rewards_awarded"):
+        return 0
+    d = db_load(); users = d.get("users", {})
+    top = sorted(users.items(), key=lambda item: _season_referral_count(item[1], season, users), reverse=True)
+    rewards = get_setting("referral_season_rewards", [100, 50, 25]) or [100, 50, 25]
+    awarded = 0
+    for rank, (uid_s, user) in enumerate(top[:3], 1):
+        count = _season_referral_count(user, season, users)
+        if count <= 0:
+            continue
+        coins = int(rewards[rank - 1]) if rank <= len(rewards) else 0
+        user["file_coins"] = int(user.get("file_coins", 0) or 0) + coins
+        badge = f"🏆 {season.get('name', 'Referral Season')} #{rank}"
+        user.setdefault("seasonal_badges", []).append(badge)
+        try:
+            bot.send_message(int(uid_s), f"🏆 <b>{esc(season.get('name', 'Referral Season'))}</b> finished! You placed #{rank} and earned {coins} file coins.", parse_mode="HTML")
+        except Exception:
+            pass
+        awarded += 1
+    season["rewards_awarded"] = True
+    season["winner_count"] = awarded
+    db_save(d)
+    return awarded
+
+
 def _season_referral_count(user: Dict[str, Any], season: Dict[str, Any], users: Optional[Dict[str, Any]] = None) -> int:
     start = str(season.get("started", "")); end = str(season.get("ends", ""))
     if not start:
@@ -18822,6 +18864,9 @@ def render_adm_product_files(call: types.CallbackQuery) -> None:
         label = str(product.get("filename", "file"))[:24]
         kb.add(Btn(f"✏️ {label}", callback_data=f"adm_product_edit_{pid}", style="primary"),
                Btn(f"🗑️ Delete {label}", callback_data=f"adm_product_delete_{pid}", style="danger"))
+        if int(product.get("version", 1) or 1) > 1 and not product.get("active"):
+            kb.add(Btn(f"↩️ Roll back to v{int(product.get('version', 1) or 1)}",
+                       callback_data=f"adm_product_rollback_{pid}", style="primary"))
     kb.add(Btn("⬅️ Admin Panel", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 
