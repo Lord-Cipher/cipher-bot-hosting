@@ -82,7 +82,7 @@ assert 'products_cat_' in BOT
 assert 'requested_filename' in BOT
 assert 'product file in any format' in BOT
 assert 'file_coins' in BOT
-assert 'f"{prefix}_slot_{uid}"' in BOT
+assert 'f"{prefix}_category_slot_{uid}"' in BOT
 assert 'adm_ref_redeem' in BOT
 assert 'render_referral_confirmation' in BOT
 assert 'referral_file_coin_credits' in BOT
@@ -100,7 +100,13 @@ assert 'No recipient ID is required' in BOT
 assert '_referral_gift_receipt' in BOT
 assert 'Amount Redeemed' in BOT
 assert 'Remaining Referrals' in BOT
-assert 'Referral Gift Receipt' in BOT
+assert "Referral Gift Receipt" in BOT
+assert "Bot Slot Redemption" in BOT
+assert "File Coin Redemption" in BOT
+assert 'callback_data="ref_gift_confirm_yes"' in BOT
+assert 'callback_data="ref_gift_confirm_no"' in BOT
+assert "DAYS_OR_DATE" in BOT
+assert 'coupon_plan in {"all", "", str(plan).lower()}' in BOT
 assert '_catalog_expiry_reminders' in BOT
 assert 'adm_catalog_analytics' in BOT
 assert 'download_count' in BOT

@@ -7222,6 +7222,11 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_ref_redeem":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_redeem_user"}
         bot.send_message(call.message.chat.id, "Send the user ID whose referral credits should be redeemed."); return
+    if data.startswith("adm_ref_redeem_category_"):
+        parts = data.split("_")
+        if len(parts) == 6:
+            return render_referral_redeem_category(call, parts[4], int(parts[5]), admin_mode=True)
+        ack(call, "Invalid redemption category", show_alert=True); return
     if data == "adm_ref_adjust":
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ref_adjust_user"}
         bot.send_message(call.message.chat.id, "Send the user ID to adjust."); return
@@ -9778,8 +9783,10 @@ def render_adm_coupon_create(call: types.CallbackQuery) -> None:
         f"{G['div_eq']}\n"
         f"{bullet('Existing coupons', len(d))}\n"
         f"{G['div']}\n"
-        f"{sc('Send')}: <code>add CODE PERCENT USES</code>\n"
-        f"{sc('Example')}: <code>add WELCOME10 10 50</code>\n"
+        f"{sc('Send')}: <code>add CODE PLAN PERCENT USES DAYS_OR_DATE</code>\n"
+        f"{sc('Example')}: <code>add PRO30 pro 30 1 30</code>\n"
+        f"{sc('Exact date')}: <code>add SALE pro 20 10 2026-12-31</code>\n"
+        f"{sc('PLAN')}: <code>{', '.join(PLAN_LIMITS.keys())}</code>\n"
         f"{sc('Send')}: <code>del CODE</code> {sc('to remove one')}{FOOTER}"
     )
     USER_STATES[call.from_user.id] = {"flow": "await_coupon_admin"}
@@ -11616,7 +11623,10 @@ def on_text(m: types.Message) -> None:
             if amount > balance:
                 bot.reply_to(m, f"{G['no']} You only have {balance} referral credit(s)."); return
             USER_STATES[uid] = {"flow": "await_ref_gift_confirm", "amount": amount}
-            bot.reply_to(m, f"<b>{G['warn']} Confirm shareable referral gift</b>\n{bullet('Credits', amount)}\nAnyone with the generated code can redeem it once.\nSend <code>YES</code> to create, or <code>NO</code> to cancel.", parse_mode="HTML"); return
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            kb.add(Btn(f"{G['ok']} Yes, create gift", callback_data="ref_gift_confirm_yes", style="success"),
+                   Btn(f"{G['no']} No, cancel", callback_data="ref_gift_confirm_no", style="danger"))
+            bot.reply_to(m, f"<b>{G['warn']} Confirm shareable referral gift</b>\n{bullet('Credits', amount)}\nAnyone with the generated code can redeem it once.", parse_mode="HTML", reply_markup=kb); return
         if flow == "await_ref_gift_confirm":
             USER_STATES.pop(uid, None)
             if text.upper() != "YES":
@@ -15466,10 +15476,14 @@ def _payment_create_request(uid, plan, amount, method, coupon=""):
         d = db_load_ro()
         c = d.get("coupons", {}).get(coupon.upper())
         if c:
-            discount = float(c.get("discount_pct", c.get("percent", 0)))
-            flat     = float(c.get("discount_flat", 0))
-            if discount: amount = round(amount*(1-discount/100), 2)
-            if flat:     amount = max(0, round(amount-flat, 2))
+            coupon_plan = str(c.get("plan", "all") or "all").lower()
+            if coupon_plan in {"all", "", str(plan).lower()}:
+                discount = float(c.get("discount_pct", c.get("percent", 0)))
+                flat     = float(c.get("discount_flat", 0))
+                if discount: amount = round(amount*(1-discount/100), 2)
+                if flat:     amount = max(0, round(amount-flat, 2))
+            else:
+                coupon = ""
     req = {"id": req_id, "uid": uid, "plan": plan, "amount": amount, "method": method,
            "coupon": coupon, "discount": discount, "status": "pending",
            "created": ts_iso(), "updated": ts_iso(), "note": ""}
@@ -17458,17 +17472,42 @@ def render_referral_redeem(call: types.CallbackQuery, target_uid: Optional[int] 
         f"{bullet('File coins', int(u.get('file_coins', 0) or 0))}\n"
         f"{G['div']}{_referral_rate_summary()}{promo_line}\nChoose how to redeem available referral credits.{FOOTER}"
     )
-    prefix = "adm_ref_redeem" if admin_mode else "ref_redeem"
     back = "adm_referral_sys" if admin_mode else "menu_referral"
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(Btn("🎟️ Redeem 1 Bot Slot", callback_data=f"{prefix}_slot_{uid}", style="success"))
-    kb.add(Btn("🎟️ Redeem All Possible Slots", callback_data=f"{prefix}_bulk_slot_{uid}", style="success"))
-    kb.add(Btn("🪙 Redeem 1 File Coin", callback_data=f"{prefix}_file_{uid}", style="primary"))
-    kb.add(Btn("🪙 Redeem All Possible Coins", callback_data=f"{prefix}_bulk_file_{uid}", style="primary"))
+    prefix = "adm_ref_redeem" if admin_mode else "ref_redeem"
+    kb.add(Btn("🎟️ Bot Slot Redemption", callback_data=f"{prefix}_category_slot_{uid}", style="success"))
+    kb.add(Btn("🪙 File Coin Redemption", callback_data=f"{prefix}_category_file_{uid}", style="primary"))
     if not admin_mode:
         kb.add(Btn("🎁 Gift Referral Credits", callback_data="ref_gift_create", style="primary"))
         kb.add(Btn("📥 Gift Redemption", callback_data="ref_gifts", style="success"))
     kb.add(Btn(f"{G['back']} Back", callback_data=back, style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, kb, call=call)
+
+
+def render_referral_redeem_category(call: types.CallbackQuery, category: str, uid: int, admin_mode: bool = False) -> None:
+    """Show matching single/bulk redemption actions under one category."""
+    if category not in {"slot", "file"}:
+        ack(call, "Unknown redemption category", show_alert=True); return
+    user = db_load().get("users", {}).get(str(uid), {})
+    if not user:
+        ack(call, "User not found", show_alert=True); return
+    prefix = "adm_ref_redeem" if admin_mode else "ref_redeem"
+    back = "adm_ref_redeem" if admin_mode else "ref_redeem"
+    if category == "slot":
+        title, icon, style = "Bot Slot Redemption", "🎟️", "success"
+        single = f"{icon} Redeem 1 Bot Slot"
+        bulk = f"{icon} Redeem All Possible Slots"
+    else:
+        title, icon, style = "File Coin Redemption", "🪙", "primary"
+        single = f"{icon} Redeem 1 File Coin"
+        bulk = f"{icon} Redeem All Possible Coins"
+    cap = (f"<b>🎁 {sc(title)}</b>\n{G['div_eq']}\n"
+           f"{bullet('User', uid)}\n{bullet('Referral credits', int(user.get('ref_credit', 0) or 0))}\n"
+           f"{G['div']}Choose a single or bulk redemption action.{FOOTER}")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn(single, callback_data=f"{prefix}_{category}_{uid}", style=style))
+    kb.add(Btn(bulk, callback_data=f"{prefix}_bulk_{category}_{uid}", style=style))
+    kb.add(Btn(f"{G['back']} Redemption Categories", callback_data=back, style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("referral", PHOTOS["main"]), cap, kb, call=call)
 
 
@@ -19248,13 +19287,13 @@ def render_adm_approve(call: types.CallbackQuery) -> None:
 def render_adm_coupons(call: types.CallbackQuery) -> None:
     d = db_load()["coupons"]
     rows = "\n".join(
-        f"{G['bullet']} <code>{esc(code)}</code> \u2014 {esc(c.get('percent', c.get('pct', 0)))}% {G['bullet']} {esc(c.get('uses_left'))} uses"
+        f"{G['bullet']} <code>{esc(code)}</code> — {esc(c.get('percent', c.get('pct', 0)))}% | plan: {esc(c.get('plan', 'all'))} | {esc(c.get('uses_left'))} uses | expires: {esc(c.get('expiry') or 'never')}"
         for code, c in d.items()
     ) or f"<i>{sc('no coupons yet')}</i>"
     cap = (
         f"<b>{G['key']} {sc('Coupons')}</b>\n"
         f"{G['div_eq']}\n{rows}\n{G['div']}\n"
-        f"Send: <code>add CODE PERCENT USES</code>\n"
+        f"Send: <code>add CODE PLAN PERCENT USES DAYS_OR_DATE</code>\n"
         f"Send: <code>del CODE</code>{FOOTER}"
     )
     USER_STATES[call.from_user.id] = {"flow": "await_coupon_admin"}
@@ -20771,25 +20810,49 @@ def _handle_coupon_admin(m: types.Message) -> None:
     if op == "add" and len(parts) >= 4:
         code = parts[1].upper()
         try:
-            pct = int(parts[2])
-            uses = int(parts[3])
+            if len(parts) >= 6:
+                plan = parts[2].lower()
+                pct = int(parts[3])
+                uses = int(parts[4])
+                if plan not in PLAN_LIMITS:
+                    raise ValueError("invalid plan")
+                expiry_input = parts[5]
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", expiry_input):
+                    expiry_date = datetime.strptime(expiry_input, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    if expiry_date <= now_utc():
+                        raise ValueError("expiration date must be in the future")
+                    expiry = expiry_date.isoformat()
+                    expiry_label = expiry_input
+                else:
+                    days = int(expiry_input)
+                    if days < 1:
+                        raise ValueError("days must be positive")
+                    expiry = (now_utc() + timedelta(days=days)).isoformat()
+                    expiry_label = f"{days} day(s)"
+            else:
+                plan = "all"
+                pct = int(parts[2])
+                uses = int(parts[3])
+                expiry = ""
         except Exception:
-            bot.reply_to(m, f"{G['no']} bad numbers"); return
+            bot.reply_to(m, f"{G['no']} Invalid format. Use: add CODE PLAN PERCENT USES DAYS_OR_DATE"); return
         # Unify all schema variants for maximum compatibility
         d["coupons"][code] = {
             "percent": pct, 
             "discount_pct": pct,
             "pct": pct,
             "discount": pct,
+            "plan": plan,
             "uses_left": uses,
             "max_uses": uses,
+            "expiry": expiry,
             "created": ts_iso(),
             "created_by": m.from_user.id
         }
         db_save(d)
         audit(m.from_user.id, "coupon_add", f"code={code}")
         USER_STATES.pop(m.from_user.id, None)
-        bot.reply_to(m, f"{G['ok']} created {code}")
+        bot.reply_to(m, f"{G['ok']} created {code} for {plan} plan" + (f", expires {expiry_label}" if expiry else ""))
     elif op == "del" and len(parts) >= 2:
         code = parts[1].upper()
         if d["coupons"].pop(code, None):
@@ -20800,7 +20863,7 @@ def _handle_coupon_admin(m: types.Message) -> None:
         else:
             bot.reply_to(m, f"{G['no']} code not found")
     else:
-        bot.reply_to(m, f"{G['no']} Use: <code>add CODE PCT USES</code> or <code>del CODE</code>",
+        bot.reply_to(m, f"{G['no']} Use: <code>add CODE PLAN PERCENT USES DAYS_OR_DATE</code> or <code>del CODE</code>",
                      parse_mode="HTML")
 
 
@@ -21102,6 +21165,11 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
         return
     if data == "ref_redeem":
         render_referral_redeem(call); return
+    if data.startswith("ref_redeem_category_"):
+        parts = data.split("_")
+        if len(parts) == 5:
+            return render_referral_redeem_category(call, parts[3], int(parts[4]))
+        ack(call, "Invalid redemption category", show_alert=True); return
     if data == "ref_gifts":
         render_referral_gifts(call); return
     if data == "ref_gift_code":
@@ -21110,6 +21178,22 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "ref_gift_create":
         USER_STATES[call.from_user.id] = {"flow": "await_ref_gift_target"}
         bot.send_message(call.message.chat.id, "How many referral credits would you like to convert into a shareable gift code?"); return
+    if data == "ref_gift_confirm_yes" or data == "ref_gift_confirm_no":
+        st = USER_STATES.get(call.from_user.id) or {}
+        if st.get("flow") != "await_ref_gift_confirm":
+            ack(call, "This gift confirmation has expired", show_alert=True); return
+        USER_STATES.pop(call.from_user.id, None)
+        if data.endswith("_no"):
+            ack(call, "Gift cancelled")
+            bot.send_message(call.message.chat.id, f"{G['no']} Gift cancelled.")
+            return
+        ok, message, gift = _create_referral_gift(call.from_user.id, None, int(st.get("amount", 0)))
+        if not ok or not gift:
+            ack(call, message, show_alert=True); return
+        remaining = int(db_load().get("users", {}).get(str(call.from_user.id), {}).get("ref_credit", 0) or 0)
+        ack(call, "Gift created")
+        bot.send_message(call.message.chat.id, f"{G['ok']} {message}\nShare this code with anyone you choose.\n\n{_referral_gift_receipt(gift, remaining)}", parse_mode="HTML")
+        return
     if data.startswith("ref_gift_claim_"):
         gift_id = data[len("ref_gift_claim_"):]
         ok, message = _claim_referral_gift(call.from_user.id, gift_id)
