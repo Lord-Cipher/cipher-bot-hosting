@@ -1705,12 +1705,25 @@ def settings_save(d: Dict[str, Any]) -> None:
 def get_setting(key: str, default: Any = None) -> Any:
     # Hot path. Use the no-copy reader because we only `.get()` —
     # we never mutate the dict.
-    return settings_load_ro().get(key, default)
+    settings = settings_load_ro()
+    if key in settings:
+        return settings[key]
+    nested = settings.get("settings")
+    if isinstance(nested, dict):
+        return nested.get(key, default)
+    return default
 
 
 def set_setting(key: str, value: Any) -> None:
     s = settings_load()
-    s[key] = value
+    nested = s.get("settings")
+    if isinstance(nested, dict) and key not in s:
+        nested[key] = value
+    else:
+        # Preserve compatibility with older flat settings files and ensure
+        # an existing top-level value is updated rather than shadowed by a
+        # stale nested copy.
+        s[key] = value
     settings_save(s)
 
 
