@@ -12143,6 +12143,10 @@ def on_text(m: types.Message) -> None:
             if not owner_part or not repo_part or any(ch in owner_part + repo_part for ch in "<>\\\"'\n\r"):
                 bot.reply_to(m, f"{G['no']} Invalid GitHub repository name.", parse_mode="HTML"); return
             repo_url = f"https://github.com/{owner_part}/{repo_part}"
+            # Capture the normalized URL before starting the worker. This
+            # prevents any later message/state change from affecting the
+            # repository selected by this specific clone request.
+            requested_repo_url = repo_url
             u_doc = db_load()["users"].get(str(uid), {})
             if not _user_can_host_gh(u_doc):
                 bot.reply_to(m, f"{G['no']} Pro+ plan required to clone GitHub repos."); return
@@ -12155,7 +12159,7 @@ def on_text(m: types.Message) -> None:
             if len(existing_bots) >= max_bots + bonus:
                 bot.reply_to(m, f"{G['no']} Bot slot limit reached ({max_bots + bonus} bots). Upgrade your plan."); return
             bot.reply_to(m, f"⏳ Cloning <code>{esc(repo_url)}</code>…", parse_mode="HTML")
-            def _clone_bg():
+            def _clone_bg(repo_url=requested_repo_url):
                 try:
                     # 1. Prepare ID and directory
                     bot_id_new = secrets.token_hex(8)
@@ -12164,7 +12168,10 @@ def on_text(m: types.Message) -> None:
                     repo_name = clean.split("/")[-1]
                     bot_dir = DIRS["sandbox"] / f"{uid}_{bot_id_new}"
                     
-                                    # 2. Try to get user token for private repos
+                    # 2. Try the user's private-repo token first. Owners and
+                    # admins may also use the already configured Backup token
+                    # so they do not have to enter the same PAT twice. That
+                    # global credential is never exposed to ordinary users.
                     raw_tok = None
                     token_key_id = db_load()["users"].get(str(uid), {}).get("gh_token_key_id")
                     if token_key_id:
@@ -12178,16 +12185,31 @@ def on_text(m: types.Message) -> None:
                                     raw_tok = decrypt_with(key, _b64.b64decode(cipher_b64)).decode()
                         except Exception: pass
 
+                    token_candidates = []
+                    if raw_tok:
+                        token_candidates.append(raw_tok)
+                    if is_owner(uid) or is_admin(uid):
+                        gh_load_config()
+                        backup_tok = str(GH.get("token") or "").strip()
+                        if backup_tok and backup_tok not in token_candidates:
+                            token_candidates.append(backup_tok)
+
                     # 3. Clone repo using git (best for all branches/submodules)
-                    res = _clone_gh_repo(repo_url, raw_tok, bot_dir)
-                    if not res.get("ok"):
+                    res = {"ok": False, "error": "No GitHub token configured."}
+                    archive_res = {"ok": False, "error": "No GitHub token configured."}
+                    for candidate in token_candidates or [None]:
+                        res = _clone_gh_repo(repo_url, candidate, bot_dir)
+                        if res.get("ok"):
+                            break
                         # Fallback to the repository's actual default branch.
-                        archive_res = _download_gh_archive(repo_url, raw_tok, bot_dir)
-                        if not archive_res.get("ok"):
-                            raise RuntimeError(
-                                f"Git clone failed: {res.get('error', 'unknown error')}; "
-                                f"archive fallback failed: {archive_res.get('error', 'unknown error')}"
-                            )
+                        archive_res = _download_gh_archive(repo_url, candidate, bot_dir)
+                        if archive_res.get("ok"):
+                            break
+                    else:
+                        raise RuntimeError(
+                            f"Git clone failed for <code>{esc(repo_url)}</code>: {res.get('error', 'unknown error')}; "
+                            f"archive fallback failed: {archive_res.get('error', 'unknown error')}"
+                        )
                     
                     # 4. Security scan and database entry
                     files_added = []
