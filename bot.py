@@ -16368,7 +16368,9 @@ def _tg_channel_backup_enabled() -> bool:
     return bool(ch)
 
 def _tg_backup_channel() -> str:
-    return get_setting("tg_backup_channel", "") or str(OWNER_ID)
+    # Telegram backups must remain disabled until the admin explicitly sets a
+    # destination channel in the admin panel. Never use OWNER_ID as a fallback.
+    return str(get_setting("tg_backup_channel", "") or "").strip()
 
 def tg_channel_backup_now() -> Dict[str, Any]:
     """Zip the entire DB + settings + bot_data and send to a Telegram channel."""
