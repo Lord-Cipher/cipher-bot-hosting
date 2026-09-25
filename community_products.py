@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+PRODUCT_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()\-]{0,127}$")
 DEFAULT_ACHIEVEMENTS = {
     "first_upload": ("First Upload", "Uploaded your first bot", 10),
     "first_referral": ("Connector", "Referred your first user", 15),
@@ -79,6 +80,15 @@ def safe_filename(name: str, original: Optional[str] = None) -> str:
     return name
 
 
+def safe_product_label(name: str, fallback: str = "Catalog file") -> str:
+    """Validate a human-facing catalog label independently of file extension."""
+    label = re.sub(r"\s+", " ", str(name or "").strip()) or str(fallback).strip()
+    if (not label or label in {".", ".."} or "/" in label or "\\" in label
+            or not PRODUCT_LABEL_RE.fullmatch(label) or label.startswith(".")):
+        raise ValueError("Invalid catalog name. Use letters, numbers, spaces, underscores, hyphens, dots, or parentheses.")
+    return label
+
+
 def rename_project_file(project_dir: str | Path, old_name: str, new_name: str) -> Tuple[bool, str]:
     root = Path(project_dir).resolve()
     try:
@@ -113,7 +123,7 @@ def rename_project_file(project_dir: str | Path, old_name: str, new_name: str) -
 def create_product(db: Dict[str, Any], *, path: str, filename: str, description: str, category: str, plan: str, referral_cost: int, price: float, slots: int, access_days: int) -> Dict[str, Any]:
     ensure_db(db)
     pid = secrets.token_hex(8)
-    product = {"id": pid, "path": path, "filename": safe_filename(filename), "description": str(description)[:1000], "category": str(category or "general")[:40], "plan": str(plan or "free"), "referral_cost": max(0, int(referral_cost)), "price": max(0.0, float(price)), "slot_limit": max(0, int(slots)), "slots_remaining": max(0, int(slots)), "access_days": max(1, int(access_days)), "buyers": {}, "referral_claims": {}, "waitlist": [], "version": 1, "created": utc_now().isoformat(), "active": True}
+    product = {"id": pid, "path": path, "filename": safe_product_label(filename), "description": str(description)[:1000], "category": str(category or "general")[:40], "plan": str(plan or "free"), "referral_cost": max(0, int(referral_cost)), "price": max(0.0, float(price)), "slot_limit": max(0, int(slots)), "slots_remaining": max(0, int(slots)), "access_days": max(1, int(access_days)), "buyers": {}, "referral_claims": {}, "waitlist": [], "version": 1, "created": utc_now().isoformat(), "active": True}
     db["product_files"][pid] = product
     return product
 

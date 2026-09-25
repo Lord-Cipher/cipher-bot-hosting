@@ -25,6 +25,8 @@ users = {
     },
     "42": {
         "id": 42,
+        "name": "Test User",
+        "username": "test_user",
         "plan": "lifetime",
         "plan_expires": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
         "ai_models": [],
@@ -116,8 +118,12 @@ for term in ("lord cipher", "creator", "mentor", "master"):
 ordinary_reply = bot._call_ai_api("How do I restart my bot?", "lifetime", 42)
 assert "lord cipher is my creator" not in ordinary_reply.lower(), ordinary_reply
 
+bot._remember_ai_turn(42, "My project is called Atlas", "I will remember Atlas for this account.")
 profile_prompt = bot._build_ai_request("Can you help me debug this?", 42)
-assert profile_prompt == "Can you help me debug this?"
+assert "Can you help me debug this?" in profile_prompt
+assert "name='Test User'" in profile_prompt
+assert "@test_user" in profile_prompt
+assert "My project is called Atlas" in profile_prompt
 identity_prompt = bot._build_ai_request("Who is your mentor?", 42)
 assert "telegram_id=42" in identity_prompt
 banner_only = "🤖 AI OPERATIVE (CLAUDE)\n━━━━━━━━━━━━━━━━\n\nᶜᴵᴾᴴᴱᴿ Tᴇᴄʜ Hᴏsᴛ v2.1"

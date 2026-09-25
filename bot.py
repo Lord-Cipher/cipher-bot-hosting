@@ -44,7 +44,7 @@ from remote_worker import deploy as remote_deploy, control as remote_control, Re
 from ai_preflight import run_preflight
 from community_products import (
     award_for_event, create_product, developer_level, ensure_db as ensure_community_db,
-    product_access, record_activity, rename_project_file, safe_filename,
+    product_access, record_activity, rename_project_file, safe_filename, safe_product_label,
 )
 
 _REQUIRED_PKGS = [
@@ -825,6 +825,7 @@ def _fit_prompt_for_get(prefix: str, prompt: str,
 
 AI_CHAT_SESSIONS: Dict[int, List[Dict[str, str]]] = {}
 AI_CHAT_SESSION_LOCK = threading.Lock()
+AI_MEMORY_TURNS = 8
 
 
 def _sync_ai_user_profile(user: Any) -> Dict[str, Any]:
@@ -837,6 +838,7 @@ def _sync_ai_user_profile(user: Any) -> Dict[str, Any]:
     profile["name"] = str(getattr(user, "first_name", "") or profile.get("name", "") or "User")[:80]
     profile["username"] = str(getattr(user, "username", "") or profile.get("username", "") or "")[:64]
     profile["last_seen"] = ts_iso()
+    profile.setdefault("ai_memory", [])
     db_save(d)
     return profile
 
@@ -848,9 +850,24 @@ def _ai_user_context(uid: Optional[int], profile: Optional[Dict[str, Any]] = Non
     username = str(profile.get("username") or "").strip()
     name = str(profile.get("name") or "User").strip()
     handle = f"@{username}" if username else name
-    return (f"VERIFIED USER PROFILE: name={name!r}; username={handle!r}; telegram_id={uid}. "
+    plan = str(profile.get("plan") or "free")
+    return (f"VERIFIED USER PROFILE: name={name!r}; username={handle!r}; telegram_id={uid}; plan={plan!r}. "
             "Address the user by their username when one is available; otherwise use their first name. "
             "Never call the user Commander, Lord Cipher, master, or any title unless the user explicitly asks for it.")
+
+
+def _remember_ai_turn(uid: int, user_text: str, assistant_text: str) -> None:
+    """Persist short, account-scoped AI memory so it survives restarts."""
+    d = db_load()
+    profile = d.setdefault("users", {}).setdefault(str(uid), {"_id": uid, "plan": "free"})
+    memory = profile.setdefault("ai_memory", [])
+    memory.extend([
+        {"role": "user", "text": str(user_text)[:1200]},
+        {"role": "assistant", "text": str(assistant_text)[:1800]},
+    ])
+    profile["ai_memory"] = memory[-(AI_MEMORY_TURNS * 2):]
+    profile["ai_last_chat"] = ts_iso()
+    db_save(d)
 
 
 def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
@@ -1352,6 +1369,9 @@ _PHOTO_SPECS: Dict[str, Tuple[str, str, str]] = {
     "rev_goals":     ("Rᴇᴠᴇɴᴜᴇ Gᴏᴀʟꜱ",    "#047857", "Tᴀʀɢᴇᴛ Tʀᴀᴄᴋɪɴɢ"),
     "admin_2fa":     ("Adᴍɪɴ 2FA",          "#991B1B", "Tᴡᴏ-Fᴀᴄᴛᴏʀ Auth"),
     "coupon_plus":   ("Cᴏᴜᴘᴏɴ Mɢʀ",        "#B91C1C", "Aᴅᴠ Cᴏᴜᴘᴏɴꜱ"),
+    "sysinfo":       ("Sʏꜱᴛᴇᴍ Iɴꜰᴏ",        "#334155", "Hᴇᴀʟᴛʜ & Rᴜɴᴛɪᴍᴇ"),
+    "settings":      ("Sᴇᴛᴛɪɴɢꜱ",           "#475569", "Pʟᴀᴛꜰᴏʀᴍ Cᴏɴꜰɪɢ"),
+    "ai_assistant":  ("Aɪ Aꜱꜱɪꜱᴛᴀɴᴛ",        "#7C3AED", "Cɪᴘʜᴇʀ Iɴᴛᴇʟʟɪɢᴇɴᴄᴇ"),
 }
 
 # Filled in by _build_local_photos() at startup. Keys are the same
@@ -2852,7 +2872,6 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f"Hᴇʟᴘ",          callback_data="menu_help",     style="primary"),
         Btn(f"Sᴜᴘᴘᴏʀᴛ", callback_data="menu_support",  style="primary"),
     )
-    kb.add(Btn("🌍 Lᴀɴɢᴜᴀɢᴇ", callback_data="menu_language", style="primary"))
     kb.add(
         Btn(f" AI Aɢᴇɴᴛ", callback_data="menu_ai_chat",  style="success"),
         Btn(f" Mʏ Sᴛᴀᴛꜱ",    callback_data="menu_stats",    style="primary"),
@@ -4482,11 +4501,13 @@ GH = {
 
 
 def gh_load_config() -> None:
-    # Values entered in the admin panel win over environment defaults so a
-    # stale GITHUB_* env var cannot silently override what the owner set.
-    GH["token"]  = str(get_setting("github_token", "")  or os.environ.get("GITHUB_TOKEN")  or "").strip()
-    GH["repo"]   = str(get_setting("github_repo", "")   or os.environ.get("GITHUB_REPO")   or "").strip().strip("/")
-    GH["branch"] = str(get_setting("github_branch", "") or os.environ.get("GITHUB_BRANCH") or "main").strip() or "main"
+    # Explicit deployment environment values take precedence over stale panel
+    # values. The panel remains the fallback for installations without env
+    # configuration, while operators can move a deployment safely by changing
+    # GITHUB_REPO/GITHUB_TOKEN without editing old database settings.
+    GH["token"]  = str(os.environ.get("GITHUB_TOKEN")  or get_setting("github_token", "")  or "").strip()
+    GH["repo"]   = str(os.environ.get("GITHUB_REPO")   or get_setting("github_repo", "")   or "").strip().strip("/")
+    GH["branch"] = str(os.environ.get("GITHUB_BRANCH") or get_setting("github_branch", "") or "main").strip() or "main"
     GH["autoEnabled"] = bool(get_setting("github_auto_enabled", True))
     GH["lastBackup"] = GH["lastBackup"] or get_setting("github_last_backup", None)
     try:
@@ -4518,6 +4539,7 @@ def gh_set_config(patch: Dict[str, Any]) -> None:
 
 
 def gh_enabled() -> bool:
+    gh_load_config()
     return bool(GH["token"] and GH["repo"] and "/" in GH["repo"])
 
 
@@ -4530,7 +4552,11 @@ def gh_test_connection() -> Dict[str, Any]:
         if r.status_code == 200:
             data = r.json()
             is_private = data.get("private", False)
-            return {"ok": True, "private": is_private, "name": data.get("full_name")}
+            permissions = data.get("permissions") or {}
+            can_push = bool(permissions.get("push") or permissions.get("admin"))
+            return {"ok": True, "private": is_private, "name": data.get("full_name"),
+                    "can_push": can_push,
+                    "error": "Token needs Contents: Read and write permission for this repository." if not can_push else ""}
         elif r.status_code == 404:
             return {"ok": False, "error": "Repository not found."}
         elif r.status_code == 401:
@@ -4557,14 +4583,16 @@ def gh_status() -> Dict[str, Any]:
 
 def _gh(method: str, url: str, **kw) -> requests.Response:
     h = kw.pop("headers", {}) or {}
-    h.setdefault("Authorization", f"token {GH['token']}")
+    h.setdefault("Authorization", f"Bearer {GH['token']}")
     h.setdefault("Accept", "application/vnd.github+json")
+    h.setdefault("X-GitHub-Api-Version", "2022-11-28")
     h.setdefault("User-Agent", "simran-hosting-rbot/2.1")
     return requests.request(method, url, headers=h, timeout=60, **kw)
 
 
 def _gh_repo_url(p: str = "") -> str:
-    return f"https://api.github.com/repos/{GH['repo']}/{p.lstrip('/')}"
+    suffix = p.lstrip("/")
+    return f"https://api.github.com/repos/{GH['repo']}" + (f"/{suffix}" if suffix else "")
 
 
 def _gh_ensure_branch() -> bool:
@@ -4605,10 +4633,26 @@ def _gh_put_file(path: str, content: bytes, message: str) -> bool:
         body["sha"] = sha
     r = _gh("PUT", _gh_repo_url(f"contents/{path}"), json=body)
     if r.status_code not in (200, 201):
-        GH["lastError"] = f"PUT {path}: HTTP {r.status_code}"
-        print(f"[gh_put] {path} -> HTTP {r.status_code}: {r.text[:160]}", flush=True)
+        detail = r.text[:240]
+        try:
+            detail = str(r.json().get("message") or detail)
+        except Exception:
+            pass
+        GH["lastError"] = f"PUT {path}: HTTP {r.status_code} ({detail})"
+        print(f"[gh_put] {path} -> HTTP {r.status_code}: {detail}", flush=True)
         return False
     return True
+
+
+def _redacted_backup_settings(raw: bytes) -> bytes:
+    data = json.loads(raw.decode("utf-8"))
+    def redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: ("[REDACTED]" if re.search(r"token|secret|password|api[_-]?key|private[_-]?key|cipher", str(k), re.I) else redact(v)) for k, v in value.items()}
+        if isinstance(value, list):
+            return [redact(v) for v in value]
+        return value
+    return json.dumps(redact(data), indent=2, ensure_ascii=False).encode()
 
 
 def _make_tarball() -> Path:
@@ -4618,7 +4662,10 @@ def _make_tarball() -> Path:
     def _filter(ti: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
         if any(x in ti.name.split("/") for x in excludes):
             return None
-        if ti.name.endswith(".log"):
+        leaf = Path(ti.name).name.lower()
+        if ti.name.endswith(".log") or leaf in {".env", "cipher_vault.json"} or leaf.endswith((".pem", ".key")):
+            return None
+        if ti.name.endswith("storage/data/panel_settings.json"):
             return None
         return ti
 
@@ -4627,11 +4674,68 @@ def _make_tarball() -> Path:
         storage_dir = BASE_DIR / "storage"
         if storage_dir.exists():
             tf.add(str(storage_dir), arcname="storage", filter=_filter)
+            # Settings contain integration tokens. Preserve all operational
+            # settings but redact credential-shaped values before publication.
+            settings_path = storage_dir / "data" / "panel_settings.json"
+            if settings_path.exists():
+                payload = _redacted_backup_settings(settings_path.read_bytes())
+                info = tf.gettarinfo(str(settings_path), arcname="storage/data/panel_settings.json")
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
         # Backup sandbox/ — bot env vars, cron config (not .deps to save space)
         sandbox_dir = BASE_DIR / "sandbox"
         if sandbox_dir.exists():
             tf.add(str(sandbox_dir), arcname="sandbox", filter=_filter)
     return tmp
+
+
+def _gh_publish_full_state(raw_archive: bytes, timestamp: str) -> Dict[str, Any]:
+    """Publish the complete storage+sandbox archive in GitHub-safe chunks."""
+    chunk_size = 8 * 1024 * 1024
+    digest = hashlib.sha256(raw_archive).hexdigest()
+    prefix = f"backups/full_state/{timestamp}"
+    parts = []
+    for index, start in enumerate(range(0, len(raw_archive), chunk_size), 1):
+        part = raw_archive[start:start + chunk_size]
+        path = f"{prefix}/part-{index:04d}.bin"
+        if not _gh_put_file(path, part, f"backup: full state {timestamp} part {index}"):
+            raise RuntimeError(GH.get("lastError") or f"Could not upload {path}")
+        parts.append({"path": path, "sizeBytes": len(part),
+                      "sha256": hashlib.sha256(part).hexdigest()})
+    manifest = {
+        "format": "cipher-platform-full-state-v1",
+        "createdAt": ts_iso(), "archiveSha256": digest,
+        "sizeBytes": len(raw_archive), "partCount": len(parts),
+        "parts": parts, "includes": ["storage", "sandbox"],
+    }
+    manifest_path = f"{prefix}/manifest.json"
+    if not _gh_put_file(manifest_path, json.dumps(manifest, indent=2).encode(),
+                        f"backup: full state manifest {timestamp}"):
+        raise RuntimeError(GH.get("lastError") or "Could not upload backup manifest")
+    latest = {"format": manifest["format"], "manifest": manifest_path,
+              "createdAt": manifest["createdAt"], "archiveSha256": digest}
+    if not _gh_put_file("backups/full_state/LATEST.json", json.dumps(latest, indent=2).encode(),
+                        f"backup: point latest full state to {timestamp}"):
+        raise RuntimeError(GH.get("lastError") or "Could not publish latest backup pointer")
+    return manifest
+
+
+def _gh_download_full_state() -> Optional[bytes]:
+    latest_raw = _gh_get_file("backups/full_state/LATEST.json")
+    if not latest_raw:
+        return None
+    latest = json.loads(latest_raw.decode("utf-8"))
+    manifest = json.loads(_gh_get_file(str(latest["manifest"])).decode("utf-8"))
+    chunks = []
+    for part in manifest.get("parts", []):
+        raw = _gh_get_file(str(part["path"]))
+        if raw is None or hashlib.sha256(raw).hexdigest() != part.get("sha256"):
+            raise RuntimeError(f"Backup chunk integrity check failed: {part.get('path')}")
+        chunks.append(raw)
+    archive = b"".join(chunks)
+    if hashlib.sha256(archive).hexdigest() != manifest.get("archiveSha256"):
+        raise RuntimeError("Complete backup integrity check failed")
+    return archive
 
 
 def gh_backup_now() -> Dict[str, Any]:
@@ -4647,6 +4751,8 @@ def gh_backup_now() -> Dict[str, Any]:
         conn = gh_test_connection()
         if not conn.get("ok"):
             raise RuntimeError(conn.get("error", "GitHub unreachable"))
+        if conn.get("can_push") is False:
+            raise RuntimeError(conn.get("error") or "GitHub token cannot write to the configured repository.")
         if not _gh_ensure_branch():
             raise RuntimeError(f"Branch {GH['branch']} unavailable")
 
@@ -4665,21 +4771,15 @@ def gh_backup_now() -> Dict[str, Any]:
             except Exception as _be:
                 print(f"[gh_backup] failed sync for {bot_id}: {_be}")
 
-        # 3. Attempt legacy tarball as a secondary snapshot
-        tar_ok = False
-        size_mb = 0.0
-        try:
-            tar = _make_tarball()
-            buf = tar.read_bytes()
-            size_mb = len(buf) / 1024 / 1024
-            if size_mb <= 25:
-                ts = ts_iso().replace(":", "-").replace(".", "-")
-                _gh_put_file("backups/latest.tar.gz", buf, f"chore(panel): backup {ts}")
-                manifest = json.dumps({"lastBackup": ts, "sizeBytes": len(buf)}, indent=2)
-                _gh_put_file("backups/manifest.json", manifest.encode(), f"chore(panel): manifest {ts}")
-                tar_ok = True
-        except Exception as _te:
-            print(f"[gh_backup] tarball fallback skipped: {_te}")
+        # 3. Publish the complete platform state. It includes every DB record
+        # (users, payments, bots, tickets, coupons, products, access grants,
+        # settings and audit data) plus encrypted bot files and sandbox state.
+        tar = _make_tarball()
+        buf = tar.read_bytes()
+        size_mb = len(buf) / 1024 / 1024
+        backup_stamp = ts_iso().replace(":", "-").replace(".", "-")
+        full_manifest = _gh_publish_full_state(buf, backup_stamp)
+        tar_ok = True
 
         ts_now = ts_iso()
         GH["lastBackup"] = ts_now
@@ -4692,7 +4792,8 @@ def gh_backup_now() -> Dict[str, Any]:
             "bots_synced": bots_synced,
             "bots_total": len(bots),
             "users": len(db.get("users", {})),
-            "tar_ok": tar_ok
+            "tar_ok": tar_ok,
+            "full_state": full_manifest,
         }
     except Exception as e:
         GH["lastError"] = str(e)
@@ -4709,7 +4810,12 @@ def gh_restore_now(overwrite: bool = True) -> Dict[str, Any]:
     has the per-file layout) fall back to restoring users + bot files."""
     if not gh_enabled():
         return {"ok": False, "error": "Not configured."}
-    buf = _gh_get_file("backups/latest.tar.gz")
+    try:
+        buf = _gh_download_full_state()
+    except Exception as exc:
+        return {"ok": False, "error": f"Complete backup validation failed: {exc}"}
+    if buf is None:
+        buf = _gh_get_file("backups/latest.tar.gz")
     if buf is None:
         res = gh_restore_user_uploads()
         if res.get("ok"):
@@ -4913,7 +5019,7 @@ def _gh_get_file(path: str) -> Optional[bytes]:
         if "content" not in js and "download_url" in js:
             raw_url = js["download_url"]
             # Download raw content directly
-            r_raw = requests.get(raw_url, headers={"Authorization": f"token {GH['token']}"}, timeout=300)
+            r_raw = requests.get(raw_url, headers={"Authorization": f"Bearer {GH['token']}", "X-GitHub-Api-Version": "2022-11-28"}, timeout=300)
             if r_raw.status_code == 200:
                 return r_raw.content
             return None
@@ -4962,7 +5068,7 @@ def gh_sync_user_data() -> bool:
         # Also push settings (photos config, approval flag, etc.)
         if ok and SETTINGS_FILE.exists():
             try:
-                _gh_put_file("settings.json", SETTINGS_FILE.read_bytes(),
+                _gh_put_file("settings.json", _redacted_backup_settings(SETTINGS_FILE.read_bytes()),
                              f"sync: settings {ts_iso()}")
             except Exception:
                 pass
@@ -5375,7 +5481,7 @@ def trial_duration_hours() -> int:
 
 
 def grant_plan(uid: int, plan: str, days: Optional[int] = None,
-               hours: Optional[int] = None) -> bool:
+               hours: Optional[int] = None, notify: bool = True) -> bool:
     d = db_load()
     key = str(uid)
     if key not in d["users"] or plan not in PLAN_LIMITS:
@@ -5405,18 +5511,19 @@ def grant_plan(uid: int, plan: str, days: Optional[int] = None,
     # An upgrade can make previously paused deployments eligible again.
     reconcile_user_slot_quota(uid)
     log_notification("PAYMENT", f"Plan '{plan}' granted to UID {uid}", uid=uid)
-    try:
-        bot.send_message(
-            uid,
-            f"<b>{G['ok']} {sc('Plan activated')}</b>\n\n"
-            f"{bullet('Plan', pl['name'])}\n"
-            f"{bullet('Bots',  pl['max_bots'])}\n"
-            f"{bullet('RAM',   '{} MB'.format(pl['ram']))}\n"
-            f"{bullet('Until', fmt_ts(u.get('plan_expires')) if u.get('plan_expires') else 'Lifetime')}"
-            f"{FOOTER}",
-        )
-    except Exception:
-        pass
+    if notify:
+        try:
+            bot.send_message(
+                uid,
+                f"<b>{G['ok']} {sc('Plan activated')}</b>\n\n"
+                f"{bullet('Plan', pl['name'])}\n"
+                f"{bullet('Bots',  pl['max_bots'])}\n"
+                f"{bullet('RAM',   '{} MB'.format(pl['ram']))}\n"
+                f"{bullet('Until', fmt_ts(u.get('plan_expires')) if u.get('plan_expires') else 'Lifetime')}"
+                f"{FOOTER}",
+            )
+        except Exception:
+            pass
     return True
 
 
@@ -6241,7 +6348,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             allowed = {"filename", "plan", "referral_cost", "price", "slots", "access_days", "description"}
             product.update({k: v for k, v in state["spec"].items() if k in allowed})
             if "filename" in state["spec"]:
-                product["filename"] = safe_filename(state["spec"]["filename"], product.get("filename", ""))
+                product["filename"] = safe_product_label(state["spec"]["filename"])
             product["category"] = str(product.get("plan", "free"))
             product["slot_limit"] = int(product.get("slots", product.get("slot_limit", 1))); product["slots_remaining"] = min(int(product.get("slots_remaining", 0)), product["slot_limit"])
             if product["slot_limit"] > old_slots:
@@ -8829,9 +8936,36 @@ def render_adm_gh_files(call: types.CallbackQuery, repo: str, path: str = "") ->
 
 def _file_icon(filename: str) -> str:
     ext = Path(filename).suffix.lower()
-    return {"py":"🐍",".js":"📜",".json":"📋",".env":"🔐",".txt":"📝",
+    return {".py":"🐍","py":"🐍",".js":"📜","js":"📜",".json":"📋","json":"📋",".env":"🔐",".txt":"📝",
             ".md":"📝",".zip":"📦",".sh":"⚙️",".yaml":"📋",".yml":"📋",
-            ".toml":"📋",".cfg":"⚙️",".ini":"⚙️",".html":"🌐",".css":"🎨"}.get(ext, "📄")
+            ".toml":"📋",".cfg":"⚙️",".ini":"⚙️",".html":"🌐",".css":"🎨",
+            ".pdf":"📕",".doc":"📘",".docx":"📘",".csv":"📊",".sql":"🗄️",
+            ".for":"🧮",".7z":"📦",".tar":"📦",".gz":"📦"}.get(ext, "📄")
+
+
+def _product_file_icon(product: Dict[str, Any]) -> str:
+    """Return a stable icon even when the catalog label has no extension."""
+    mime = str(product.get("mime_type") or "").lower()
+    if mime.startswith("image/"): return "🖼️"
+    if mime.startswith("audio/"): return "🎵"
+    if mime.startswith("video/"): return "🎬"
+    if mime == "application/pdf": return "📕"
+    hint = str(product.get("source_filename") or product.get("file_type") or product.get("filename") or "")
+    if hint and "." not in hint and product.get("file_type"):
+        hint = f"file.{str(product['file_type']).lower()}"
+    return _file_icon(hint)
+
+
+def _product_storage_filename(original: str) -> str:
+    """Create a safe on-disk name without changing the uploaded extension."""
+    raw = Path(str(original or "product.bin")).name
+    suffix = Path(raw).suffix.lower()[:20]
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(raw).stem).strip("._-") or "product"
+    candidate = f"{stem[:100]}{suffix}"
+    try:
+        return safe_filename(candidate)
+    except ValueError:
+        return f"product{suffix or '.bin'}"
 
 
 def render_adm_gh_file_view(call: types.CallbackQuery, repo: str, path: str) -> None:
@@ -9786,6 +9920,7 @@ def render_adm_coupon_create(call: types.CallbackQuery) -> None:
         f"{sc('Send')}: <code>add CODE PLAN PERCENT USES DAYS_OR_DATE</code>\n"
         f"{sc('Example')}: <code>add PRO30 pro 30 1 30</code>\n"
         f"{sc('Exact date')}: <code>add SALE pro 20 10 2026-12-31</code>\n"
+        f"{sc('A concrete plan code activates that plan immediately when redeemed; use the legacy all-plan form for discounts only.')}\n"
         f"{sc('PLAN')}: <code>{', '.join(PLAN_LIMITS.keys())}</code>\n"
         f"{sc('Send')}: <code>del CODE</code> {sc('to remove one')}{FOOTER}"
     )
@@ -9804,7 +9939,7 @@ def render_adm_coupon_bulk(call: types.CallbackQuery) -> None:
         f"<code>count plan discount_pct [max_uses] [days_valid]</code>\n"
         f"{sc('Example')}:\n"
         f"<code>10 pro 20 1 30</code>\n"
-        f"→ {sc('Creates 10 single-use coupons for pro plan at 20% off, valid 30 days')}{FOOTER}"
+        f"→ {sc('Creates 10 single-use pro plan promo codes, valid 30 days; redemption activates Pro immediately')}{FOOTER}"
     )
     USER_STATES[call.from_user.id] = {"flow": "await_adm_coupon_bulk"}
     show_menu(call.message.chat.id, PHOTOS.get("coupon_plus", PHOTOS["coupon"]), cap,
@@ -11661,7 +11796,7 @@ def on_text(m: types.Message) -> None:
                 elif field == "plan":
                     value = text.lower()
                     if value not in PLAN_LIMITS and value != "free": raise ValueError("unknown plan")
-                elif field == "filename": value = safe_filename(text.strip(), spec.get("filename", ""))
+                elif field == "filename": value = safe_product_label(text.strip())
                 elif field in {"category", "description"}: value = text[:1000]
                 else: raise ValueError("unknown field")
             except (TypeError, ValueError, AssertionError) as exc:
@@ -13292,21 +13427,21 @@ def reject_bot(bot_id: str, admin_uid: int, reason: str = "") -> Dict[str, Any]:
 # is uploaded on the next show_menu.
 
 PHOTO_KEYS_FRIENDLY: Dict[str, str] = {
-    "main":      "Main Menu",
-    "admin":     "Admin Panel",
-    "plans":     "Plans",
-    "buy":       "Buy Plan",
-    "wallet":    "Wallet",
-    "bots":      "My Bots",
-    "bot":       "Bot View",
-    "upload":    "Upload Bot",
-    "stats":     "Stats",
-    "support":   "Support",
-    "about":     "About",
-    "broadcast": "Broadcast",
-    "ticket":    "Tickets",
-    "coupon":    "Coupons",
-    "security":  "Security",
+    "welcome": "Welcome", "main": "Main Menu", "admin": "Admin Panel",
+    "tunnel": "Public URL / Tunnel", "bots": "My Bots", "upload": "Upload Bot",
+    "plans": "Plans", "buy": "Buy Plan", "pay": "Payments", "profile": "Profile",
+    "wallet": "Wallet", "referral": "Referrals", "help": "Help", "support": "Support",
+    "ticket": "Tickets", "stats": "Stats", "github": "GitHub Backup", "security": "Security",
+    "bot": "Bot View", "logs": "Live Logs", "trial": "Free Trial", "coupon": "Coupons",
+    "gift": "Gift Plan", "broadcast": "Broadcast", "maint": "Maintenance",
+    "gh_browser": "GitHub Browser", "pay_config": "Payment Config", "bot_config": "Bot Config",
+    "appearance": "Appearance", "templates": "Templates", "referral_adm": "Referral Admin",
+    "janitor": "Janitor", "webhooks": "Webhooks", "features": "Feature Flags",
+    "monitor": "Live Monitor", "scheduler": "Scheduler", "leaderboard": "Leaderboard",
+    "subscriptions": "Subscriptions", "rate_limits": "Rate Limits", "import_export": "Import / Export",
+    "bot_controls": "Bot Controls", "lang_panel": "Languages", "rev_goals": "Revenue Goals",
+    "admin_2fa": "Admin 2FA", "coupon_plus": "Advanced Coupons",
+    "sysinfo": "System Info", "settings": "Settings", "ai_assistant": "AI Assistant",
 }
 
 
@@ -14435,7 +14570,8 @@ def _sub_reminder_loop():
 
 def _coupon_validate(code, uid):
     d = db_load()
-    c = d.get("coupons", {}).get(code.upper())
+    normalized_code = code.upper()
+    c = d.get("coupons", {}).get(normalized_code)
     if not c:
         return False, "Invalid coupon code.", {}
     if c.get("expiry") and c["expiry"] < ts_iso():
@@ -14443,9 +14579,25 @@ def _coupon_validate(code, uid):
     uses_left = c.get("uses_left")
     if uses_left is not None and uses_left <= 0:
         return False, "No uses remaining.", {}
-    if uid in c.get("used_by", []):
+    user = d.get("users", {}).get(str(uid), {})
+    prior_user_redemptions = user.get("coupons_used", []) or []
+    if uid in c.get("used_by", []) or normalized_code in prior_user_redemptions:
         return False, "Already used.", {}
     return True, "", c
+
+
+def _coupon_target_plan(coupon: Dict[str, Any]) -> Optional[str]:
+    """Return the paid plan granted by a promo coupon, if it has one.
+
+    Coupons without a specific plan (including legacy ``all`` coupons) remain
+    discount coupons and are applied to the next plan purchase. A coupon with
+    a concrete paid-plan target is a redemption promo: it is consumed here
+    and activates that plan immediately.
+    """
+    plan = str(coupon.get("plan", "all") or "all").strip().lower()
+    if plan in {"", "all", "free"} or plan not in PLAN_LIMITS:
+        return None
+    return plan
 
 
 def _coupon_redeem(code, uid):
@@ -14454,14 +14606,31 @@ def _coupon_redeem(code, uid):
         return False, err, 0.0
     d    = db_load()
     coup = d.setdefault("coupons", {}).setdefault(code.upper(), c)
+    user = d.setdefault("users", {}).get(str(uid))
+    if not user:
+        return False, "User not found.", 0.0
     coup.setdefault("used_by", []).append(uid)
     if coup.get("uses_left") is not None:
         coup["uses_left"] = max(0, coup["uses_left"] - 1)
+    user.setdefault("coupons_used", []).append(code.upper())
+    target_plan = _coupon_target_plan(coup)
+    if target_plan:
+        # A plan promo is redeemed at this point, not held for a later paid
+        # purchase. Clear any older discount so it cannot be applied later.
+        user.pop("active_coupon", None)
+    else:
+        user["active_coupon"] = code.upper()
     db_save(d)
     discount = float(c.get("discount_pct", 0))
     flat     = float(c.get("discount_flat", 0))
+    if target_plan and not grant_plan(uid, target_plan, notify=False):
+        return False, "Could not activate the promo plan.", 0.0
     _wh_fire("coupon_redeemed", {"code": code.upper(), "uid": uid,
-                                  "discount_pct": discount, "discount_flat": flat})
+                                  "discount_pct": discount, "discount_flat": flat,
+                                  "plan": target_plan or ""})
+    if target_plan:
+        plan_name = PLAN_LIMITS[target_plan].get("name", target_plan)
+        return True, f"Promo activated! {plan_name} plan", discount
     return True, f"Coupon applied! Discount: {discount}% / flat {flat}", discount
 
 
@@ -17790,9 +17959,10 @@ def action_trial_claim(call: types.CallbackQuery) -> None:
 
 def render_coupon(call: types.CallbackQuery) -> None:
     cap = (
-        f"<b>{sc('Coupon')}</b>\n"
+        f"<b>{sc('Redeem')}</b>\n"
         f"{G['div_eq']}\n"
-        f"{sc('Have a discount code? Tap redeem and send the code')}.{FOOTER}"
+        f"{sc('Redeem a discount code or a premium plan promo')}. "
+        f"{sc('Plan promos activate immediately when redeemed')}.{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup()
     kb.add(Btn(f"{sc('Redeem Code')}", callback_data="coupon_redeem", style="success"))
@@ -17934,7 +18104,8 @@ def start_ticket_reply(call: types.CallbackQuery, tid: str) -> None:
 def start_coupon_flow(call: types.CallbackQuery) -> None:
     USER_STATES[call.from_user.id] = {"flow": "await_coupon"}
     bot.send_message(call.message.chat.id,
-        f"{G['key']} {sc('Send your coupon code')}. /cancel {sc('to abort')}.")
+        f"{G['key']} {sc('Send your coupon or premium promo code')}. "
+        f"{sc('Plan promos activate immediately')}. /cancel {sc('to abort')}.")
 
 
 def start_wallet_topup(call: types.CallbackQuery) -> None:
@@ -18839,12 +19010,12 @@ def render_products(call: types.CallbackQuery, category: str = "") -> None:
             kb.add(Btn(f"📂 {label} ({counts.get(plan, 0)})", callback_data=f"products_cat_{plan}", style="primary"))
         kb.add(Btn(f"{G['back']} {sc('Main Menu')}", callback_data="menu_main", style="danger"))
         show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call); return
-    rows = "\n".join(f"{G['bullet']} <b>{esc(p.get('filename','file'))}</b> v{int(p.get('version', 1) or 1)} — {p.get('slots_remaining', 0)} slots" for p in products[:30])
+    rows = "\n".join(f"{_product_file_icon(p)} <b>{esc(p.get('filename','file'))}</b> v{int(p.get('version', 1) or 1)} — {p.get('slots_remaining', 0)} slots" for p in products[:30])
     label = PLAN_LIMITS.get(category, {}).get("name", category.title())
     cap = f"<b>{sc('Files')} · {esc(label)}</b>\n{G['div_eq']}\n{rows}\n{G['div']}Choose a file to view its description and access options.{FOOTER}"
     kb = types.InlineKeyboardMarkup(row_width=1)
     for p in products[:30]:
-        kb.add(Btn(f"📄 {p.get('filename','file')[:35]}", callback_data=f"product_view_{p['id']}", style="primary"))
+        kb.add(Btn(f"{_product_file_icon(p)} {p.get('filename','file')[:35]}", callback_data=f"product_view_{p['id']}", style="primary"))
     kb.add(Btn(f"{G['back']} Plan Categories", callback_data="menu_products", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call)
 
@@ -18857,7 +19028,7 @@ def render_product_view(call: types.CallbackQuery, product_id: str) -> None:
     if not p or not p.get("active"):
         ack(call, "Product unavailable"); return
     purchase_display = f"{p.get('price', 0)}{cur_sym()}"
-    cap = (f"<b>📄 {esc(p.get('filename','file'))} v{int(p.get('version', 1) or 1)}</b>\n{G['div_eq']}\n"
+    cap = (f"<b>{_product_file_icon(p)} {esc(p.get('filename','file'))} v{int(p.get('version', 1) or 1)}</b>\n{G['div_eq']}\n"
            f"{bullet('Category', p.get('plan','free'))}\n{bullet('Plan', p.get('plan','free'))}\n"
            f"{bullet('Referral unlock', p.get('referral_cost', 0))}\n{bullet('Purchase', purchase_display)}\n"
            f"{bullet('Remaining slots', p.get('slots_remaining', 0))}\n{G['div']}\n{esc(p.get('description','No description'))}{FOOTER}")
@@ -18877,7 +19048,9 @@ def _send_product_file(uid: int, product: Dict[str, Any]) -> None:
     if not path.is_file():
         bot.send_message(uid, f"{G['no']} Product file is temporarily unavailable."); return
     with path.open("rb") as fh:
-        bot.send_document(uid, fh, caption=f"📦 {esc(product.get('filename','file'))}", parse_mode="HTML")
+        visible_name = product.get("storage_filename") or path.name
+        bot.send_document(uid, fh, caption=f"{_product_file_icon(product)} {esc(product.get('filename','file'))}",
+                          parse_mode="HTML", visible_file_name=visible_name)
     d = db_load()
     stored = d.get("product_files", {}).get(product.get("id"))
     if stored is not None:
@@ -19005,13 +19178,13 @@ def render_adm_product_builder(call: types.CallbackQuery, product_id: str = "") 
     state.update({"flow": "adm_product_builder", "product_id": product_id, "spec": spec,
                   "builder_message_id": getattr(call.message, "message_id", state.get("builder_message_id"))}); USER_STATES[uid] = state
     cap = (f"<b>🧩 {sc('Product File Builder')}</b>\n{G['div_eq']}\n"
-           f"{bullet('Script name', spec['filename'] or 'Uses uploaded filename')}\n"
+           f"{bullet('Catalog name', spec['filename'] or 'Uses uploaded filename')}\n"
            f"{bullet('Category', spec['category'])}\n{bullet('Required plan', spec['plan'])}\n"
            f"{bullet('Referral unlock', spec['referral_cost'])}\n{bullet('Price', price_display)}\n"
            f"{bullet('Slots', spec['slots'])}\n{bullet('Access days', spec['access_days'])}\n"
            f"{bullet('Description', spec['description'] or 'Not set')}\n{G['div']}Choose a field to edit.{FOOTER}")
     kb = types.InlineKeyboardMarkup(row_width=2)
-    fields = [("🏷️ File Name (optional)", "filename"), ("🔗 Referral Count", "referral_cost"), ("💳 Price", "price"), ("🎟️ Slots", "slots"), ("⏱️ Access Days", "access_days"), ("📝 Description", "description")]
+    fields = [("🏷️ Catalog Name (optional)", "filename"), ("🔗 Referral Count", "referral_cost"), ("💳 Price", "price"), ("🎟️ Slots", "slots"), ("⏱️ Access Days", "access_days"), ("📝 Description", "description")]
     for label, key in fields:
         kb.add(Btn(label, callback_data=f"adm_product_field_{key}", style="primary"))
     if product_id:
@@ -19070,7 +19243,7 @@ def _handle_adm_product_command(m: types.Message, text: str) -> None:
     except ValueError:
         bot.reply_to(m, "Referral count, price, slots, and days must be valid non-negative numbers."); return
     USER_STATES[m.from_user.id] = {"flow": "await_adm_product_file", "spec": spec}
-    bot.reply_to(m, f"{G['ok']} Specification saved. Now send the product file in any format. ZIP, 7z, FOR, PDF, and all other file types are accepted. Names may use letters, numbers, underscores, hyphens, and extensions.")
+    bot.reply_to(m, f"{G['ok']} Specification saved. Now send the product file in any format. ZIP, 7z, FOR, PDF, and all other file types are accepted. The catalog name may be a readable label such as STORE SCR; the uploaded file type is preserved separately.")
 
 
 def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
@@ -19106,11 +19279,13 @@ def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
         _product_progress(15, "File downloaded")
         original_filename = Path(m.document.file_name or "product.bin").name
         requested_filename = str(st.get("spec", {}).get("filename", "") or "").strip()
-        # Catalog labels are independent of the uploaded file type: any safe
-        # extension is allowed, including .zip, .7z, .for, .py, and custom
-        # names containing underscores or hyphens. Project-file renaming keeps
-        # its stricter extension rule through rename_project_file().
-        filename = safe_filename(requested_filename) if requested_filename else safe_filename(original_filename)
+        # Catalog labels are independent of the uploaded file type. Keep the
+        # real uploaded type in metadata and use a sanitized storage name for
+        # the downloaded payload.
+        filename = safe_product_label(requested_filename or original_filename)
+        storage_filename = _product_storage_filename(original_filename)
+        file_suffix = Path(original_filename).suffix.lower()
+        file_type = (getattr(m.document, "mime_type", "") or file_suffix.lstrip(".") or "file").upper()[:40]
         scan = _run_security_scan([(original_filename, raw)], uploader_uid=uid,
                                   progress_cb=lambda pct, status: _product_progress(15 + int(pct * 0.75), status))
         if scan.get("recommendation") == "REJECT":
@@ -19124,8 +19299,10 @@ def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
                              if str(p.get("filename", "")).lower() == filename.lower()
                              and str(p.get("plan", "free")) == str(product_spec.get("plan", "free"))]
         product = create_product(db_load(), path="", filename=filename, **product_spec)
+        product.update({"source_filename": original_filename[:128], "storage_filename": storage_filename,
+                        "file_type": file_type, "mime_type": getattr(m.document, "mime_type", "") or ""})
         product["version"] = max([int(p.get("version", 1) or 1) for p in existing_versions] or [0]) + 1
-        path = product_dir / f"{product['id']}_{filename}"; path.write_bytes(raw); product["path"] = str(path)
+        path = product_dir / f"{product['id']}_{storage_filename}"; path.write_bytes(raw); product["path"] = str(path)
         db = db_load(); db.setdefault("product_files", {})[product["id"]] = product
         for previous in db.get("product_files", {}).values():
             if str(previous.get("id", "")) == str(product.get("id", "")):
@@ -19584,7 +19761,7 @@ def render_adm_github(call: types.CallbackQuery) -> None:
     )
     kb.add(Btn("⚡  Test Connection", callback_data="gh_test_conn", style="primary"))
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
-    show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
+    show_menu(call.message.chat.id, PHOTOS.get("github", PHOTOS["admin"]), cap, kb, call=call)
 
 
 def render_adm_sysinfo(call: types.CallbackQuery) -> None:
@@ -20388,11 +20565,13 @@ def render_github_subroute(call: types.CallbackQuery, data: str) -> None:
         res = gh_test_connection()
         if res["ok"]:
             status = "🔒 PRIVATE" if res["private"] else "🌐 PUBLIC"
+            write_status = "✅ WRITE ENABLED" if res.get("can_push") else "⚠️ READ ONLY"
             msg = (
                 f"<b>{G['ok']} Vault Connection Active</b>\n"
                 f"{G['div']}\n"
                 f"{bullet('Repository', res['name'])}\n"
                 f"{bullet('Security', status)}\n"
+                f"{bullet('Backup permission', write_status)}\n"
                 f"{G['div']}\n<i>{sc('Uplink established successfully')}.</i>"
             )
         else:
@@ -20766,31 +20945,29 @@ def _handle_coupon_user(m: types.Message) -> None:
     code = (m.text or "").strip().upper()
     uid = m.from_user.id
     USER_STATES.pop(uid, None)
-    
     ok, err, c = _coupon_validate(code, uid)
     if not ok:
         bot.reply_to(m, f"{G['no']} {err}"); return
-        
-    d = db_load()
-    # Decrement uses
-    c_in_db = d["coupons"].get(code)
-    if c_in_db and c_in_db.get("uses_left") is not None:
-        c_in_db["uses_left"] = max(0, c_in_db["uses_left"] - 1)
-    
-    # Add to used list
-    u = d["users"].get(str(uid))
-    if not u:
-        bot.reply_to(m, f"{G['no']} User not found"); return
-        
-    u.setdefault("coupons_used", []).append(code)
-    # Store as active coupon for next purchase
-    u["active_coupon"] = code
-    
-    db_save(d)
-    
+
+    target_plan = _coupon_target_plan(c)
+    redeemed, message, _ = _coupon_redeem(code, uid)
+    if not redeemed:
+        bot.reply_to(m, f"{G['no']} {message}"); return
+
     pct = c.get("discount_pct", c.get("percent", 0))
     flat = c.get("discount_flat", 0)
-    
+    if target_plan:
+        user = db_load_ro().get("users", {}).get(str(uid), {})
+        plan_name = PLAN_LIMITS[target_plan].get("name", target_plan)
+        until = fmt_ts(user.get("plan_expires")) if user.get("plan_expires") else "Lifetime"
+        audit(uid, "promo_redeem", f"code={code} plan={target_plan}")
+        bot.reply_to(m,
+            f"<b>{G['ok']} Promo activated</b>: <code>{esc(code)}</code>\n"
+            f"{bullet('Plan', plan_name)}\n"
+            f"{bullet('Until', until)}",
+            parse_mode="HTML")
+        return
+
     disc_txt = f"{pct}% off" if pct else f"{flat}{cur_sym()} off"
     audit(uid, "coupon_redeem", f"code={code} pct={pct} flat={flat}")
     
@@ -22255,19 +22432,22 @@ def _ai_unavailable_reply() -> str:
 
 
 def _build_ai_request(user_request: str, uid: Optional[int] = None) -> str:
-    """Build a bounded, profile-aware request without exposing provider internals."""
-    # The keyless GET providers treat long identity/session context as a
-    # prompt for a generic welcome banner instead of answering the user's
-    # question. Keep ordinary chat direct; identity/profile requests still
-    # receive the verified profile context below.
-    if not (_is_lord_cipher_profile_request(user_request) or
-            _is_lord_cipher_identity_request(user_request)):
+    """Build a bounded request carrying the verified account and recent turns."""
+    special_request = (_is_lord_cipher_profile_request(user_request) or
+                       _is_lord_cipher_identity_request(user_request))
+    if uid is None and not special_request:
         return user_request
-    profile = _ai_user_context(uid)
+    profile_doc = ((db_load_ro().get("users", {}) or {}).get(str(uid), {})
+                   if uid is not None else {})
+    profile = _ai_user_context(uid, profile_doc)
     with AI_CHAT_SESSION_LOCK:
-        history = list(AI_CHAT_SESSIONS.get(int(uid), []))[-6:] if uid is not None else []
+        live_history = (list(AI_CHAT_SESSIONS.get(int(uid), []))[-(AI_MEMORY_TURNS * 2):]
+                        if uid is not None else [])
+    history = list(profile_doc.get("ai_memory", []) or [])[-(AI_MEMORY_TURNS * 2):] or live_history
     history_text = "\n".join(f"{item['role'].upper()}: {item['text']}" for item in history)
-    context = f"{profile}\n"
+    context = (f"{profile}\n"
+               "This is the same verified account that has used this platform before. "
+               "Use the memory below for continuity, but do not claim facts that are not present.\n")
     if history_text:
         context += "RECENT AI SESSION CONTEXT (use only to resolve continuity):\n" + history_text + "\n"
     if _is_lord_cipher_profile_request(user_request):
@@ -22337,7 +22517,8 @@ def handle_ai_chat_message(m: types.Message) -> None:
             with AI_CHAT_SESSION_LOCK:
                 session = AI_CHAT_SESSIONS.setdefault(int(m.from_user.id), [])
                 session.extend([{"role": "user", "text": m.text[:1200]}, {"role": "assistant", "text": clean_res[:1800]}])
-                del session[:-12]
+                del session[:-(AI_MEMORY_TURNS * 2)]
+            _remember_ai_turn(m.from_user.id, m.text, clean_res)
             
             final_text = (
                 f"🤖 <b>{sc('AI Operative')}</b> (<code>{primary_model.upper()}</code>)\n"

@@ -10,6 +10,8 @@ assert bot._build_ai_request('explain Python decorators') == 'explain Python dec
 profile_prompt = bot._build_ai_request('brag about me')
 assert 'roughly 500-800 words' in profile_prompt
 assert 'do not invent private facts' in profile_prompt
-assert 'adm_languages_back' in (open('bot.py', encoding='utf-8').read())
-assert 'callback_data="adm_languages_back"' in open('bot.py', encoding='utf-8').read()
+source = open('bot.py', encoding='utf-8').read()
+assert 'adm_languages_back' in source
+assert 'callback_data="adm_languages_back"' in source
+assert 'callback_data="menu_language"' not in source
 print('language and opt-in AI behavior checks passed')

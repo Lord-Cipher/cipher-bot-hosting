@@ -11,6 +11,7 @@ from community_products import (
     record_activity,
     rename_project_file,
     safe_filename,
+    safe_product_label,
 )
 
 
@@ -74,6 +75,13 @@ def test_catalog_accepts_all_safe_extensions_and_name_separators():
     assert safe_filename("archive.7z") == "archive.7z"
 
 
+def test_catalog_label_can_omit_extension_and_use_spaces():
+    assert safe_product_label("STORE SCR") == "STORE SCR"
+    assert safe_product_label("  STORE   SCR  ") == "STORE SCR"
+    product = create_product({}, path="/tmp/store.scr", filename="STORE SCR", description="", category="free", plan="free", referral_cost=0, price=0, slots=1, access_days=30)
+    assert product["filename"] == "STORE SCR"
+
+
 if __name__ == "__main__":
     test_product_referral_slots_and_expiry()
     test_product_purchase_reuses_access_without_consuming_second_slot()
@@ -81,4 +89,5 @@ if __name__ == "__main__":
     test_safe_rename_updates_text_references_and_rejects_traversal()
     test_custom_catalog_name_preserves_uploaded_extension()
     test_catalog_accepts_all_safe_extensions_and_name_separators()
+    test_catalog_label_can_omit_extension_and_use_spaces()
     print("community product tests passed")
