@@ -130,10 +130,12 @@ banner_only = "🤖 AI OPERATIVE (CLAUDE)\n━━━━━━━━━━━━�
 assert bot._sanitize_ai_reply(banner_only) == ""
 assert bot._ai_unavailable_reply().strip()
 assert bot._extract_ai_reply({"result": "I am Standard AI Chat by DeepAI, serving as the official AI assistant."}) is None
+assert bot._extract_ai_reply({"result": "Hello! I'm HotBot Chat. How can I help you today?"}) is None
 assert bot._extract_ai_reply({"result": "A useful answer about restarting a bot."}) == "A useful answer about restarting a bot."
 assert "standard ai chat by deepai" not in bot._sanitize_ai_reply(
     "I am Standard AI Chat by DeepAI.\n━━━━━━━━\nCipher Tech Hosting v2.1\nUseful answer."
 ).lower()
 assert bot._lord_cipher_profile_answer().lower().count("lord cipher") >= 2
+assert bot.ai_model_tag(42, "lifetime") == "CLAUDE"
 
 print("AI routing regression tests passed")

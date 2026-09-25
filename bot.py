@@ -766,6 +766,10 @@ def _extract_ai_reply(data: Dict[str, Any]) -> Optional[str]:
     if (("standard ai chat" in lowered or "deepai" in lowered)
             and ("official ai assistant" in lowered or "serve as" in lowered)):
         return None
+    # Some fallback endpoints return their own onboarding greeting as a 200
+    # response. It is not an answer and must not terminate the model chain.
+    if "hotbot chat" in lowered and "how can i help" in lowered:
+        return None
     if "account is now required to use vibe" in lowered:
         return None
     return res
@@ -16194,7 +16198,16 @@ def _validate_vault_token(token: str, repo: str) -> Tuple[bool, str]:
     if response.status_code == 200:
         return True, ""
     if response.status_code in {401, 403, 404}:
-        return False, "Token is invalid or cannot access the configured vault repository."
+        detail = ""
+        try:
+            detail = str((response.json() or {}).get("message") or "").strip()
+        except Exception:
+            pass
+        if response.status_code == 401:
+            return False, "GitHub rejected the vault token (HTTP 401). Check that the token is active and copied completely."
+        if response.status_code == 403:
+            return False, "Vault token is valid but lacks repository access (HTTP 403). Grant Contents read/write access."
+        return False, "Vault repository was not found or is not accessible to this token (HTTP 404)."
     return False, "GitHub validation returned an unexpected response."
 
 
@@ -16230,9 +16243,19 @@ def _vault_config() -> Dict[str, str]:
     def value(name: str, default: str = "") -> str:
         return (os.getenv(name) or str(file_config.get(name, default) or "")).strip()
 
+    repo = value("CIPHER_VAULT_REPO", "Lord-Cipher/cipher-vault")
+    repo = re.sub(r"^https?://github\.com/", "", repo, flags=re.IGNORECASE).strip().strip("/")
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    # A token entered and validated in Admin → Cipher Vault must override an
+    # old deployment env token; otherwise the panel appears to accept a token
+    # but every later operation keeps using the stale credential.
+    runtime_token = _vault_runtime_token()
+    token = runtime_token or value("CIPHER_VAULT_TOKEN") or os.getenv("GITHUB_TOKEN", "").strip()
+
     return {
-        "repo": value("CIPHER_VAULT_REPO", "Lord-Cipher/cipher-vault"),
-        "token": value("CIPHER_VAULT_TOKEN") or _vault_runtime_token() or os.getenv("GITHUB_TOKEN", "").strip(),
+        "repo": repo,
+        "token": token,
         "key": value("CIPHER_VAULT_KEY"),
         "branch": value("CIPHER_VAULT_BRANCH", "main"),
     }
@@ -16517,13 +16540,16 @@ def _clone_gh_repo(repo_url: str, token: Optional[str], dest_dir: Path) -> Dict[
     rmrf(dest_dir)
     dest_dir.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
     if token:
-        # Git reads credentials from these environment-backed config entries;
-        # the token never appears in the clone URL or returned error text.
+        # GitHub HTTPS clone authentication uses Basic auth with the fixed
+        # x-access-token username. Bearer headers work for the REST API but
+        # make git fall back to an interactive password prompt.
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         env.update({
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "http.extraHeader",
-            "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
         })
     try:
         result = _sp.run(
@@ -16555,7 +16581,9 @@ def _download_gh_archive(repo_url: str, token: Optional[str], dest_dir: Path) ->
     if repo.endswith(".git"): repo = repo[:-4]
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "cipher-bot-hosting/1.0"}
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        # GitHub accepts both schemes for REST calls; `token` works with
+        # classic and fine-grained PATs and matches the vault validator.
+        headers["Authorization"] = f"token {token}"
     try:
         meta_req = _ur.Request(f"https://api.github.com/repos/{owner}/{repo}", headers=headers)
         with _ur.urlopen(meta_req, timeout=30) as response:
@@ -16592,6 +16620,11 @@ def _download_gh_archive(repo_url: str, token: Optional[str], dest_dir: Path) ->
                     return {"ok": False, "error": "Repository contains too many files."}
         return {"ok": bool(count), "error": "Repository archive is empty." if not count else ""}
     except Exception as exc:
+        status = getattr(exc, "code", None)
+        if status == 401:
+            return {"ok": False, "error": "GitHub rejected the token for this private repository (HTTP 401). Check repository access and token permissions."}
+        if status == 404:
+            return {"ok": False, "error": "GitHub repository not found or the token cannot read it (HTTP 404)."}
         return {"ok": False, "error": str(exc).replace(token or "", "[redacted]")[:500]}
 
 
@@ -22160,12 +22193,8 @@ def _ai_selected_model(uid: int, user_plan: str) -> Optional[str]:
 
 
 def ai_model_tag(uid: int, plan: str) -> str:
-    """Label for the operative that answered; shows the requested one too when a fallback stepped in."""
-    used = AI_LAST_MODEL_USED.get(uid) or get_plan_primary_model(plan) or "unknown"
-    wanted = AI_LAST_MODEL_FALLBACK.get(uid)
-    if wanted and wanted != used:
-        return f"{wanted.upper()} ✗ → {used.upper()} (fallback)"
-    return used.upper()
+    """Return the stable public assistant name, never an internal model ID."""
+    return "CLAUDE"
 
 
 def _call_ai_chain(prompt: str, user_plan: str, uid: Optional[int] = None) -> Tuple[Optional[str], Optional[str]]:
@@ -22523,7 +22552,7 @@ def handle_ai_chat_message(m: types.Message) -> None:
             _remember_ai_turn(m.from_user.id, m.text, clean_res)
             
             final_text = (
-                f"🤖 <b>{sc('AI Operative')}</b> (<code>{primary_model.upper()}</code>)\n"
+                f"🤖 <b>Claude</b>\n"
                 f"{G['div']}\n"
                 f"<blockquote>{esc(clean_res)}</blockquote>\n"
                 f"{G['div']}{FOOTER}"
@@ -22532,7 +22561,7 @@ def handle_ai_chat_message(m: types.Message) -> None:
                 bot.edit_message_text(final_text, m.chat.id, loading_msg.message_id, parse_mode="HTML")
             except Exception:
                 # Fallback to plain text if HTML parsing still fails
-                bot.edit_message_text(f"🤖 AI Operative ({primary_model.upper()})\n---\n{clean_res}", m.chat.id, loading_msg.message_id)
+                bot.edit_message_text(f"🤖 Claude\n---\n{clean_res}", m.chat.id, loading_msg.message_id)
         else:
             bot.edit_message_text(f"⚠️ {sc('AI is currently recalibrating. Please try again in a moment')}.", 
                                   m.chat.id, loading_msg.message_id, parse_mode="HTML")
@@ -23172,7 +23201,7 @@ def _handle_ai_chat_document(m: types.Message) -> None:
             
             clean_res = clean_res.strip()
             final_text = (
-                f"🤖 <b>{sc('AI File Analysis')}</b> (<code>{primary_model.upper()}</code>)\n"
+                f"🤖 <b>Claude</b> — {sc('AI File Analysis')}\n"
                 f"📂 <code>{esc(fname)}</code>\n"
                 f"{G['div']}\n"
                 f"<blockquote>{esc(clean_res)}</blockquote>\n"
@@ -23181,7 +23210,7 @@ def _handle_ai_chat_document(m: types.Message) -> None:
             try:
                 bot.edit_message_text(final_text, m.chat.id, loading_msg.message_id, parse_mode="HTML")
             except Exception:
-                bot.edit_message_text(f"🤖 AI File Analysis ({primary_model.upper()}) - {fname}\n---\n{clean_res}", m.chat.id, loading_msg.message_id)
+                bot.edit_message_text(f"🤖 Claude — AI File Analysis: {fname}\n---\n{clean_res}", m.chat.id, loading_msg.message_id)
         else:
             bot.edit_message_text(f"⚠️ {sc('AI is currently recalibrating. Please try again.')}", m.chat.id, loading_msg.message_id, parse_mode="HTML")
     except Exception as e:

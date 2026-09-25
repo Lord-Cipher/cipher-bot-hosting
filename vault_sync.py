@@ -117,7 +117,12 @@ def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: st
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
 
     session = requests.Session()
-    session.headers.update({"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
+    session.headers.update({
+        "Authorization": f"token {token.strip()}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "cipher-bot-hosting",
+    })
     api = _api_base(repo)
     try:
         ref = _github(session, "GET", f"{api}/git/ref/heads/{branch}").json()
