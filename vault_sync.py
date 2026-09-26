@@ -19,6 +19,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
+from urllib.parse import quote
 
 import requests
 from cryptography.fernet import Fernet
@@ -79,13 +80,26 @@ def _github(session: requests.Session, method: str, url: str, **kwargs: Any) -> 
 
 
 def _api_base(repo: str) -> str:
-    owner, name = repo.split("/", 1)
-    return f"https://api.github.com/repos/{owner}/{name}"
-
+      raw = str(repo or "").strip()
+      if raw.startswith("http://") or raw.startswith("https://"):
+          raw = raw.split("github.com/", 1)[-1]
+      raw = raw.strip("/")
+      if raw.endswith(".git"):
+          raw = raw[:-4]
+      parts = raw.split("/")
+      if len(parts) != 2 or not all(parts):
+          raise ValueError("Vault repository must be an owner/name pair.")
+      return f"https://api.github.com/repos/{parts[0]}/{parts[1]}"
+    
 
 def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: str = "main", key: str = "") -> Dict[str, Any]:
     """Create and atomically publish one encrypted snapshot to GitHub."""
-    if not token or "/" not in repo:
+    if not token:
+        return {"ok": False, "error": "Vault token and owner/repository are required."}
+    try:
+        _api_base(repo)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
         return {"ok": False, "error": "Vault token and owner/repository are required."}
     if not key:
         return {"ok": False, "error": "CIPHER_VAULT_KEY is required; refusing plaintext backup."}
@@ -124,8 +138,9 @@ def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: st
         "User-Agent": "cipher-bot-hosting",
     })
     api = _api_base(repo)
+    branch_ref = quote(str(branch or "main").strip() or "main", safe="")
     try:
-        ref = _github(session, "GET", f"{api}/git/ref/heads/{branch}").json()
+        ref = _github(session, "GET", f"{api}/git/ref/heads/{branch_ref}").json()
         parent_sha = ref["object"]["sha"]
         parent_commit = _github(session, "GET", f"{api}/git/commits/{parent_sha}").json()
         base_tree = parent_commit["tree"]["sha"]
@@ -153,7 +168,7 @@ def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: st
             "message": f"vault: snapshot {snapshot_id}", "tree": tree, "parents": [parent_sha]
         }).json()["sha"]
         # The sole ref update is the atomic publication point.
-        _github(session, "PATCH", f"{api}/git/refs/heads/{branch}", json={"sha": commit, "force": False})
+        _github(session, "PATCH", f"{api}/git/refs/heads/{branch_ref}", json={"sha": commit, "force": False})
         return {"ok": True, "snapshotId": snapshot_id, "commit": commit, "manifest": manifest}
     except requests.HTTPError as exc:
         return {"ok": False, "error": f"GitHub API error: {exc}"}
