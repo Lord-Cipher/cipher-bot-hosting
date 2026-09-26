@@ -4530,8 +4530,8 @@ def _normalize_github_repo(value: Any) -> str:
       return "/".join(parts)
 
 
-    def gh_load_config() -> None:
-        # Explicit deployment environment values take precedence over stale panel
+def gh_load_config() -> None:
+    # Explicit deployment environment values take precedence over stale panel
     # values. The panel remains the fallback for installations without env
     # configuration, while operators can move a deployment safely by changing
     # GITHUB_REPO/GITHUB_TOKEN without editing old database settings.
