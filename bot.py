@@ -4517,13 +4517,26 @@ GH = {
 }
 
 
-def gh_load_config() -> None:
-    # Explicit deployment environment values take precedence over stale panel
+def _normalize_github_repo(value: Any) -> str:
+      """Return a canonical owner/name pair for GitHub API operations."""
+      raw = str(value or "").strip()
+      raw = re.sub(r"^https?://(?:www\.)?github\.com/", "", raw, flags=re.IGNORECASE)
+      raw = raw.split("?", 1)[0].split("#", 1)[0].strip("/")
+      if raw.endswith(".git"):
+          raw = raw[:-4]
+      parts = [part for part in raw.split("/") if part]
+      if len(parts) != 2 or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", part) for part in parts):
+          return ""
+      return "/".join(parts)
+
+
+    def gh_load_config() -> None:
+        # Explicit deployment environment values take precedence over stale panel
     # values. The panel remains the fallback for installations without env
     # configuration, while operators can move a deployment safely by changing
     # GITHUB_REPO/GITHUB_TOKEN without editing old database settings.
     GH["token"]  = str(os.environ.get("GITHUB_TOKEN")  or get_setting("github_token", "")  or "").strip()
-    GH["repo"]   = str(os.environ.get("GITHUB_REPO")   or get_setting("github_repo", "")   or "").strip().strip("/")
+    GH["repo"]   = _normalize_github_repo(os.environ.get("GITHUB_REPO") or get_setting("github_repo", ""))
     GH["branch"] = str(os.environ.get("GITHUB_BRANCH") or get_setting("github_branch", "") or "main").strip() or "main"
     GH["autoEnabled"] = bool(get_setting("github_auto_enabled", True))
     GH["lastBackup"] = GH["lastBackup"] or get_setting("github_last_backup", None)
@@ -4549,8 +4562,8 @@ def gh_set_config(patch: Dict[str, Any]) -> None:
             v = v.strip()
             if k == "repo":
                 # Accept a pasted URL (https://github.com/user/repo[.git]).
-                v = re.sub(r"^https?://github\.com/", "", v).strip("/")
-                v = v[:-4] if v.endswith(".git") else v
+                v = _normalize_github_repo(v)
+
         GH[k] = v
         set_setting(keymap[k], v)
 
@@ -12226,7 +12239,11 @@ def on_text(m: types.Message) -> None:
                     
                     # 4. Security scan and database entry
                     files_added = []
-                    for root, _, files in os.walk(bot_dir):
+                    for root, dirs, files in os.walk(bot_dir):
+                        # git clone leaves its control directory in place. It
+                        # is not bot source, may contain credentials/remotes,
+                        # and must never be copied into hosted files.
+                        dirs[:] = [d for d in dirs if d != ".git"]
                         for f in files:
                             if f.startswith(".git"): continue
                             p = Path(root) / f
@@ -16211,10 +16228,36 @@ def _vault_runtime_token() -> str:
         key = KEYRING.fetch(key_id)
         return decrypt_with(key, base64.b64decode(cipher_text)).decode("utf-8")
     except Exception:
-        return ""
+          return ""
 
 
-def _validate_vault_token(token: str, repo: str) -> Tuple[bool, str]:
+    def _vault_runtime_key() -> str:
+      """Retrieve the encrypted Fernet key generated for panel-managed vaults."""
+      key_id = str(get_setting("vault_key_key_id", "") or "")
+      cipher_text = str(get_setting("vault_key_cipher", "") or "")
+      if not key_id or not cipher_text:
+          return ""
+      try:
+          key = KEYRING.fetch(key_id)
+          return decrypt_with(key, base64.b64decode(cipher_text)).decode("ascii")
+      except Exception:
+          return ""
+
+
+    def _ensure_vault_runtime_key() -> str:
+      """Create a persistent encrypted vault key when the panel manages the vault."""
+      current = _vault_runtime_key()
+      if current:
+          return current
+      raw_key = Fernet.generate_key().decode("ascii")
+      key_id, key, cipher = encrypt_file(raw_key.encode("ascii"))
+      KEYRING.store(key_id, key, {"purpose": "cipher_vault_key"})
+      set_setting("vault_key_key_id", key_id)
+      set_setting("vault_key_cipher", base64.b64encode(cipher).decode("ascii"))
+      return raw_key
+
+
+    def _validate_vault_token(token: str, repo: str) -> Tuple[bool, str]:
     """Validate token access without logging or returning the token."""
     if not token or not re.fullmatch(r"[^/\\s]+/[^/\\s]+", repo or ""):
         return False, "Vault repository must use owner/name format."
@@ -16261,9 +16304,13 @@ def _store_vault_runtime_token(token: str) -> None:
             KEYRING.wipe(old_key_id)
         except Exception:
             pass
+      # A token entered in the panel must be enough to make Cipher Vault usable.
+      # Keep the generated Fernet key encrypted in the same key ring; deployment
+      # env configuration still takes precedence when an operator supplied one.
+      _ensure_vault_runtime_key()
 
 
-def _vault_config() -> Dict[str, str]:
+    def _vault_config() -> Dict[str, str]:
     """Load vault settings from a portable file, with env overrides."""
     config_path = Path(os.getenv("CIPHER_VAULT_CONFIG", str(BASE_DIR / "cipher_vault.json")))
     file_config: Dict[str, Any] = {}
@@ -16287,12 +16334,15 @@ def _vault_config() -> Dict[str, str]:
     # but every later operation keeps using the stale credential.
     runtime_token = _vault_runtime_token()
     token = runtime_token or value("CIPHER_VAULT_TOKEN") or os.getenv("GITHUB_TOKEN", "").strip()
+    key = value("CIPHER_VAULT_KEY") or _vault_runtime_key()
+    if token and repo and not key:
+        key = _ensure_vault_runtime_key()
 
     return {
-        "repo": repo,
+        "repo": _normalize_github_repo(repo),
         "token": token,
-        "key": value("CIPHER_VAULT_KEY"),
-        "branch": value("CIPHER_VAULT_BRANCH", "main"),
+        "key": key,
+        "branch": value("CIPHER_VAULT_BRANCH", "main") or "main",
     }
 
 
