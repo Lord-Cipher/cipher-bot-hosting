@@ -1,4 +1,28 @@
-": 0, "window_start": now}
+Admin-overridable global rate-limit lookup. Added because
+    `_rate_check()` below called this and it was never defined anywhere —
+    `_rate_check` itself isn't called from anywhere else in this file today
+    (the live rate limiting is RATE.allow(uid) in cb_root, plus the
+    per-plan _RATE_LIMIT_DEFAULTS system elsewhere), so this was inert
+    dead code rather than an active bug — fixed anyway so it's not a
+    landmine if something wires it up later.
+    """
+    return int(get_setting(f"rl_{key}", _GLOBAL_RATE_DEFAULTS.get(key, 30)))
+
+
+def _rate_check(uid, action="msg"):
+    cfg = {
+        "msg":       (_rl_get("msg_per_min"),        60),
+        "callback":  (_rl_get("cb_per_min"),         60),
+        "upload":    (_rl_get("upload_per_hour"),   3600),
+        "start_bot": (_rl_get("bot_start_per_hour"),3600),
+    }
+    limit, window = cfg.get(action, (60, 60))
+    key = f"{uid}:{action}"
+    now = time.time()
+    with _RATE_LOCK:
+        bucket = _RATE_BUCKETS.get(key, {"count": 0, "window_start": now})
+        if now - bucket["window_start"] > window:
+            bucket = {"count": 0, "window_start": now}
         bucket["count"] += 1
         _RATE_BUCKETS[key] = bucket
         return bucket["count"] <= limit
@@ -1553,39 +1577,7 @@ def render_adm_webhook_log(call):
 
 def render_adm_rate_stats(call):
     with _RATE_LOCK:
-        bc    = len(_RATE_BUCKETS)
-        top   = sorted(_RATE_BUCKETS.items(), key=lambda x: x[1]["count"], reverse=True)[:10]
-    lines = [f"<b>⚡ {sc('Rate Limit Stats')}</b>", G["div_eq"], bullet("Active buckets", bc), G["div"]]
-    for key, bucket in top:
-        lines.append(f"  <code>{key[:30]}</code>: {bucket['count']} hits")
-    lines.append(G["div"] + FOOTER)
-    show_menu(call.message.chat.id, PHOTOS.get("rate_limits", PHOTOS["admin"]),
-              "\n".join(lines), _adm_back("adm_rate_config"), call=call)
-
-
-def action_adm_export_full_db(call):
-    data  = _export_full_db()
-    fname = f"simran_db_{now_utc().strftime('%Y%m%d_%H%M%S')}.json"
-    import io
-    bot.send_document(call.message.chat.id, (fname, io.BytesIO(data)),
-                      caption=f"<b>📂 Full DB Export</b>\n{bullet('Size', fmt_bytes(len(data)))}",
-                      parse_mode="HTML")
-    ack(call, f"{G['ok']} Export sent")
-
-
-def action_adm_export_users_csv(call):
-    data  = _export_users_csv()
-    fname = f"simran_users_{now_utc().strftime('%Y%m%d')}.csv"
-    import io
-    bot.send_document(call.message.chat.id, (fname, io.BytesIO(ry" if manual_enabled else "danger"),
-        Btn(f"{'✅' if auto_enabled else '❌'}  {sc('Automatic Mode')}",
-            callback_data="adm_pay_toggle_auto",
-            style="success" if auto_enabled else "danger"),
-        Btn(f"{G['back']}  Bᴀᴄᴋ", callback_data="adm_pay_config", style="danger")
-    )
-    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
-
-# ─── TELEMETRY SYSTEM ──────────────────────────────────────────────────────
+        bc    = len(_RATE_BUCKETS)��───────────────────────────────────────────────────
 # Stores real-time CPU/RAM stats for all running bots and the system itself.
 TELEMETRY:     Dict[str, Dict[str, Any]] = {}
 SYS_TELEMETRY: Dict[str, Any] = {
@@ -1781,9 +1773,9 @@ def _ai_selected_model(uid: int, user_plan: str) -> Optional[str]:
 
 
 def ai_model_tag(uid: int, plan: str) -> str:
-    """Return the stable uppercase key for the operative that actually answered."""
+    """Return the stable public model-family tag for the operative that answered."""
     model = AI_LAST_MODEL_USED.get(uid) or _ai_selected_model(uid, plan) or "claude"
-    return model.upper()
+    return _public_ai_model_name(model).upper()
 
 
 def _call_ai_chain(prompt: str, user_plan: str, uid: Optional[int] = None) -> Tuple[Optional[str], Optional[str]]:
@@ -2038,6 +2030,11 @@ def _sanitize_ai_reply(text: str) -> str:
     """Remove provider banners, leaked prompt delimiters, and hidden reasoning tags."""
     clean = re.sub(r"<(think|thought)>.*?</\1>", "", text or "", flags=re.DOTALL | re.IGNORECASE)
     clean = re.sub(r"</?(think|thought)>", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"(?i)\bhotbot(?:\s+chat)?\b", "GPT", clean)
+    clean = re.sub(r"(?i)\b(?:omegatech|kaalix|aicli|deepai)\b", "Cipher AI", clean)
+    clean = re.sub(r"(?i)\bclaude(?:[-\s]+(?:sonnet|haiku|pro|cli))?\b", "Claude", clean)
+    clean = re.sub(r"(?i)\b(?:gpt[-\s]?(?:4o|5|4))\b", "GPT", clean)
+    clean = re.sub(r"(?i)\bdeepseek(?:[-\s]*(?:v3(?:\.2)?|r1|cli))?\b", "DeepSeek", clean)
     clean = re.sub(r"(?im)^\s*.*(?:standard\s+ai\s+chat|deepai).*\s*$", "", clean)
     clean = re.sub(r"(?im)^\s*.*ai\s+operative.*$", "", clean)
     clean = re.sub(r"(?im)^\s*.*cipher\s+tech\s+hosting\s+v?\d+(?:\.\d+)*.*\s*$", "", clean)
@@ -2147,7 +2144,7 @@ def handle_ai_chat_message(m: types.Message) -> None:
             
             model_key = AI_LAST_MODEL_USED.get(m.from_user.id) or _ai_selected_model(m.from_user.id, plan) or "claude"
             final_text = (
-                f"🤖 <b>{esc(ai_label(model_key))}</b>\n"
+                f"🤖 <b>{esc(_public_ai_model_name(model_key))}</b>\n"
                 f"{G['div']}\n"
                 f"<blockquote>{esc(clean_res)}</blockquote>\n"
                 f"{G['div']}{FOOTER}"
@@ -2156,7 +2153,7 @@ def handle_ai_chat_message(m: types.Message) -> None:
                 bot.edit_message_text(final_text, m.chat.id, loading_msg.message_id, parse_mode="HTML")
             except Exception:
                 # Fallback to plain text if HTML parsing still fails
-                bot.edit_message_text(f"🤖 {ai_label(model_key)}\n---\n{clean_res}", m.chat.id, loading_msg.message_id)
+                bot.edit_message_text(f"🤖 {_public_ai_model_name(model_key)}\n---\n{clean_res}", m.chat.id, loading_msg.message_id)
         else:
             bot.edit_message_text(f"⚠️ {esc(_ai_unavailable_reply())}",
                                   m.chat.id, loading_msg.message_id, parse_mode="HTML")
@@ -2497,8 +2494,8 @@ def render_ai_models(call: types.CallbackQuery) -> None:
         f"<b>🤖 {sc('AI Agent')}</b>\n"
         f"{G['div_eq']}\n"
         f"💎 <b>{sc('Plan')}</b>: <code>{esc(plan_name)}</code>\n\n"
-        f"<i>{sc('Choose a model to start chatting. Every model assigned to this plan is shown; the selected model is tried first and the remaining models are automatic fallbacks')}.</i>\n"
-        f"<b>{sc('Available models')}</b>: <code>{len(pool)}</code>\n"
+        f"<i>{sc('Choose an AI family to start chatting. The selected family is tried first and the remaining choices are automatic fallbacks')}.</i>\n"
+        f"<b>{sc('Available AI families')}</b>: <code>{len(pool)}</code>\n"
     )
     if not pool:
         cap += f"\n⚠️ {sc('No models are currently assigned to this plan')}."
@@ -2514,7 +2511,7 @@ def render_ai_models(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup(row_width=1)
     for model in pool:
         active = model == (selected[0] if selected else None)
-        kb.add(Btn(f"{'✅ ' if active else '🤖 '}{ai_label(model)}",
+        kb.add(Btn(f"{'✅ ' if active else '🤖 '}{_public_ai_model_name(model)}",
                    callback_data=f"ai_pick_{model}",
                    style="success" if active else "primary"))
     kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
@@ -2534,11 +2531,11 @@ def action_ai_pick(call: types.CallbackQuery, model: str) -> None:
         return render_ai_models(call)
     set_user_ai_models(uid, [model])
     USER_STATES[uid] = {"flow": "ai_chat", "ai_model": model, "ai_plan": plan}
-    ack(call, f"Selected {ai_label(model)}")
+    ack(call, f"Selected {_public_ai_model_name(model)}")
     cap = (
         f"<b>🤖 {sc('AI Agent')}</b>\n"
         f"{G['div_eq']}\n"
-        f"<i>{sc('Active model')}:</i> <b>{esc(ai_label(model))}</b>\n\n"
+        f"<i>{sc('Active AI family')}:</i> <b>{esc(_public_ai_model_name(model))}</b>\n\n"
         f"{sc('Send a message or code below to start chatting')} ."
         f"\n\n{G['div']}{FOOTER}"
     )
@@ -2799,7 +2796,7 @@ def _handle_ai_chat_document(m: types.Message) -> None:
                 clean_res = _ai_unavailable_reply()
             model_key = AI_LAST_MODEL_USED.get(m.from_user.id) or _ai_selected_model(m.from_user.id, plan) or "claude"
             final_text = (
-                f"🤖 <b>{esc(ai_label(model_key))}</b> — {sc('AI File Analysis')}\n"
+                f"🤖 <b>{esc(_public_ai_model_name(model_key))}</b> — {sc('AI File Analysis')}\n"
                 f"📂 <code>{esc(fname)}</code>\n"
                 f"{G['div']}\n"
                 f"<blockquote>{esc(clean_res)}</blockquote>\n"
@@ -2808,7 +2805,7 @@ def _handle_ai_chat_document(m: types.Message) -> None:
             try:
                 bot.edit_message_text(final_text, m.chat.id, loading_msg.message_id, parse_mode="HTML")
             except Exception:
-                bot.edit_message_text(f"🤖 Claude — AI File Analysis: {fname}\n---\n{clean_res}", m.chat.id, loading_msg.message_id)
+                bot.edit_message_text(f"🤖 {_public_ai_model_name(model_key)} — AI File Analysis: {fname}\n---\n{clean_res}", m.chat.id, loading_msg.message_id)
         else:
             bot.edit_message_text(f"⚠️ {sc('AI is currently recalibrating. Please try again.')}", m.chat.id, loading_msg.message_id, parse_mode="HTML")
     except Exception as e:
