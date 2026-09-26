@@ -16231,7 +16231,7 @@ def _vault_runtime_token() -> str:
           return ""
 
 
-    def _vault_runtime_key() -> str:
+def _vault_runtime_key() -> str:
       """Retrieve the encrypted Fernet key generated for panel-managed vaults."""
       key_id = str(get_setting("vault_key_key_id", "") or "")
       cipher_text = str(get_setting("vault_key_cipher", "") or "")
@@ -16244,7 +16244,7 @@ def _vault_runtime_token() -> str:
           return ""
 
 
-    def _ensure_vault_runtime_key() -> str:
+def _ensure_vault_runtime_key() -> str:
       """Create a persistent encrypted vault key when the panel manages the vault."""
       current = _vault_runtime_key()
       if current:
@@ -16257,7 +16257,7 @@ def _vault_runtime_token() -> str:
       return raw_key
 
 
-    def _validate_vault_token(token: str, repo: str) -> Tuple[bool, str]:
+def _validate_vault_token(token: str, repo: str) -> Tuple[bool, str]:
       """Validate token access without logging or returning the token."""
       if not token or not re.fullmatch(r"[^/\s]+/[^/\s]+", repo or ""):
           return False, "Vault repository must use owner/name format."
@@ -16284,7 +16284,7 @@ def _vault_runtime_token() -> str:
       return False, "GitHub validation returned an unexpected response."
 
 
-    def _store_vault_runtime_token(token: str) -> None:
+def _store_vault_runtime_token(token: str) -> None:
       """Encrypt and atomically replace the panel-configured vault token."""
       token = token.strip()
       if not token:
@@ -16302,7 +16302,7 @@ def _vault_runtime_token() -> str:
       _ensure_vault_runtime_key()
 
 
-    def _vault_config() -> Dict[str, str]:
+def _vault_config() -> Dict[str, str]:
       """Load vault settings from a portable file, with env overrides."""
       config_path = Path(os.getenv("CIPHER_VAULT_CONFIG", str(BASE_DIR / "cipher_vault.json")))
       file_config: Dict[str, Any] = {}
@@ -16335,7 +16335,7 @@ def _vault_runtime_token() -> str:
       }
 
 
-    def cipher_vault_status() -> Dict[str, Any]:
+def cipher_vault_status() -> Dict[str, Any]:
     cfg = _vault_config()
     history = get_setting("vault_history", []) or []
     return {
