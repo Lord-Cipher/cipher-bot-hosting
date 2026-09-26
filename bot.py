@@ -16219,15 +16219,15 @@ def _local_amount_to_usd(amount: float, currency: str) -> Tuple[Optional[float],
 
 
 def _vault_runtime_token() -> str:
-    """Retrieve the encrypted vault token configured through the admin panel."""
-    key_id = str(get_setting("vault_token_key_id", "") or "")
-    cipher_text = str(get_setting("vault_token_cipher", "") or "")
-    if not key_id or not cipher_text:
-        return ""
-    try:
-        key = KEYRING.fetch(key_id)
-        return decrypt_with(key, base64.b64decode(cipher_text)).decode("utf-8")
-    except Exception:
+      """Retrieve the encrypted vault token configured through the admin panel."""
+      key_id = str(get_setting("vault_token_key_id", "") or "")
+      cipher_text = str(get_setting("vault_token_cipher", "") or "")
+      if not key_id or not cipher_text:
+          return ""
+      try:
+          key = KEYRING.fetch(key_id)
+          return decrypt_with(key, base64.b64decode(cipher_text)).decode("utf-8")
+      except Exception:
           return ""
 
 
@@ -16258,95 +16258,84 @@ def _vault_runtime_token() -> str:
 
 
     def _validate_vault_token(token: str, repo: str) -> Tuple[bool, str]:
-    """Validate token access without logging or returning the token."""
-    if not token or not re.fullmatch(r"[^/\\s]+/[^/\\s]+", repo or ""):
-        return False, "Vault repository must use owner/name format."
-    try:
-        response = requests.get(
-            f"https://api.github.com/repos/{repo}",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {token}",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "cipher-bot-hosting",
-            }, timeout=15,
-        )
-    except Exception:
-        return False, "GitHub validation request failed."
-    if response.status_code == 200:
-        return True, ""
-    if response.status_code in {401, 403, 404}:
-        detail = ""
-        try:
-            detail = str((response.json() or {}).get("message") or "").strip()
-        except Exception:
-            pass
-        if response.status_code == 401:
-            return False, "GitHub rejected the vault token (HTTP 401). Check that the token is active and copied completely."
-        if response.status_code == 403:
-            return False, "Vault token is valid but lacks repository access (HTTP 403). Grant Contents read/write access."
-        return False, "Vault repository was not found or is not accessible to this token (HTTP 404)."
-    return False, "GitHub validation returned an unexpected response."
+      """Validate token access without logging or returning the token."""
+      if not token or not re.fullmatch(r"[^/\s]+/[^/\s]+", repo or ""):
+          return False, "Vault repository must use owner/name format."
+      try:
+          response = requests.get(
+              f"https://api.github.com/repos/{repo}",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "cipher-bot-hosting",
+              }, timeout=15,
+          )
+      except Exception:
+          return False, "GitHub validation request failed."
+      if response.status_code == 200:
+          return True, ""
+      if response.status_code in {401, 403, 404}:
+          if response.status_code == 401:
+              return False, "GitHub rejected the vault token (HTTP 401). Check that the token is active and copied completely."
+          if response.status_code == 403:
+              return False, "Vault token is valid but lacks repository access (HTTP 403). Grant Contents read/write access."
+          return False, "Vault repository was not found or is not accessible to this token (HTTP 404)."
+      return False, "GitHub validation returned an unexpected response."
 
 
-def _store_vault_runtime_token(token: str) -> None:
-    """Encrypt and atomically replace the panel-configured vault token."""
-    token = token.strip()
-    if not token:
-        raise ValueError("Token cannot be empty.")
-    key_id, key, cipher = encrypt_file(token.encode("utf-8"))
-    KEYRING.store(key_id, key, {"purpose": "cipher_vault_token"})
-    old_key_id = str(get_setting("vault_token_key_id", "") or "")
-    set_setting("vault_token_key_id", key_id)
-    set_setting("vault_token_cipher", base64.b64encode(cipher).decode("ascii"))
-    if old_key_id and old_key_id != key_id:
-        try:
-            KEYRING.wipe(old_key_id)
-        except Exception:
-            pass
-      # A token entered in the panel must be enough to make Cipher Vault usable.
-      # Keep the generated Fernet key encrypted in the same key ring; deployment
-      # env configuration still takes precedence when an operator supplied one.
+    def _store_vault_runtime_token(token: str) -> None:
+      """Encrypt and atomically replace the panel-configured vault token."""
+      token = token.strip()
+      if not token:
+          raise ValueError("Token cannot be empty.")
+      key_id, key, cipher = encrypt_file(token.encode("utf-8"))
+      KEYRING.store(key_id, key, {"purpose": "cipher_vault_token"})
+      old_key_id = str(get_setting("vault_token_key_id", "") or "")
+      set_setting("vault_token_key_id", key_id)
+      set_setting("vault_token_cipher", base64.b64encode(cipher).decode("ascii"))
+      if old_key_id and old_key_id != key_id:
+          try:
+              KEYRING.wipe(old_key_id)
+          except Exception:
+              pass
       _ensure_vault_runtime_key()
 
 
     def _vault_config() -> Dict[str, str]:
-    """Load vault settings from a portable file, with env overrides."""
-    config_path = Path(os.getenv("CIPHER_VAULT_CONFIG", str(BASE_DIR / "cipher_vault.json")))
-    file_config: Dict[str, Any] = {}
-    try:
-        if config_path.exists():
-            loaded = json.loads(config_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                file_config = loaded
-    except Exception as exc:
-        print(f"[cipher-vault] config read failed: {exc}", flush=True)
+      """Load vault settings from a portable file, with env overrides."""
+      config_path = Path(os.getenv("CIPHER_VAULT_CONFIG", str(BASE_DIR / "cipher_vault.json")))
+      file_config: Dict[str, Any] = {}
+      try:
+          if config_path.exists():
+              loaded = json.loads(config_path.read_text(encoding="utf-8"))
+              if isinstance(loaded, dict):
+                  file_config = loaded
+      except Exception as exc:
+          print(f"[cipher-vault] config read failed: {exc}", flush=True)
 
-    def value(name: str, default: str = "") -> str:
-        return (os.getenv(name) or str(file_config.get(name, default) or "")).strip()
+      def value(name: str, default: str = "") -> str:
+          return (os.getenv(name) or str(file_config.get(name, default) or "")).strip()
 
-    repo = value("CIPHER_VAULT_REPO", "Lord-Cipher/cipher-vault")
-    repo = re.sub(r"^https?://github\.com/", "", repo, flags=re.IGNORECASE).strip().strip("/")
-    if repo.endswith(".git"):
-        repo = repo[:-4]
-    # A token entered and validated in Admin → Cipher Vault must override an
-    # old deployment env token; otherwise the panel appears to accept a token
-    # but every later operation keeps using the stale credential.
-    runtime_token = _vault_runtime_token()
-    token = runtime_token or value("CIPHER_VAULT_TOKEN") or os.getenv("GITHUB_TOKEN", "").strip()
-    key = value("CIPHER_VAULT_KEY") or _vault_runtime_key()
-    if token and repo and not key:
-        key = _ensure_vault_runtime_key()
+      repo = value("CIPHER_VAULT_REPO", "Lord-Cipher/cipher-vault")
+      repo = re.sub(r"^https?://github\.com/", "", repo, flags=re.IGNORECASE).strip().strip("/")
+      if repo.endswith(".git"):
+          repo = repo[:-4]
+      runtime_token = _vault_runtime_token()
+      token = runtime_token or value("CIPHER_VAULT_TOKEN") or os.getenv("GITHUB_TOKEN", "").strip()
+      key = value("CIPHER_VAULT_KEY") or _vault_runtime_key()
+      if token and repo and not key:
+          key = _ensure_vault_runtime_key()
 
-    return {
-        "repo": _normalize_github_repo(repo),
-        "token": token,
-        "key": key,
-        "branch": value("CIPHER_VAULT_BRANCH", "main") or "main",
-    }
+      return {
+          "repo": _normalize_github_repo(repo),
+          "token": token,
+          "key": key,
+          "branch": value("CIPHER_VAULT_BRANCH", "main") or "main",
+      }
 
 
-def cipher_vault_status() -> Dict[str, Any]:
+    def cipher_vault_status() -> Dict[str, Any]:
     cfg = _vault_config()
     history = get_setting("vault_history", []) or []
     return {
