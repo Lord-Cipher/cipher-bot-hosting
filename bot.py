@@ -722,22 +722,22 @@ CODE TO ANALYZE:
 # key -> (endpoint, params builder). Keys must stay free of "_" (callback_data splits on it).
 _OMEGATECH_HOSTS = ("https://omegatech-api.dixonomega.tech", "https://api.omegatech.app")
 _OMEGATECH_MODELS: Dict[str, Tuple[str, Callable[[str], Dict[str, Any]]]] = {
-    "claude":         ("Claude",            lambda p: {"text": p}),
+    "claude":         ("claude",            lambda p: {"text": p}),
     "claude-sonnet":  ("hotbot",            lambda p: {"action": "chat", "message": p, "model": "claude-3.5-sonnet"}),
-    "claude-cli":     ("Aicli",             lambda p: {"action": "chat", "model": "claude", "query": p}),
-    "claude-haiku":   ("Qwen-Claude-Haiku", lambda p: {"message": p, "model": "claude"}),
-    "chatbot":        ("Chatbot",           lambda p: {"action": "chat", "message": p}),
+    "claude-cli":     ("aicli",             lambda p: {"action": "chat", "model": "claude", "query": p}),
+    "claude-haiku":   ("qwen-claude-haiku", lambda p: {"message": p, "model": "claude"}),
+    "chatbot":        ("chatbot",           lambda p: {"action": "chat", "message": p}),
     "hotbot":         ("hotbot",            lambda p: {"action": "chat", "message": p, "model": "gpt-5"}),
-    "gpt-4o-mini":    ("Gpt-4-mini",        lambda p: {"message": p}),
-    "chatgpt":        ("Chatgpt-v2",        lambda p: {"action": "chat", "message": p}),
-    "deepseek-v32":   ("Deep-ai",           lambda p: {"action": "chat", "message": p, "model": "deepseek-v3.2"}),
-    "deepseek-cli":   ("Aicli",             lambda p: {"action": "chat", "model": "deepseek_r1", "query": p}),
-    "code-assistant": ("Claude-pro",        lambda p: {"action": "chat", "prompt": p, "model": "code_assistant"}),
-    "mistral":        ("Mistral",           lambda p: {"action": "chat", "message": p}),
-    "qwen-80b":       ("Qwen-Claude-Haiku", lambda p: {"message": p, "model": "qwen"}),
-    "qwen3-coder":    ("Qwen3-coder",       lambda p: {"action": "chat", "message": p}),
+    "gpt-4o-mini":    ("gpt-4-mini",        lambda p: {"message": p}),
+    "chatgpt":        ("chatgpt-v2",        lambda p: {"action": "chat", "message": p}),
+    "deepseek-v32":   ("deep-ai",           lambda p: {"action": "chat", "message": p, "model": "deepseek-v3.2"}),
+    "deepseek-cli":   ("aicli",             lambda p: {"action": "chat", "model": "deepseek_r1", "query": p}),
+    "code-assistant": ("claude-pro",        lambda p: {"action": "chat", "prompt": p, "model": "code_assistant"}),
+    "mistral":        ("mistral",           lambda p: {"action": "chat", "message": p}),
+    "qwen-80b":       ("qwen-claude-haiku", lambda p: {"message": p, "model": "qwen"}),
+    "qwen3-coder":    ("qwen3-coder",       lambda p: {"action": "chat", "message": p}),
     "perplexity":     ("perplexity-ai",     lambda p: {"prompt": p}),
-    "all-ai":         ("All-Ai",            lambda p: {"action": "chat", "message": p}),
+    "all-ai":         ("all-ai",            lambda p: {"action": "chat", "message": p}),
 }
 
 
@@ -771,6 +771,17 @@ def _extract_ai_reply(data: Dict[str, Any]) -> Optional[str]:
     if "hotbot chat" in lowered and "how can i help" in lowered:
         return None
     if "account is now required to use vibe" in lowered:
+        return None
+    # OmegaTech provider banner patterns
+    if ("omegatech" in lowered or "dixonomega" in lowered) and ("assistant" in lowered or "welcome" in lowered):
+        return None
+    # Generic AI assistant onboarding banners
+    if lowered.startswith(("i am an ai", "i'm an ai", "as an ai", "i am a language model", "i'm a language model")):
+        return None
+    if ("how can i help" in lowered or "how may i assist" in lowered) and len(res) < 100:
+        return None
+    # Provider-specific marketing banners
+    if "powered by" in lowered and ("ai" in lowered or "llm" in lowered) and len(res) < 200:
         return None
     return res
 
@@ -22292,8 +22303,8 @@ def _call_ai_chain(prompt: str, user_plan: str, uid: Optional[int] = None) -> Tu
         if res:
             return res, model
 
-    # Master Fallback: DeepSeek (Kaalix) and Claude (OmegaTech) have proven the most stable
-    for master_backup in ["deepseek-v3", "claude", "deepseek-r1"]:
+    # Master Fallback: Kaalix provider models (consistent provider, proven stable)
+    for master_backup in ["deepseek-v3", "deepseek-r1", "gemini"]:
         if master_backup in tried:
             continue
         res_master = _call_kaalix_model(master_backup, prompt)
