@@ -25,6 +25,13 @@ assert bot._extract_ai_reply({"data": {"reply": "Nested hotbot answer"}}) == "Ne
 assert bot._extract_ai_reply({"response": "Kaalix answer"}) == "Kaalix answer"
 assert bot._extract_ai_reply({"content": [{"text": "Nested content answer"}]}) == "Nested content answer"
 assert bot._extract_ai_reply({"success": True, "result": "  "}) is None
+assert bot._public_ai_model_name("hotbot") == "GPT"
+assert bot._public_ai_model_name("claude-sonnet") == "Claude"
+hidden_branding = bot._sanitize_ai_reply("Powered by Hotbot through OmegaTech. Internal Kaalix route.")
+assert "hotbot" not in hidden_branding.lower(), hidden_branding
+assert "omegatech" not in hidden_branding.lower(), hidden_branding
+assert "kaalix" not in hidden_branding.lower(), hidden_branding
+assert "GPT" in hidden_branding, hidden_branding
 
 original_get = bot.requests.get
 original_get_setting = bot.get_setting
