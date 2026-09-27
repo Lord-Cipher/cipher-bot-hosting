@@ -1,4 +1,19 @@
-Admin-overridable global rate-limit lookup. Added because
+�───────────────────────────────────────
+
+_RATE_BUCKETS = {}
+_RATE_LOCK    = threading.Lock()
+
+
+_GLOBAL_RATE_DEFAULTS = {
+    "msg_per_min": 20,
+    "cb_per_min": 30,
+    "upload_per_hour": 10,
+    "bot_start_per_hour": 15,
+}
+
+
+def _rl_get(key: str) -> int:
+    """Admin-overridable global rate-limit lookup. Added because
     `_rate_check()` below called this and it was never defined anywhere —
     `_rate_check` itself isn't called from anywhere else in this file today
     (the live rate limiting is RATE.allow(uid) in cb_root, plus the
@@ -1569,15 +1584,7 @@ def render_adm_webhook_log(call):
     for e in recent[:15]:
         st   = str(e.get("status","?"))
         icon = "✅" if st in ("200","201","204") else "❌"
-        lines.append(f"  {icon} <code>{e.get('ts','')[:16]}</code> {esc(str(e.get('event',''))[:25])} → {st}")
-    lines.append(G["div"] + FOOTER)
-    show_menu(call.message.chat.id, PHOTOS.get("webhooks", PHOTOS["admin"]),
-              "\n".join(lines), _adm_back("adm_webhooks"), call=call)
-
-
-def render_adm_rate_stats(call):
-    with _RATE_LOCK:
-        bc    = len(_RATE_BUCKETS)��───────────────────────────────────────────────────
+        lines.append(f"  {icon} <code>{e.ge──────────────────────────
 # Stores real-time CPU/RAM stats for all running bots and the system itself.
 TELEMETRY:     Dict[str, Dict[str, Any]] = {}
 SYS_TELEMETRY: Dict[str, Any] = {
@@ -2032,6 +2039,7 @@ def _sanitize_ai_reply(text: str) -> str:
     clean = re.sub(r"</?(think|thought)>", "", clean, flags=re.IGNORECASE)
     clean = re.sub(r"(?i)\bhotbot(?:\s+chat)?\b", "GPT", clean)
     clean = re.sub(r"(?i)\b(?:omegatech|kaalix|aicli|deepai)\b", "Cipher AI", clean)
+    clean = re.sub(r"(?i)\b(?:anthropic|openai)\b", "Cipher AI", clean)
     clean = re.sub(r"(?i)\bclaude(?:[-\s]+(?:sonnet|haiku|pro|cli))?\b", "Claude", clean)
     clean = re.sub(r"(?i)\b(?:gpt[-\s]?(?:4o|5|4))\b", "GPT", clean)
     clean = re.sub(r"(?i)\bdeepseek(?:[-\s]*(?:v3(?:\.2)?|r1|cli))?\b", "DeepSeek", clean)
