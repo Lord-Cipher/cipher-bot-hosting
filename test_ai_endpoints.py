@@ -58,4 +58,26 @@ finally:
     bot.requests.get = original_get
     bot.get_setting = original_get_setting
 
+branding_calls = []
+
+
+def branding_then_answer(url, params=None, timeout=None):
+    branding_calls.append(url)
+    if len(branding_calls) == 1:
+        return Response(
+            200,
+            {"result": "Welcome. I'm your Standard AI Chat by DeepAI. What can I help you with today?"},
+        )
+    return Response(200, {"result": "usable answer after branding fallback"})
+
+
+bot.requests.get = branding_then_answer
+bot.get_setting = lambda key, default=None: default
+try:
+    assert bot._call_ai_model("claude", "Reply with a useful answer") == "usable answer after branding fallback"
+    assert len(branding_calls) == 2, branding_calls
+finally:
+    bot.requests.get = original_get
+    bot.get_setting = original_get_setting
+
 print("AI endpoint parsing and failover tests passed")
