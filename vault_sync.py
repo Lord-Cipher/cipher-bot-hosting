@@ -24,7 +24,9 @@ from urllib.parse import quote
 import requests
 from cryptography.fernet import Fernet
 
-EXCLUDES = {"node_modules", ".deps", ".tmp_run", "__pycache__", ".git", "logs"}
+# "backups" is excluded so vault snapshots never nest the platform's own
+# published backup artifacts (backup-of-backup growth on every sync).
+EXCLUDES = {"node_modules", ".deps", ".tmp_run", "__pycache__", ".git", "logs", "backups", ".cache"}
 VAULT_SYNC_LOCK = threading.Lock()
 REQUIRED_STATE_DIRS = ("storage", "sandbox")
 
@@ -100,7 +102,6 @@ def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: st
         _api_base(repo)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
-        return {"ok": False, "error": "Vault token and owner/repository are required."}
     if not key:
         return {"ok": False, "error": "CIPHER_VAULT_KEY is required; refusing plaintext backup."}
     try:
@@ -139,41 +140,53 @@ def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: st
     })
     api = _api_base(repo)
     branch_ref = quote(str(branch or "main").strip() or "main", safe="")
-    try:
-        ref = _github(session, "GET", f"{api}/git/ref/heads/{branch_ref}").json()
-        parent_sha = ref["object"]["sha"]
-        parent_commit = _github(session, "GET", f"{api}/git/commits/{parent_sha}").json()
-        base_tree = parent_commit["tree"]["sha"]
+    # Blob creation is idempotent (same content -> same SHA), so the whole
+    # publish sequence can safely be retried if the branch moves between the
+    # ref read and the ref update (409/422 non-fast-forward).
+    last_error: Optional[str] = None
+    for attempt in range(3):
+        try:
+            ref = _github(session, "GET", f"{api}/git/ref/heads/{branch_ref}").json()
+            parent_sha = ref["object"]["sha"]
+            parent_commit = _github(session, "GET", f"{api}/git/commits/{parent_sha}").json()
+            base_tree = parent_commit["tree"]["sha"]
 
-        def blob(data: bytes) -> str:
-            return _github(session, "POST", f"{api}/git/blobs", json={
-                "content": base64.b64encode(data).decode(), "encoding": "base64"
+            def blob(data: bytes) -> str:
+                return _github(session, "POST", f"{api}/git/blobs", json={
+                    "content": base64.b64encode(data).decode(), "encoding": "base64"
+                }).json()["sha"]
+
+            archive_sha = blob(encrypted)
+            manifest["archiveBlobSha"] = archive_sha
+            manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+            manifest_sha = blob(manifest_bytes)
+            latest_bytes = (json.dumps({"snapshotId": snapshot_id, "manifest": f"snapshots/{snapshot_id}/manifest.json"}, indent=2) + "\n").encode()
+            latest_sha = blob(latest_bytes)
+            tree = _github(session, "POST", f"{api}/git/trees", json={
+                "base_tree": base_tree,
+                "tree": [
+                    {"path": f"snapshots/{snapshot_id}/platform.tar.gz.enc", "mode": "100644", "type": "blob", "sha": archive_sha},
+                    {"path": f"snapshots/{snapshot_id}/manifest.json", "mode": "100644", "type": "blob", "sha": manifest_sha},
+                    {"path": "LATEST.json", "mode": "100644", "type": "blob", "sha": latest_sha},
+                ],
             }).json()["sha"]
-
-        archive_sha = blob(encrypted)
-        manifest["archiveBlobSha"] = archive_sha
-        manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
-        manifest_sha = blob(manifest_bytes)
-        latest_bytes = (json.dumps({"snapshotId": snapshot_id, "manifest": f"snapshots/{snapshot_id}/manifest.json"}, indent=2) + "\n").encode()
-        latest_sha = blob(latest_bytes)
-        tree = _github(session, "POST", f"{api}/git/trees", json={
-            "base_tree": base_tree,
-            "tree": [
-                {"path": f"snapshots/{snapshot_id}/platform.tar.gz.enc", "mode": "100644", "type": "blob", "sha": archive_sha},
-                {"path": f"snapshots/{snapshot_id}/manifest.json", "mode": "100644", "type": "blob", "sha": manifest_sha},
-                {"path": "LATEST.json", "mode": "100644", "type": "blob", "sha": latest_sha},
-            ],
-        }).json()["sha"]
-        commit = _github(session, "POST", f"{api}/git/commits", json={
-            "message": f"vault: snapshot {snapshot_id}", "tree": tree, "parents": [parent_sha]
-        }).json()["sha"]
-        # The sole ref update is the atomic publication point.
-        _github(session, "PATCH", f"{api}/git/refs/heads/{branch_ref}", json={"sha": commit, "force": False})
-        return {"ok": True, "snapshotId": snapshot_id, "commit": commit, "manifest": manifest}
-    except requests.HTTPError as exc:
-        return {"ok": False, "error": f"GitHub API error: {exc}"}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+            commit = _github(session, "POST", f"{api}/git/commits", json={
+                "message": f"vault: snapshot {snapshot_id}", "tree": tree, "parents": [parent_sha]
+            }).json()["sha"]
+            # The sole ref update is the atomic publication point.
+            _github(session, "PATCH", f"{api}/git/refs/heads/{branch_ref}", json={"sha": commit, "force": False})
+            return {"ok": True, "snapshotId": snapshot_id, "commit": commit, "manifest": manifest}
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status in (409, 422) and attempt < 2:
+                # Branch moved (e.g. manual commit or concurrent publisher):
+                # rebase on the new head and publish again.
+                time.sleep(1 + attempt)
+                continue
+            return {"ok": False, "error": f"GitHub API error: {exc}"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+    return {"ok": False, "error": last_error or "Vault publish failed after retries."}
 
 
 def sync_vault(base_dir: str | Path, token: str, repo: str, branch: str = "main", key: str = "") -> Dict[str, Any]:
