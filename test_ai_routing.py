@@ -75,10 +75,13 @@ bot.db_save = fake_db_save
 
 
 all_models = list(bot._AI_OPERATIVE_KEYS)
-assert len(all_models) > 3, "the fixture must exercise more than the old limit"
+enabled_models = [model for model in all_models if bot._ai_operative_enabled(model)]
+assert len(enabled_models) > 3, "the fixture must exercise more than the old limit"
 bot.set_plan_ai_models("lifetime", all_models)
 assert settings["ai_plan_lifetime_models"] == all_models
-assert bot.get_plan_ai_models("lifetime") == all_models
+assert bot.get_plan_ai_models("lifetime", include_disabled=True) == all_models
+assert bot.get_plan_ai_models("lifetime") == enabled_models
+assert set(bot._AI_MODELS_DISABLED_BY_DEFAULT).isdisjoint(enabled_models)
 
 # An explicitly assigned paid plan is respected for an admin/owner too, so
 # the admin can verify the same plan pool that ordinary users see.
@@ -94,29 +97,66 @@ users["9001"]["plan"] = "lifetime"
 
 # No user-side three-model truncation remains, either for defaults or saved
 # choices. A saved choice is preserved without deleting later fallbacks.
-assert bot.get_user_ai_models(42, "lifetime") == all_models
+assert bot.get_user_ai_models(42, "lifetime") == enabled_models
 bot.set_user_ai_models(42, all_models)
 assert users["42"]["ai_models"] == all_models
-assert bot.get_user_ai_models(42, "lifetime") == all_models
+assert bot.get_user_ai_models(42, "lifetime") == enabled_models
 
 # The selected model is tried first, but the full plan pool remains in the
 # chain rather than being sliced to three entries.
-bot.USER_STATES[42] = {"ai_model": all_models[-1]}
+bot.USER_STATES[42] = {"ai_model": enabled_models[-1]}
 called = []
 bot._call_kaalix_model = lambda model, prompt: called.append(model) or None
 reply, used = bot._call_ai_chain("test", "lifetime", 42)
 assert reply is None and used is None
-assert called[: len(all_models)] == [all_models[-1], *all_models[:-1]]
+assert called == [enabled_models[-1], *enabled_models[:-1]]
+
+# A selected model that fails must fall through in configured order, not race
+# a later provider that happens to answer faster.
+fallback_calls = []
+def primary_then_fallback(model, prompt):
+    fallback_calls.append(model)
+    if model == enabled_models[-1]:
+        return None
+    return "answer from the first configured fallback"
+bot._call_kaalix_model = primary_then_fallback
+reply, used = bot._call_ai_chain("test", "lifetime", 42)
+assert reply == "answer from the first configured fallback"
+assert used == enabled_models[0]
+assert fallback_calls == [enabled_models[-1], enabled_models[0]]
+
+# A plan with one operative must not silently invoke hard-coded premium models.
+bot.set_plan_ai_models("free", ["gpt-4o-mini"])
+users["7"]["ai_models"] = []
+bot.USER_STATES[7] = {"ai_model": "gpt-4o-mini"}
+free_calls = []
+bot._call_kaalix_model = lambda model, prompt: free_calls.append(model) or None
+reply, used = bot._call_ai_chain("test", "free", 7)
+assert reply is None and used is None
+assert free_calls == ["gpt-4o-mini"], free_calls
+
+# Existing deployments can have saved pools containing only retired IDs;
+# those users should receive the current working defaults rather than no AI.
+settings["ai_plan_starter_models"] = ["deepseek-v3", "mistral"]
+assert bot.get_plan_ai_models("starter") == bot._AI_PLAN_DEFAULT_MODELS["starter"]
 
 # The shared response boundary enforces the same relationship for every AI
-# feature, not only the Telegram chat handler.
-bot._call_ai_chain = lambda prompt, plan, uid=None: ("I am a general assistant.", "claude")
+# feature, not only the Telegram chat handler. A real first question must reach
+# the model chain rather than being replaced with a generic welcome.
+chain_calls = []
+def fake_ai_chain(prompt, plan, uid=None):
+    chain_calls.append((prompt, plan, uid))
+    return "I am a general assistant.", "claude"
+bot._call_ai_chain = fake_ai_chain
 identity_reply = bot._call_ai_api("Who is your master and creator?", "lifetime", 42)
 identity_lower = identity_reply.lower()
 for term in ("lord cipher", "creator", "mentor", "master"):
     assert term in identity_lower, identity_reply
+assert len(chain_calls) == 1, chain_calls
 ordinary_reply = bot._call_ai_api("How do I restart my bot?", "lifetime", 42)
 assert "lord cipher is my creator" not in ordinary_reply.lower(), ordinary_reply
+assert "welcome to cipher tech hosting" not in ordinary_reply.lower(), ordinary_reply
+assert len(chain_calls) == 2, chain_calls
 
 bot._remember_ai_turn(42, "My project is called Atlas", "I will remember Atlas for this account.")
 profile_prompt = bot._build_ai_request("Can you help me debug this?", 42)
@@ -136,6 +176,6 @@ assert "standard ai chat by deepai" not in bot._sanitize_ai_reply(
     "I am Standard AI Chat by DeepAI.\n━━━━━━━━\nCipher Tech Hosting v2.1\nUseful answer."
 ).lower()
 assert bot._lord_cipher_profile_answer().lower().count("lord cipher") >= 2
-assert bot.ai_model_tag(42, "lifetime") == "CLAUDE"
+assert bot.ai_model_tag(42, "lifetime") == bot._public_ai_model_name("claude").upper()
 
 print("AI routing regression tests passed")

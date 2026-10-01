@@ -24,7 +24,6 @@ import time
 import traceback
 import zipfile
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -134,10 +133,9 @@ BRAND_TAG   = f"{BRAND} {BRAND_VER}"
 SUPPORT_USR = "@lord_ciph3r"
 UPDATE_CH   = "https://t.me/cipher_tech_team"
 FOOTER      = f"\n\n<blockquote>{BRAND_TAG}</blockquote>"
-AI_FAILURE_COUNT = 0
-AI_LAST_FAILURE = 0
-AI_CIRCUIT_OPEN = False
 AI_LOCK = threading.Lock()
+AI_MODEL_FAILURE_COUNT: Dict[str, int] = {}
+AI_MODEL_CIRCUIT_OPEN_UNTIL: Dict[str, float] = {}
 AI_LAST_MODEL_USED: Dict[int, str] = {}   # uid -> operative that answered the last request
 AI_LAST_MODEL_FALLBACK: Dict[int, str] = {}   # uid -> operative the user chose when a fallback had to answer instead
 # One pooled HTTP session for every AI provider call: reusing TCP/TLS
@@ -661,24 +659,23 @@ Telegram bot patterns as malicious.
 
 CODE TO ANALYZE:
 """
-_OMEGATECH_HOSTS = ("https://omegatech-api.dixonomega.tech", "https://api.omegatech.app")
+_OMEGATECH_HOSTS = ("https://api.omegatech.app",)
 _OMEGATECH_MODELS: Dict[str, Tuple[str, Callable[[str], Dict[str, Any]]]] = {
     "claude":         ("Claude",            lambda p: {"text": p}),
-    "claude-sonnet":  ("hotbot",            lambda p: {"action": "chat", "message": p, "model": "claude-3.5-sonnet"}),
-    "claude-cli":     ("Aicli",             lambda p: {"action": "chat", "model": "claude", "query": p}),
     "claude-haiku":   ("Qwen-Claude-Haiku", lambda p: {"message": p, "model": "claude"}),
     "chatbot":        ("Chatbot",           lambda p: {"action": "chat", "message": p}),
-    "hotbot":         ("hotbot",            lambda p: {"action": "chat", "message": p, "model": "gpt-5"}),
     "gpt-4o-mini":    ("Gpt-4-mini",        lambda p: {"message": p}),
-    "chatgpt":        ("Chatgpt-v2",        lambda p: {"action": "chat", "message": p}),
-    "deepseek-v32":   ("Deep-ai",           lambda p: {"action": "chat", "message": p, "model": "deepseek-v3.2"}),
     "deepseek-cli":   ("Aicli",             lambda p: {"action": "chat", "model": "deepseek_r1", "query": p}),
-    "code-assistant": ("Claude-pro",        lambda p: {"action": "chat", "prompt": p, "model": "code_assistant"}),
-    "mistral":        ("Mistral",           lambda p: {"action": "chat", "message": p}),
     "qwen-80b":       ("Qwen-Claude-Haiku", lambda p: {"message": p, "model": "qwen"}),
-    "qwen3-coder":    ("Qwen3-coder",       lambda p: {"action": "chat", "message": p}),
-    "perplexity":     ("perplexity-ai",     lambda p: {"prompt": p}),
-    "all-ai":         ("All-Ai",            lambda p: {"action": "chat", "message": p}),
+}
+_OMEGATECH_SECRET_MODELS: Dict[str, str] = {
+    "claude-fable-5":       "claude-fable-5",
+    "claude-sonnet-4-6":    "claude-sonnet-4.6",
+    "claude-opus-4-7":      "claude-opus-4.7",
+    "gpt-5-5":              "gpt-5.5",
+    "gpt-5-4":              "gpt-5.4",
+    "gemini-3-5-flash":     "gemini-3.5-flash",
+    "deepseek-v4-pro":      "deepseek-v4-pro",
 }
 def _extract_ai_reply(data: Dict[str, Any]) -> Optional[str]:
     """Normalise the many reply shapes returned by the keyless providers."""
@@ -824,21 +821,20 @@ def _remember_ai_turn(uid: int, user_text: str, assistant_text: str) -> None:
     db_save(d)
 def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
     """Calls keyless API models with Cipher Intelligence context and Circuit Breaker."""
-    global AI_FAILURE_COUNT, AI_LAST_FAILURE, AI_CIRCUIT_OPEN
-    
-    # Check circuit breaker
+    model_key = str(model_name or "").strip().lower()
+    # A failing operative must not disable otherwise healthy providers.
     with AI_LOCK:
-        if AI_CIRCUIT_OPEN:
-            if time.time() - AI_LAST_FAILURE > 300: # 5 min cooldown
-                AI_CIRCUIT_OPEN = False
-                AI_FAILURE_COUNT = 0
-                print(f"[ai] circuit closed - resuming operations", flush=True)
-            else:
-                return None
+        blocked_until = AI_MODEL_CIRCUIT_OPEN_UNTIL.get(model_key, 0.0)
+        if blocked_until > time.time():
+            return None
+        if blocked_until:
+            AI_MODEL_CIRCUIT_OPEN_UNTIL.pop(model_key, None)
+            AI_MODEL_FAILURE_COUNT.pop(model_key, None)
+            print(f"[ai] {model_key} circuit closed - resuming operations", flush=True)
 
     if not get_setting("ai_global_enabled", True):
         return None
-    if not get_setting(f"ai_operative_{model_name}_enabled", True):
+    if not _ai_operative_enabled(model_key):
         return None
         
     system_news = get_setting("ai_system_news", "No recent updates deployed.")
@@ -880,20 +876,25 @@ def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
     
     prefix = cipher_context + "USER REQUEST (answer this directly, code first when code is asked):\n"
     try:
-        spec = _OMEGATECH_MODELS.get(model_name)
-        if spec:
+        secret_model = _OMEGATECH_SECRET_MODELS.get(model_key)
+        spec = _OMEGATECH_MODELS.get(model_key)
+        if secret_model:
+            hosts = [f"{_OMEGATECH_HOSTS[0]}/api/ai/Secret"]
+            build_params = lambda p: {
+                "action": "chat", "model": secret_model, "message": p,
+            }
+            timeout = (6, 30)
+        elif spec:
             endpoint, build_params = spec
             hosts = [f"{h}/api/ai/{endpoint}" for h in _OMEGATECH_HOSTS]
             timeout = (6, 30)
         else:
-            # Kaalix Provider (Default)
-            hosts = [f"https://r-bots-free-apis.co08.art/api/{model_name}"]
-            build_params = lambda p: {"q": p}
-            timeout = (6, 15)
+            print(f"[ai] {model_key} is not a registered live operative", flush=True)
+            return None
         params = build_params(_fit_prompt_for_get(prefix, prompt, build_params))
 
-        # Mirror hosts share one backend: only fall through to the next
-        # host on a transport failure, never on a provider-level error.
+        # A transport or HTTP failure may try another configured live host;
+        # a provider-level error is recorded as a model failure.
         last_err = "no hosts"
         for url in hosts:
             try:
@@ -922,7 +923,8 @@ def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
             if not _ai_reply_usable(res):
                 last_err = "non-answer reply (branding or identity drift)"; continue
             with AI_LOCK:
-                AI_FAILURE_COUNT = max(0, AI_FAILURE_COUNT - 1)
+                AI_MODEL_FAILURE_COUNT.pop(model_key, None)
+                AI_MODEL_CIRCUIT_OPEN_UNTIL.pop(model_key, None)
             return res
         raise Exception(last_err)
 
@@ -934,14 +936,15 @@ def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
     except Exception as e:
         print(f"[ai] {model_name} error: {e}", flush=True)
         with AI_LOCK:
-            AI_FAILURE_COUNT += 1
-            AI_LAST_FAILURE = time.time()
-            # 10 (not 5): the parallel racing chain can legitimately produce
-            # several failed operatives in one round when the whole uplink is
-            # rate-limiting; a single bad round must not open the breaker.
-            if AI_FAILURE_COUNT >= 10:
-                AI_CIRCUIT_OPEN = True
-                log_notification("SYSTEM", "AI Uplink is unstable. Circuit breaker opened for 5 minutes.")
+            failures = AI_MODEL_FAILURE_COUNT.get(model_key, 0) + 1
+            AI_MODEL_FAILURE_COUNT[model_key] = failures
+            if failures >= 5:
+                AI_MODEL_CIRCUIT_OPEN_UNTIL[model_key] = time.time() + 300
+                AI_MODEL_FAILURE_COUNT.pop(model_key, None)
+                log_notification(
+                    "SYSTEM",
+                    f"AI operative {model_key} is unstable. Its circuit breaker opened for 5 minutes.",
+                )
     return None
 def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
     """Compatibility wrapper for the old function name."""
@@ -949,10 +952,10 @@ def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
 def _ai_scan_code(code: str, filename: str = "file.py") -> Optional[Dict[str, Any]]:
     """Run the configured AI security scanner with safe fallbacks."""
     prompt = f"{_AI_SCAN_PROMPT}\n{code[:4000]}"
-    selected = str(get_setting("ai_scanner_model", "deepseek-r1") or "deepseek-r1").strip().lower()
+    selected = str(get_setting("ai_scanner_model", "claude-fable-5") or "claude-fable-5").strip().lower()
     if selected not in _AI_OPERATIVE_KEYS:
-        selected = "deepseek-r1"
-    candidates = [selected] + [m for m in ("deepseek-r1", "gptlogic") if m != selected]
+        selected = "claude-fable-5"
+    candidates = [selected] + [m for m in ("gpt-5-5", "claude") if m != selected]
     res_text = None
     used_model = None
     for model in candidates:
@@ -20218,51 +20221,34 @@ def ai_model_tag(uid: int, plan: str) -> str:
     return _public_ai_model_name(model).upper()
 
 def _call_ai_chain(prompt: str, user_plan: str, uid: Optional[int] = None) -> Tuple[Optional[str], Optional[str]]:
-    """Race every eligible operative concurrently and answer with the first
-    usable reply.
+    """Try the selected operative first, then eligible fallbacks in order.
 
-    The chain used to be walked one model at a time, so a dead first pick
-    made the user wait through its full timeout before the next model was
-    even tried — the 'AI loads forever' experience. Racing the whole pool
-    caps the wait at a single provider timeout no matter how many fallbacks
-    exist. Returns (reply, model_key) so callers can label the response with
-    the operative that actually answered."""
+    Racing providers made the selected model effectively random and sent
+    unnecessary parallel requests to every model in a user's pool. Fail over
+    only after the preferred model cannot produce a usable answer, preserving
+    the plan's configured order and returning the model that actually replied.
+    """
     plan_pool = get_plan_ai_models(user_plan)
     chain = get_user_ai_models(uid, user_plan) if uid is not None else list(plan_pool)
     if uid is not None:
         session_pick = str((USER_STATES.get(uid) or {}).get("ai_model") or "").lower()
         if session_pick and session_pick in plan_pool:
             chain = [session_pick] + [m for m in chain if m != session_pick]
-        # A user-selected model changes priority; it does not restrict the
-        # plan. Every other assigned model remains an eligible fallback.
+        # A user-selected model changes priority; other assigned models remain
+        # eligible fallbacks in the administrator-configured order.
         chain.extend(m for m in plan_pool if m not in chain)
-    # Master Fallback: DeepSeek (Kaalix) and Claude (OmegaTech) have proven the most stable
-    chain.extend(m for m in ("deepseek-v3", "claude", "deepseek-r1") if m not in chain)
     unique = [m for m in dict.fromkeys(chain) if m]
     if not unique:
         return None, None
-
-    def _race(model: str) -> Tuple[str, Optional[str]]:
+    for model in unique:
         try:
-            return model, _call_kaalix_model(model, prompt)
-        except Exception:
-            return model, None
-
-    winner_model: Optional[str] = None
-    winner_text: Optional[str] = None
-    pool = ThreadPoolExecutor(max_workers=min(len(unique), 8))
-    try:
-        futures = [pool.submit(_race, m) for m in unique]
-        for fut in as_completed(futures):
-            model, res = fut.result()
-            if res:
-                winner_model, winner_text = model, res
-                break
-    finally:
-        # Cancel the losing in-flight requests so a slow provider never
-        # delays a reply that has already been won.
-        pool.shutdown(wait=False, cancel_futures=True)
-    return winner_text, winner_model
+            response = _call_kaalix_model(model, prompt)
+        except Exception as e:
+            print(f"[ai] {model} routing error: {e}", flush=True)
+            continue
+        if _ai_reply_usable(response):
+            return response, model
+    return None, None
 
 def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None) -> Optional[str]:
     """Tiered AI call system routing through the operatives configured for the plan / chosen by the user."""
@@ -20286,22 +20272,16 @@ def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None
         profile_doc = (db_load_ro().get("users", {}) or {}).get(str(uid), {}) or {}
         handle = str(profile_doc.get("username") or "").strip().lstrip("@")
         display = f"@{handle}" if handle else (str(profile_doc.get("name") or "").strip() or "friend")
-        first_contact = not str(profile_doc.get("ai_last_chat") or "").strip()
-
-        # Instant local greetings for speed — personalized with the real
-        # Telegram username from the verified profile.
+        # Keep exact greetings instant, but never replace a real first
+        # question with the generic welcome used by the old first-contact path.
         greetings = {"hello", "hi", "hey", "sup", "yo", "morning", "evening",
                      "afternoon", "goodmorning", "goodevening", "goodafternoon"}
-        first_word = re.split(r"[^a-z]+", p_low, maxsplit=1)[0]
-        if first_word in greetings and len(p_low) <= 32:
+        normalized_greeting = re.sub(r"[^a-z]+", "", p_low)
+        if normalized_greeting in greetings:
             return (f"Hello {display}! I am your Cipher AI operative. How may I assist you "
                     f"with your bot hosting today?")
         if len(p_low) < 4:
             return f"Hello {display}! How may I assist you with your bot hosting today?"
-        if first_contact and len(p_low) <= 200:
-            return (f"Hello {display}, and welcome to Cipher Tech Hosting! I am your personal AI "
-                    f"operative. I can host your bots, analyze files, diagnose crashes, and answer "
-                    f"anything about your plan. How may I help you today?")
     elif len(p_low) < 4:
         return "Hello! How may I assist you with your bot hosting today?"
 
@@ -20860,34 +20840,29 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
         ack(call, f"Failed to apply patch: {e}")
 
 _AI_OPERATIVE_LABELS = {
-    # OmegaTech — verified coding models
-    "claude": "Claude — Elite Coder",
-    "claude-sonnet": "Claude-Sonnet 3.5 — Balanced Pro",
-    "claude-cli": "Claude-CLI — Fast Coder",
-    "hotbot": "GPT-5 — Premium Powerhouse",
-    "chatgpt": "ChatGPT — General Chat",
-    "gpt-4o-mini": "GPT-4o Mini — Fast & Light",
-    "deepseek-v32": "DeepSeek V3.2 — Deep Reasoner",
-    "deepseek-cli": "DeepSeek R1 — Logic & Debug",
-    "code-assistant": "Code Assistant — Pro Fixer",
-    "chatbot": "Claude-Chat — Friendly Helper",
-    "mistral": "Mistral — Quick Replies",
-    # OmegaTech — extra / experimental
-    "claude-haiku": "Claude-Haiku — Ultra Fast",
-    "qwen-80b": "Qwen-80B — General Chat",
-    "qwen3-coder": "Qwen3-Coder — Code Specialist",
-    "perplexity": "Perplexity — Web Research",
-    "all-ai": "All-AI — Universal Fallback",
-    # Kaalix provider
-    "deepseek-r1": "DeepSeek-R1 — Reasoning",
-    "deepseek-v3": "DeepSeek-V3 — Fast Chat",
-    "qwen": "Qwen-Tech — Technical Q&A",
-    "gemini": "Gemini-Pro — Knowledge",
-    "gptlogic": "GPT-Logic — Analysis Engine",
-    "cohere": "Cohere — Efficient",
+    # Legacy OmegaTech endpoints confirmed usable in live checks.
+    "claude": "Claude",
+    "claude-haiku": "Claude Haiku",
+    "chatbot": "Claude Chat",
+    "gpt-4o-mini": "GPT-4o Mini",
+    "deepseek-cli": "DeepSeek R1",
+    "qwen-80b": "Qwen 80B",
+    # Each Secret catalog model is a separate user/admin-selectable operative.
+    "claude-fable-5": "Claude Fable 5",
+    "claude-sonnet-4-6": "Claude Sonnet 4.6",
+    "claude-opus-4-7": "Claude Opus 4.7",
+    "gpt-5-5": "GPT-5.5",
+    "gpt-5-4": "GPT-5.4",
+    "gemini-3-5-flash": "Gemini 3.5 Flash",
+    "deepseek-v4-pro": "DeepSeek V4 Pro",
 }
 
 _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
+_AI_MODELS_DISABLED_BY_DEFAULT = frozenset({
+    # Advertised in the catalog, but currently rejected or timing out on chat.
+    "claude-sonnet-4-6", "claude-opus-4-7", "gpt-5-4",
+    "gemini-3-5-flash", "deepseek-v4-pro",
+})
 
 
 def _public_ai_model_name(model: str) -> str:
@@ -20896,7 +20871,7 @@ def _public_ai_model_name(model: str) -> str:
     Internal provider names (OmegaTech, Kaalix, Hotbot, endpoints) must never
     reach users. Every operative keeps its own distinctive label — family
     names are NOT collapsed anymore, so users and admins can always tell
-    look-alike models apart (e.g. Qwen-80B vs Qwen3-Coder vs Qwen-Tech).
+    look-alike models apart (e.g. Claude vs Claude Chat vs Claude Haiku).
     """
     key = str(model or "").strip().lower()
     if key in _AI_OPERATIVE_KEYS:
@@ -20904,16 +20879,19 @@ def _public_ai_model_name(model: str) -> str:
     return "Cipher AI"
 
 _AI_PLAN_DEFAULT_MODELS = {
-    "free":       ["deepseek-v3", "gpt-4o-mini", "mistral"],
-    "starter":    ["deepseek-v3", "gpt-4o-mini", "chatgpt", "mistral"],
-    "basic":      ["claude", "deepseek-cli", "chatgpt", "gpt-4o-mini"],
-    "pro":        ["claude", "hotbot", "deepseek-cli", "chatgpt", "code-assistant"],
-    "enterprise": ["claude", "claude-sonnet", "hotbot", "deepseek-r1", "code-assistant", "deepseek-cli"],
-    "lifetime":   ["claude", "claude-sonnet", "hotbot", "deepseek-r1", "code-assistant", "deepseek-cli"],
+    "free":       ["gpt-4o-mini", "chatbot"],
+    "starter":    ["gpt-4o-mini", "chatbot", "qwen-80b"],
+    "basic":      ["claude", "deepseek-cli", "claude-haiku", "gpt-4o-mini"],
+    "pro":        ["claude-fable-5", "gpt-5-5", "deepseek-cli", "claude", "qwen-80b"],
+    "enterprise": ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b"],
+    "lifetime":   ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b"],
 }
 
 def _ai_operative_enabled(key: str) -> bool:
-    return key in _AI_OPERATIVE_KEYS and bool(get_setting(f"ai_operative_{key}_enabled", True))
+    default_enabled = key not in _AI_MODELS_DISABLED_BY_DEFAULT
+    return key in _AI_OPERATIVE_KEYS and bool(
+        get_setting(f"ai_operative_{key}_enabled", default_enabled)
+    )
 
 def ai_label(key: str) -> str:
     return _AI_OPERATIVE_LABELS.get(key, key.upper())
@@ -20925,6 +20903,13 @@ def get_plan_ai_models(plan: str, include_disabled: bool = False) -> List[str]:
     if not isinstance(configured, list):
         legacy = [get_setting(f"ai_model_{plan}_primary"), get_setting(f"ai_model_{plan}_fallback")]
         configured = [str(m).lower() for m in legacy if m] + list(_AI_PLAN_DEFAULT_MODELS.get(plan, _AI_PLAN_DEFAULT_MODELS["free"]))
+    elif configured:
+        # If a saved pool consists entirely of retired IDs, move it to the
+        # current plan defaults instead of leaving existing users with no AI.
+        registered = [str(m).strip().lower() for m in configured
+                      if str(m).strip().lower() in _AI_OPERATIVE_KEYS]
+        if not registered:
+            configured = list(_AI_PLAN_DEFAULT_MODELS.get(plan, _AI_PLAN_DEFAULT_MODELS["free"]))
     pool: List[str] = []
     for m in configured:
         m = str(m).strip().lower()
@@ -21040,7 +21025,7 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     cap = (
         f"<b>🤖 {sc('AI Command Center')}</b>\n"
         f"{G['div_eq']}\n"
-        f"<i>{sc('Manage OmegaTech / Kaalix AI operatives and per-plan model pools')}.</i>\n\n"
+        f"<i>{sc('Manage AI operatives and per-plan model pools')}.</i>\n\n"
         f"🌐 <b>Global Status</b>: {'🟢 ACTIVE' if global_on else '🔴 OFFLINE'}\n\n"
         f"💎 <b>Active Operatives</b>:\n"
     )
@@ -21051,7 +21036,7 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
                style="success" if global_on else "danger"))
                
     for key, name in operatives.items():
-        is_on = bool(get_setting(f"ai_operative_{key}_enabled", True))
+        is_on = _ai_operative_enabled(key)
         status = "🟢 ON" if is_on else "🔴 OFF"
         cap += f"• <code>{key}</code>: {status}\n"
         
@@ -21065,7 +21050,9 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     
     cap += f"\n{G['div']}{FOOTER}"
     kb.add(Btn("🧠  Pʟᴀɴ-Mᴏᴅᴇʟ Rᴏᴜᴛɪɴɢ", callback_data="adm_ai_routing_menu", style="success"))
-    scanner_model = str(get_setting("ai_scanner_model", "deepseek-r1") or "deepseek-r1")
+    scanner_model = str(get_setting("ai_scanner_model", "claude-fable-5") or "claude-fable-5")
+    if scanner_model not in _AI_OPERATIVE_KEYS:
+        scanner_model = "claude-fable-5"
     kb.add(Btn(f"🛡️  File Scanner AI: {ai_label(scanner_model)}",
                callback_data="adm_ai_scanner_model", style="success"))
     kb.add(Btn("📢 Update AI System News", callback_data="adm_ai_news_prompt", style="primary"))
@@ -21074,16 +21061,16 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
 
 def render_adm_ai_scanner_model(call: types.CallbackQuery) -> None:
     """Choose the independent AI operative used for malware scanning."""
-    selected = str(get_setting("ai_scanner_model", "deepseek-r1") or "deepseek-r1")
+    selected = str(get_setting("ai_scanner_model", "claude-fable-5") or "claude-fable-5")
     if selected not in _AI_OPERATIVE_KEYS:
-        selected = "deepseek-r1"
+        selected = "claude-fable-5"
     cap = (
         f"<b>🛡️ {sc('File Scanner AI')}</b>\n"
         f"{G['div_eq']}\n"
         f"{sc('Choose which AI evaluates uploaded source files for malware')}.\n"
         f"{sc('This setting is independent from user chat model routing')}.\n\n"
         f"{sc('Current')}: <b>{esc(ai_label(selected))}</b>\n"
-        f"<i>{sc('The deterministic pattern scanner always runs first. If this model is unavailable, DeepSeek-R1 and Logic Analysis are tried as fallbacks')}.</i>"
+        f"<i>{sc('The deterministic pattern scanner always runs first. If this model is unavailable, GPT-5.5 and Claude are tried as fallbacks')}.</i>"
         f"{G['div']}{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -21212,7 +21199,7 @@ def get_ai_model(uid: int) -> str:
 def get_plan_primary_model(plan: str) -> str:
     """First operative in the plan pool."""
     pool = get_plan_ai_models(plan)
-    return pool[0] if pool else "deepseek-v3"
+    return pool[0] if pool else "claude-fable-5"
 
 def get_plan_fallback_model(plan: str) -> str:
     """Second operative in the plan pool (or the primary when the pool has one entry)."""

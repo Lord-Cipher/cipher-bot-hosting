@@ -16,7 +16,7 @@ bot.get_setting = lambda key, default=None: settings.get(key, default)
 calls = []
 responses = {
     "claude": None,
-    "deepseek-r1": '{"verdict":"SUSPICIOUS","risk_score":80,"reason":"dynamic execution","threats":["dynamic execution"]}',
+    "gpt-5-5": '{"verdict":"SUSPICIOUS","risk_score":80,"reason":"dynamic execution","threats":["dynamic execution"]}',
 }
 
 
@@ -27,8 +27,8 @@ def fake_call(model, prompt):
 
 bot._call_kaalix_model = fake_call
 result = bot._ai_scan_code("eval(input())", "sample.py")
-assert calls[:2] == ["claude", "deepseek-r1"]
-assert result["ai_model"] == "deepseek-r1"
+assert calls[:2] == ["claude", "gpt-5-5"]
+assert result["ai_model"] == "gpt-5-5"
 assert result["ai_risk_score"] == 80
 
 # The configured scanner model is used first, independently of user plan
