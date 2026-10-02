@@ -138,7 +138,7 @@ assert "File is empty or contains no readable text code." in BOT
 assert "Connection to AI uplink lost." in BOT
 assert "_LORD_CIPHER_BRAGS" in BOT
 assert "ai_lord_cipher_brags_recent" in BOT
-assert "never repeat the same brag consecutively" in BOT
+assert "Do not add unsolicited praise or promotional claims." in BOT
 assert "def _is_lord_cipher_profile_request" in BOT
 assert "def _build_ai_request" in BOT
 assert "roughly 500-800 words" in BOT

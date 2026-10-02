@@ -143,6 +143,23 @@ assert bot.get_plan_ai_models("starter") == bot._AI_PLAN_DEFAULT_MODELS["starter
 # The shared response boundary enforces the same relationship for every AI
 # feature, not only the Telegram chat handler. A real first question must reach
 # the model chain rather than being replaced with a generic welcome.
+context = bot._build_cipher_ai_context("Qwen 80B")
+assert "Cipher Tech Hosting" in context
+assert "Telegram platform" in context
+assert "Lord Cipher" in context and "master" in context
+assert "tiered hosting" in context.lower() or "plans and prices" in context.lower()
+assert "ABSOLUTE STEALTH" not in context
+assert "Military-Grade End-to-End Encryption" not in context
+assert bot._is_lord_cipher_identity_request("Who is Lord Cipher to you?")
+assert bot._is_lord_cipher_identity_request("Who is your master and creator?")
+corrected_identity = bot._enforce_lord_cipher_identity(
+    "Who is Lord Cipher to you?",
+    "Lord Cipher is not my creator, mentor, or master. I am Claude.",
+)
+assert "Lord Cipher is my creator" in corrected_identity
+assert "master" in corrected_identity.lower()
+assert "not my creator" not in corrected_identity.lower()
+
 chain_calls = []
 def fake_ai_chain(prompt, plan, uid=None):
     chain_calls.append((prompt, plan, uid))

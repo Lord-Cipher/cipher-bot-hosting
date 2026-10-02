@@ -58,7 +58,7 @@ try:
     assert url == "https://api.omegatech.app/api/ai/Secret", url
     assert params["action"] == "chat", params
     assert params["model"] == "claude-fable-5", params
-    assert params["message"].endswith("USER REQUEST (answer this directly, code first when code is asked):\nReply with a short answer"), params
+    assert params["message"].endswith("USER REQUEST:\nReply with a short answer"), params
 finally:
     bot.AI_HTTP.get = original_get
     bot.get_setting = original_get_setting
