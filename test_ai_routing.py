@@ -125,6 +125,20 @@ assert reply == "answer from the first configured fallback"
 assert used == enabled_models[0]
 assert fallback_calls == [enabled_models[-1], enabled_models[0]]
 
+# A generic welcome is not a successful answer to a substantive prompt; the
+# selected model must be skipped in favor of the next plan-eligible operative.
+generic_fallback_calls = []
+def generic_then_useful(model, prompt):
+    generic_fallback_calls.append(model)
+    if model == enabled_models[-1]:
+        return "I'm ready to assist you with your question about Cipher Tech Hosting. How can I help you today?"
+    return "Here is the requested explanation with practical steps."
+bot._call_kaalix_model = generic_then_useful
+reply, used = bot._call_ai_chain("Explain how to restart my bot", "lifetime", 42)
+assert reply == "Here is the requested explanation with practical steps."
+assert used == enabled_models[0]
+assert generic_fallback_calls == [enabled_models[-1], enabled_models[0]]
+
 # A plan with one operative must not silently invoke hard-coded premium models.
 bot.set_plan_ai_models("free", ["gpt-4o-mini"])
 users["7"]["ai_models"] = []
@@ -188,6 +202,7 @@ assert bot._sanitize_ai_reply(banner_only) == ""
 assert bot._ai_unavailable_reply().strip()
 assert bot._extract_ai_reply({"result": "I am Standard AI Chat by DeepAI, serving as the official AI assistant."}) is None
 assert bot._extract_ai_reply({"result": "Hello! I'm HotBot Chat. How can I help you today?"}) is None
+assert bot._extract_ai_reply({"result": "What can I assist you with today?"}) is None
 assert bot._extract_ai_reply({"result": "A useful answer about restarting a bot."}) == "A useful answer about restarting a bot."
 assert "standard ai chat by deepai" not in bot._sanitize_ai_reply(
     "I am Standard AI Chat by DeepAI.\n━━━━━━━━\nCipher Tech Hosting v2.1\nUseful answer."

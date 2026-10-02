@@ -28,6 +28,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from ai_engine import AIEngine, ModelRoute
 import telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
@@ -677,99 +678,14 @@ _OMEGATECH_SECRET_MODELS: Dict[str, str] = {
     "gemini-3-5-flash":     "gemini-3.5-flash",
     "deepseek-v4-pro":      "deepseek-v4-pro",
 }
-def _extract_ai_reply(data: Dict[str, Any]) -> Optional[str]:
-    """Normalise the many reply shapes returned by the keyless providers."""
-    inner = data.get("data") if isinstance(data.get("data"), dict) else {}
-    content = data.get("content")
-    content_text = ""
-    if isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict) and isinstance(part.get("text"), str) and part["text"].strip():
-                content_text = part["text"]
-                break
-    res = (
-        data.get("result") or data.get("reply") or data.get("answer") or
-        data.get("response") or inner.get("reply") or inner.get("response") or
-        content_text or
-        (data.get("message") if data.get("status") is True else None)
-    )
-    if not isinstance(res, str):
-        return None
-    if res.startswith('{"reply"'):
-        try: res = _json.loads(res).get("reply", res)
-        except Exception: pass
-    # Gpt-4-mini encodes newlines as "-=-n--"
-    res = res.replace("-=-n--", "\n")
-    res = res.strip()
-    if not res or res.lower().startswith(("maaf,", "sign up and repeat")):
-        return None
-    lowered = res.lower()
-    # These are provider onboarding/branding banners, not answers. Returning
-    # them as successful results stopped the fallback chain at Claude and
-    # made ordinary questions appear blank after banner sanitization.
-    if (("standard ai chat" in lowered or "deepai" in lowered)
-            and ("official ai assistant" in lowered or "serve as" in lowered
-                 or "what can i help" in lowered)):
-        return None
-    # Some fallback endpoints return their own onboarding greeting as a 200
-    # response. It is not an answer and must not terminate the model chain.
-    if "hotbot chat" in lowered and "how can i help" in lowered:
-        return None
-    if "account is now required to use vibe" in lowered:
-        return None
-    return res
-_IDENTITY_DRIFT_RE = re.compile(
-    r"^\s*(?:i'?m|i am|this is|you(?:'re| are) (?:talking|speaking) (?:to|with))\s+"
-    r"(?:gpt|chatgpt|openai|claude|gemini|copilot|deepseek|llama|mistral|an ai|a gpt)\b",
-    re.IGNORECASE)
-def _ai_reply_usable(text: Optional[str]) -> bool:
-    """Reject provider junk that is not an answer to the user's request.
+def _extract_ai_reply(data: Any) -> Optional[str]:
+    """Compatibility adapter to the standalone engine's response normalizer."""
+    text = AIEngine.extract_reply(data)
+    return text if _ai_reply_usable(text) else None
 
-    Keyless endpoints sometimes answer with their own branding or a
-    wrong-persona one-liner ('I'm GPT by GPT — happy to help.'). Treating
-    those as successes stopped the fallback chain and left the user with a
-    reply that ignored them completely."""
-    if not text or not str(text).strip():
-        return False
-    t = str(text).strip()
-    lowered = t.lower()
-    if lowered.startswith(("maaf,", "sign up", "api key", "unauthorized", "rate limit")):
-        return False
-    # A short reply that opens by claiming a different product's identity is
-    # a misrouted backend, not an answer.
-    if len(t) <= 160 and _IDENTITY_DRIFT_RE.match(t):
-        return False
-    return True
-_AI_GET_QUERY_LIMIT = 14000
-_AI_TRUNCATION_NOTE = "\n[... input truncated to fit the provider request limit ...]\n"
-class _AIPromptTooLarge(Exception):
-    pass
-def _fit_prompt_for_get(prefix: str, prompt: str,
-                        build_params: Callable[[str], Dict[str, Any]],
-                        limit: int = _AI_GET_QUERY_LIMIT) -> str:
-    """Return prefix+prompt, shrinking the user part until the encoded
-    query string fits in `limit`. The head and tail of the prompt are
-    kept (instructions usually lead, the newest logs/code trail)."""
-    def encoded_len(text: str) -> int:
-        return len(_urlencode(build_params(text)))
-
-    def shrunk(keep: int) -> str:
-        head_n = keep * 2 // 3
-        tail_n = keep - head_n
-        tail = prompt[len(prompt) - tail_n:] if tail_n else ""
-        return prefix + prompt[:head_n] + _AI_TRUNCATION_NOTE + tail
-
-    full = prefix + prompt
-    if encoded_len(full) <= limit:
-        return full
-    lo, hi = 0, len(prompt)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if encoded_len(shrunk(mid)) <= limit:
-            lo = mid
-        else:
-            hi = mid - 1
-    return shrunk(lo)
+def _ai_reply_usable(text: Optional[str], prompt: Optional[str] = None) -> bool:
+    """Compatibility adapter to the engine's prompt-aware answer validator."""
+    return AIEngine.is_usable(text, prompt)
 
 def _build_cipher_ai_context(model_name: str) -> str:
     """Build concise, consistent platform facts for every AI operative."""
@@ -847,95 +763,9 @@ def _remember_ai_turn(uid: int, user_text: str, assistant_text: str) -> None:
     profile["ai_last_chat"] = ts_iso()
     db_save(d)
 def _call_ai_model(model_name: str, prompt: str) -> Optional[str]:
-    """Calls keyless API models with Cipher Intelligence context and Circuit Breaker."""
-    model_key = str(model_name or "").strip().lower()
-    # A failing operative must not disable otherwise healthy providers.
-    with AI_LOCK:
-        blocked_until = AI_MODEL_CIRCUIT_OPEN_UNTIL.get(model_key, 0.0)
-        if blocked_until > time.time():
-            return None
-        if blocked_until:
-            AI_MODEL_CIRCUIT_OPEN_UNTIL.pop(model_key, None)
-            AI_MODEL_FAILURE_COUNT.pop(model_key, None)
-            print(f"[ai] {model_key} circuit closed - resuming operations", flush=True)
-
-    if not get_setting("ai_global_enabled", True):
-        return None
-    if not _ai_operative_enabled(model_key):
-        return None
-        
-    prefix = _build_cipher_ai_context(model_name) + "USER REQUEST:\n"
-    try:
-        secret_model = _OMEGATECH_SECRET_MODELS.get(model_key)
-        spec = _OMEGATECH_MODELS.get(model_key)
-        if secret_model:
-            hosts = [f"{_OMEGATECH_HOSTS[0]}/api/ai/Secret"]
-            build_params = lambda p: {
-                "action": "chat", "model": secret_model, "message": p,
-            }
-            timeout = (6, 30)
-        elif spec:
-            endpoint, build_params = spec
-            hosts = [f"{h}/api/ai/{endpoint}" for h in _OMEGATECH_HOSTS]
-            timeout = (6, 30)
-        else:
-            print(f"[ai] {model_key} is not a registered live operative", flush=True)
-            return None
-        params = build_params(_fit_prompt_for_get(prefix, prompt, build_params))
-
-        # A transport or HTTP failure may try another configured live host;
-        # a provider-level error is recorded as a model failure.
-        last_err = "no hosts"
-        for url in hosts:
-            try:
-                r = AI_HTTP.get(url, params=params, timeout=timeout)
-            except Exception as req_err:
-                last_err = str(req_err)[:120]; continue
-            if r.status_code in (413, 414, 431):
-                raise _AIPromptTooLarge(f"API returned status {r.status_code}")
-            if r.status_code != 200:
-                # Mirror hosts share one backend pool: an HTTP error on one
-                # host is retried on the next mirror before giving up.
-                last_err = f"API returned status {r.status_code}"; continue
-            try:
-                data = r.json()
-            except Exception:
-                last_err = "non-JSON response"; continue
-            if not isinstance(data, dict):
-                last_err = "unexpected response shape"; continue
-            if data.get("success") is False or data.get("status") is False:
-                last_err = str(data.get("error") or data.get("message") or "provider error")[:120]; continue
-            res = _extract_ai_reply(data)
-            if not res:
-                # Branding-only or empty payloads are failures, not answers:
-                # fall through so the next mirror can still serve the user.
-                last_err = "empty or branding-only reply"; continue
-            if not _ai_reply_usable(res):
-                last_err = "non-answer reply (branding or identity drift)"; continue
-            with AI_LOCK:
-                AI_MODEL_FAILURE_COUNT.pop(model_key, None)
-                AI_MODEL_CIRCUIT_OPEN_UNTIL.pop(model_key, None)
-            return res
-        raise Exception(last_err)
-
-    except _AIPromptTooLarge as e:
-        # A too-long request is a caller problem, not a provider outage:
-        # report it but never count it toward the circuit breaker.
-        print(f"[ai] {model_name} error: {e} (prompt too large)", flush=True)
-        return None
-    except Exception as e:
-        print(f"[ai] {model_name} error: {e}", flush=True)
-        with AI_LOCK:
-            failures = AI_MODEL_FAILURE_COUNT.get(model_key, 0) + 1
-            AI_MODEL_FAILURE_COUNT[model_key] = failures
-            if failures >= 5:
-                AI_MODEL_CIRCUIT_OPEN_UNTIL[model_key] = time.time() + 300
-                AI_MODEL_FAILURE_COUNT.pop(model_key, None)
-                log_notification(
-                    "SYSTEM",
-                    f"AI operative {model_key} is unstable. Its circuit breaker opened for 5 minutes.",
-                )
-    return None
+    """Compatibility wrapper; the standalone AIEngine owns provider execution."""
+    outcome = AI_ENGINE.complete(model_name, prompt)
+    return outcome.text
 def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
     """Compatibility wrapper for the old function name."""
     return _call_ai_model(model_name, prompt)
@@ -20230,14 +20060,10 @@ def _call_ai_chain(prompt: str, user_plan: str, uid: Optional[int] = None) -> Tu
     unique = [m for m in dict.fromkeys(chain) if m]
     if not unique:
         return None, None
-    for model in unique:
-        try:
-            response = _call_kaalix_model(model, prompt)
-        except Exception as e:
-            print(f"[ai] {model} routing error: {e}", flush=True)
-            continue
-        if _ai_reply_usable(response):
-            return response, model
+    attempts = AI_ENGINE.complete_chain(unique, prompt, invoke=_call_kaalix_model)
+    for outcome in attempts:
+        if outcome.ok:
+            return outcome.text, outcome.model
     return None, None
 
 def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None) -> Optional[str]:
@@ -20899,6 +20725,39 @@ def _ai_operative_enabled(key: str) -> bool:
     return key in _AI_OPERATIVE_KEYS and bool(
         get_setting(f"ai_operative_{key}_enabled", default_enabled)
     )
+
+def _create_ai_engine() -> AIEngine:
+    """Wire the provider-independent runtime to the current operative catalog."""
+    routes = {
+        key: ModelRoute(endpoint, build_params)
+        for key, (endpoint, build_params) in _OMEGATECH_MODELS.items()
+    }
+    for key, provider_model in _OMEGATECH_SECRET_MODELS.items():
+        routes[key] = ModelRoute(
+            "Secret",
+            lambda text, selected_model=provider_model: {
+                "action": "chat", "model": selected_model, "message": text,
+            },
+        )
+    return AIEngine(
+        session=AI_HTTP,
+        base_urls=_OMEGATECH_HOSTS,
+        routes=routes,
+        context_builder=_build_cipher_ai_context,
+        enabled=lambda key: bool(get_setting("ai_global_enabled", True)) and _ai_operative_enabled(key),
+        logger=lambda message: print(message, flush=True),
+        on_circuit_open=lambda model, seconds: log_notification(
+            "SYSTEM", f"AI operative {model} is unstable. Its circuit breaker opened for {seconds} seconds."
+        ),
+        failure_counts=AI_MODEL_FAILURE_COUNT,
+        circuit_open_until=AI_MODEL_CIRCUIT_OPEN_UNTIL,
+    )
+
+AI_ENGINE = _create_ai_engine()
+# Preserve historical globals for the admin UI and existing test hooks.
+AI_LOCK = AI_ENGINE.lock
+AI_MODEL_FAILURE_COUNT = AI_ENGINE.failure_counts
+AI_MODEL_CIRCUIT_OPEN_UNTIL = AI_ENGINE.circuit_open_until
 
 def ai_label(key: str) -> str:
     return _AI_OPERATIVE_LABELS.get(key, key.upper())
