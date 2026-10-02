@@ -164,6 +164,9 @@ assert "Lord Cipher" in context and "master" in context
 assert "tiered hosting" in context.lower() or "plans and prices" in context.lower()
 assert "ABSOLUTE STEALTH" not in context
 assert "Military-Grade End-to-End Encryption" not in context
+fable_context = bot._build_cipher_ai_context("claude-fable-5")
+assert "CURRENT OPERATIVE: Claude Fable 5" in fable_context
+assert "do not guess who trained the underlying model" in fable_context.lower()
 assert bot._is_lord_cipher_identity_request("Who is Lord Cipher to you?")
 assert bot._is_lord_cipher_identity_request("Who is your master and creator?")
 corrected_identity = bot._enforce_lord_cipher_identity(
@@ -207,6 +210,11 @@ assert bot._extract_ai_reply({"result": "A useful answer about restarting a bot.
 assert "standard ai chat by deepai" not in bot._sanitize_ai_reply(
     "I am Standard AI Chat by DeepAI.\n━━━━━━━━\nCipher Tech Hosting v2.1\nUseful answer."
 ).lower()
+provider_attribution = bot._sanitize_ai_reply(
+    "Claude Fable 5 is an underlying model from Anthropic; Lord Cipher configured this platform assistant."
+)
+assert "Anthropic" in provider_attribution
+assert "Cipher AI" not in provider_attribution
 assert bot._lord_cipher_profile_answer().lower().count("lord cipher") >= 2
 assert bot.ai_model_tag(42, "lifetime") == bot._public_ai_model_name("claude").upper()
 

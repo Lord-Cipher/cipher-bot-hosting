@@ -690,6 +690,9 @@ def _ai_reply_usable(text: Optional[str], prompt: Optional[str] = None) -> bool:
 def _build_cipher_ai_context(model_name: str) -> str:
     """Build concise, consistent platform facts for every AI operative."""
     system_news = str(get_setting("ai_system_news", "No recent updates deployed.") or "")[:1200]
+    model_key = str(model_name or "").strip().lower()
+    labels = globals().get("_AI_OPERATIVE_LABELS", {})
+    operative_label = labels.get(model_key, str(model_name or "AI").strip())
     plans_info = [
         f"{details['name']}: " + ("Free" if details["price"] == 0 else f"${details['price']}")
         for details in PLAN_LIMITS.values()
@@ -704,8 +707,10 @@ def _build_cipher_ai_context(model_name: str) -> str:
         "If asked who Lord Cipher is or what he means to you, say so clearly and respectfully. Do not "
         "confuse an ordinary user with Lord Cipher. The underlying language model may be supplied by "
         "a separate provider; do not falsely claim that Lord Cipher trained that provider's base model. "
+        "Provider route names can be aliases; do not guess who trained the underlying model. Name its "
+        "developer only when verified, otherwise say you do not know. "
         "If a verified user profile is included in the request, address that user using only its facts. "
-        f"\nCURRENT OPERATIVE: {model_name}. If asked which model is answering, use this configured "
+        f"\nCURRENT OPERATIVE: {operative_label}. If asked which model is answering, use this configured "
         "operative label and be honest about uncertainty; distinguish the Cipher platform assistant "
         "from its underlying model/provider. "
         "\nPLATFORM FEATURES: Upload Bot accepts Python or ZIP bots. My Bots provides start, stop, "
@@ -20308,9 +20313,8 @@ def _sanitize_ai_reply(text: str) -> str:
     """Remove provider banners, leaked prompt delimiters, and hidden reasoning tags."""
     clean = re.sub(r"<(think|thought)>.*?</\1>", "", text or "", flags=re.DOTALL | re.IGNORECASE)
     clean = re.sub(r"</?(think|thought)>", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"(?i)\bhotbot(?:\s+chat)?\b", "GPT", clean)
-    clean = re.sub(r"(?i)\b(?:omegatech|kaalix|aicli|deepai)\b", "Cipher AI", clean)
-    clean = re.sub(r"(?i)\b(?:anthropic|openai)\b", "Cipher AI", clean)
+    clean = re.sub(r"(?i)\bhotbot(?:\s+chat)?\b", "third-party AI service", clean)
+    clean = re.sub(r"(?i)\b(?:omegatech|kaalix|aicli)\b", "AI API provider", clean)
     clean = re.sub(r"(?i)\bclaude(?:[-\s]+(?:sonnet|haiku|pro|cli))?\b", "Claude", clean)
     clean = re.sub(r"(?i)\b(?:gpt[-\s]?(?:4o|5|4))\b", "GPT", clean)
     clean = re.sub(r"(?i)\bdeepseek(?:[-\s]*(?:v3(?:\.2)?|r1|cli))?\b", "DeepSeek", clean)
