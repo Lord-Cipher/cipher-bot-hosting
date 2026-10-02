@@ -87,6 +87,8 @@ class AIEngine:
         max_encoded_query: int = 14000,
         failure_threshold: int = 5,
         cooldown_seconds: int = 300,
+        transient_retries: int = 1,
+        retry_backoff_seconds: float = 0.25,
         failure_counts: Optional[Dict[str, int]] = None,
         circuit_open_until: Optional[Dict[str, float]] = None,
     ) -> None:
@@ -100,6 +102,8 @@ class AIEngine:
         self.max_encoded_query = max_encoded_query
         self.failure_threshold = max(1, int(failure_threshold))
         self.cooldown_seconds = max(1, int(cooldown_seconds))
+        self.transient_retries = max(0, int(transient_retries))
+        self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
         self.failure_counts = failure_counts if failure_counts is not None else {}
         self.circuit_open_until = circuit_open_until if circuit_open_until is not None else {}
         self.lock = threading.RLock()
@@ -227,6 +231,19 @@ class AIEngine:
         except (TypeError, ValueError):
             return False
 
+    @staticmethod
+    def _is_transient_provider_error(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        try:
+            code = int(payload.get("statusCode", 0))
+        except (TypeError, ValueError):
+            code = 0
+        if code in {500, 502, 503, 504}:
+            return True
+        message = str(payload.get("error") or payload.get("message") or "")
+        return bool(re.search(r"\bHTTP\s+50[0-4]\b", message, re.IGNORECASE))
+
     def fit_prompt(self, prefix: str, prompt: str, route: ModelRoute) -> Optional[str]:
         """Keep platform instructions intact while fitting the encoded GET query."""
         def encoded_size(full_text: str) -> int:
@@ -322,39 +339,51 @@ class AIEngine:
         last_error = "provider returned no usable text"
         for base_url in self.base_urls:
             url = f"{base_url}/api/ai/{route.endpoint.strip('/')}"
-            try:
-                response = self.session.get(url, params=params, timeout=route.timeout)
-            except Exception as error:
-                last_error = self._safe_exception(error)
-                continue
+            for attempt in range(self.transient_retries + 1):
+                try:
+                    response = self.session.get(url, params=params, timeout=route.timeout)
+                except Exception as error:
+                    last_error = self._safe_exception(error)
+                    break
 
-            status_code = getattr(response, "status_code", None)
-            if status_code in (413, 414, 431):
-                return ModelResult(model, error=f"request too large (HTTP {status_code})")
-            if status_code != 200:
-                last_error = f"HTTP {status_code}" if status_code else "invalid HTTP response"
-                continue
-            try:
-                payload = response.json()
-            except Exception:
-                last_error = "invalid JSON response"
-                continue
-            if self._is_provider_error(payload):
-                last_error = "provider reported an error"
-                continue
+                status_code = getattr(response, "status_code", None)
+                if status_code in (413, 414, 431):
+                    return ModelResult(model, error=f"request too large (HTTP {status_code})")
+                if status_code in (500, 502, 503, 504):
+                    last_error = f"HTTP {status_code}"
+                    if attempt < self.transient_retries:
+                        if self.retry_backoff_seconds:
+                            time.sleep(self.retry_backoff_seconds * (attempt + 1))
+                        continue
+                    break
+                if status_code != 200:
+                    last_error = f"HTTP {status_code}" if status_code else "invalid HTTP response"
+                    break
+                try:
+                    payload = response.json()
+                except Exception:
+                    last_error = "invalid JSON response"
+                    break
+                if self._is_provider_error(payload):
+                    last_error = "provider reported an error"
+                    if self._is_transient_provider_error(payload) and attempt < self.transient_retries:
+                        if self.retry_backoff_seconds:
+                            time.sleep(self.retry_backoff_seconds * (attempt + 1))
+                        continue
+                    break
 
-            text = self.extract_reply(payload)
-            if not text:
-                last_error = "empty provider response"
-                continue
-            if not self.is_usable(text, prompt):
-                last_error = "provider returned a non-answer"
-                continue
+                text = self.extract_reply(payload)
+                if not text:
+                    last_error = "empty provider response"
+                    break
+                if not self.is_usable(text, prompt):
+                    last_error = "provider returned a non-answer"
+                    break
 
-            with self.lock:
-                self.failure_counts.pop(model, None)
-                self.circuit_open_until.pop(model, None)
-            return ModelResult(model, text=text)
+                with self.lock:
+                    self.failure_counts.pop(model, None)
+                    self.circuit_open_until.pop(model, None)
+                return ModelResult(model, text=text)
 
         self._record_failure(model, last_error)
         return ModelResult(model, error=last_error)

@@ -79,6 +79,35 @@ assert attempts[0].text is None and attempts[0].error == "provider returned a no
 assert attempts[1].text == "Here is the requested explanation with useful steps."
 assert [call[0].rsplit("/", 1)[-1] for call in fallback_session.calls] == ["primary", "backup"]
 
+# One transient upstream failure is retried once; the operative stays selected
+# if the same route recovers on that retry.
+retry_results = [
+    FakeResponse(502, {"error": "upstream temporarily unavailable"}),
+    FakeResponse(200, {"result": "recovered on the same model"}),
+]
+retry_session = FakeSession(lambda _url, _params: retry_results.pop(0))
+retry_engine = engine(
+    retry_session,
+    {"primary": route("primary")},
+    retry_backoff_seconds=0,
+)
+retry_result = retry_engine.complete("primary", "Give a short factual answer")
+assert retry_result.text == "recovered on the same model"
+assert len(retry_session.calls) == 2
+assert retry_engine.failure_counts == {}
+
+# Persistent transient errors remain bounded to one retry and then become a
+# normal model failure so the ordered chain can move on.
+persistent_session = FakeSession(lambda *_: FakeResponse(503, {"error": "upstream unavailable"}))
+persistent_engine = engine(
+    persistent_session,
+    {"primary": route("primary")},
+    retry_backoff_seconds=0,
+)
+persistent_result = persistent_engine.complete("primary", "question")
+assert persistent_result.text is None and persistent_result.error == "HTTP 503"
+assert len(persistent_session.calls) == 2
+
 # Circuit breakers are model-scoped; a broken route does not block a healthy one.
 opened = []
 quarantine_session = FakeSession(
