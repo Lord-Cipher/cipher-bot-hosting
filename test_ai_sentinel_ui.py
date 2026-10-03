@@ -25,19 +25,29 @@ bot.db_load_ro = lambda: {"users": users}
 bot.db_save = lambda value: (users.clear(), users.update(value["users"]))
 
 bot_id = "sentinel123"
+other_bot_id = "sentinel456"
 with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
-    source_path = Path(tmp) / "main.py"
+    workspace = Path(tmp) / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "main.py"
     source_path.write_text("print('original')\n", encoding="utf-8")
     sentinel_bot = {
         "id": bot_id,
         "owner": 9001,
         "name": "Test bot",
-        "dir": str(Path(tmp)),
+        "dir": str(workspace),
         "last_error": "NameError: name 'x' is not defined",
         "enc_files": [],
     }
 
-    bot.find_bot = lambda requested: sentinel_bot if requested == bot_id else None
+    other_bot = {
+        "id": other_bot_id,
+        "owner": 9001,
+        "name": "Other test bot",
+        "dir": str(workspace),
+    }
+    bots = {bot_id: sentinel_bot, other_bot_id: other_bot}
+    bot.find_bot = lambda requested: bots.get(requested)
     shown_menus = []
     shown_texts = []
     acknowledgements = []
@@ -60,6 +70,27 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
 
     owner_call = callback(9001)
     user_call = callback(42)
+    routed_callbacks = []
+    original_model_action = bot.action_bot_ai_model_pick
+    original_apply_action = bot.action_bot_apply_fix
+    original_reject_action = bot.action_bot_reject_fix
+    bot.action_bot_ai_model_pick = lambda call, model, callback_bot_id=None: routed_callbacks.append(
+        ("model", callback_bot_id, model)
+    )
+    bot.action_bot_apply_fix = lambda call, bid: routed_callbacks.append(("yes", bid))
+    bot.action_bot_reject_fix = lambda call, bid: routed_callbacks.append(("no", bid))
+    bot._route_callback(owner_call, f"bot_ai_model_{bot_id}_gpt-4o-mini")
+    assert routed_callbacks[-1] == ("model", bot_id, "gpt-4o-mini")
+    bot._route_callback(owner_call, f"bot_ai_model_gpt-4o-mini")
+    assert routed_callbacks[-1] == ("model", None, "gpt-4o-mini")
+    bot._route_callback(owner_call, f"bot_applyfix_{bot_id}")
+    assert routed_callbacks[-1] == ("yes", bot_id)
+    bot._route_callback(owner_call, f"bot_rejectfix_{bot_id}")
+    assert routed_callbacks[-1] == ("no", bot_id)
+    bot.action_bot_ai_model_pick = original_model_action
+    bot.action_bot_apply_fix = original_apply_action
+    bot.action_bot_reject_fix = original_reject_action
+
     pool = bot.get_plan_ai_models("lifetime")
     assert len(pool) > 1
     assert bot._extract_ai_diagnosis_patch("Diagnosis\n```python\nprint('ok')\n```", ".py") == "print('ok')"
@@ -77,18 +108,32 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert "diagnosis" in " ".join(button.text for button in buttons).lower()
     assert all(len(button.callback_data.encode("utf-8")) <= 64 for button in buttons)
     model_buttons = [button for button in buttons if button.callback_data.startswith("bot_ai_model_")]
-    assert {b.callback_data.removeprefix("bot_ai_model_") for b in model_buttons} == set(pool)
-    active_button = next(b for b in model_buttons if b.callback_data == f"bot_ai_model_{pool[0]}")
+    model_prefix = f"bot_ai_model_{bot_id}_"
+    assert all(b.callback_data.startswith(model_prefix) for b in model_buttons)
+    assert {b.callback_data.removeprefix(model_prefix) for b in model_buttons} == set(pool)
+    active_button = next(b for b in model_buttons if b.callback_data == f"{model_prefix}{pool[0]}")
     assert active_button.style == "success"
+    assert active_button.to_dict().get("style") == "success"
     assert next(b for b in buttons if b.callback_data == f"bot_ai_start_{bot_id}").style == "success"
     assert next(b for b in buttons if b.callback_data == f"bot_ai_cancel_{bot_id}").style == "danger"
 
     # A choice is temporary to Sentinel; Start tries that model first without
     # rewriting the user's normal chat-model selection.
     chosen_model = pool[-1]
-    bot.action_bot_ai_model_pick(owner_call, chosen_model)
+    bot.action_bot_ai_model_pick(owner_call, chosen_model, bot_id)
     assert bot.AI_SENTINEL_MODEL_SELECTIONS[9001]["model"] == chosen_model
     assert bot.USER_STATES[9001]["ai_model"] == pool[0]
+
+    # A stale model button from another open bot cannot change this diagnosis.
+    bot.render_ai_sentinel_model_picker(owner_call, other_bot_id)
+    other_selection = copy.deepcopy(bot.AI_SENTINEL_MODEL_SELECTIONS[9001])
+    bot.action_bot_ai_model_pick(owner_call, pool[1], bot_id)
+    assert bot.AI_SENTINEL_MODEL_SELECTIONS[9001] == other_selection
+    bot.action_bot_ai_model_pick(owner_call, pool[1], "")
+    assert bot.AI_SENTINEL_MODEL_SELECTIONS[9001] == other_selection
+    bot.render_ai_sentinel_model_picker(owner_call, bot_id)
+    bot.action_bot_ai_model_pick(owner_call, chosen_model, bot_id)
+
     calls = []
     original_caller = bot._call_kaalix_model
     bot._call_kaalix_model = lambda model, prompt: calls.append(model) or (
@@ -132,6 +177,8 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     no = next(b for b in report_buttons if b.text == "🔴 No")
     assert yes.callback_data == f"bot_applyfix_{bot_id}" and yes.style == "success"
     assert no.callback_data == f"bot_rejectfix_{bot_id}" and no.style == "danger"
+    assert yes.to_dict().get("style") == "success"
+    assert no.to_dict().get("style") == "danger"
 
     # No removes the stored proposal and leaves the source file untouched.
     bot.action_bot_reject_fix(owner_call, bot_id)
@@ -140,12 +187,20 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert shown_texts[-1][2] is not None
 
     # Another user cannot start diagnosis or apply a crafted/stale callback.
+    menus_before_unauthorized_attempt = len(shown_menus)
     bot.render_ai_sentinel_model_picker(user_call, bot_id)
-    assert len(shown_menus) == 2
+    assert len(shown_menus) == menus_before_unauthorized_attempt
     sentinel_bot["pending_patch"] = {"file": "main.py", "code": "print('attacker')"}
     bot.action_bot_apply_fix(user_call, bot_id)
     assert source_path.read_text(encoding="utf-8") == "print('original')\n"
     assert any(kwargs.get("show_alert") for _, kwargs in acknowledgements)
+
+    # Even an authorized stale/corrupt pending patch cannot escape the bot directory.
+    outside_path = Path(tmp) / "outside.py"
+    sentinel_bot["pending_patch"] = {"file": "../outside.py", "code": "print('escape')"}
+    bot.action_bot_apply_fix(owner_call, bot_id)
+    assert not outside_path.exists()
+    assert any("path" in text.lower() and kwargs.get("show_alert") for text, kwargs in acknowledgements)
 
     bot.child_status = original_status
     bot._bot_source_snapshot = original_snapshot

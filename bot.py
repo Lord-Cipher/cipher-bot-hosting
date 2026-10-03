@@ -19381,7 +19381,14 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_dl_"):          action_bot_download(call, data.split("_", 2)[2]); return
     if data.startswith("bot_webhook_"):     render_bot_webhook(call, data.split("_", 2)[2]); return
     if data.startswith("bot_wh_regen_"):   action_bot_webhook_regen(call, data.split("_", 3)[3]); return
-    if data.startswith("bot_ai_model_"):   action_bot_ai_model_pick(call, data[len("bot_ai_model_"):]); return
+    if data.startswith("bot_ai_model_"):
+        payload = data[len("bot_ai_model_"):]
+        callback_bot_id, separator, model = payload.partition("_")
+        if separator:
+            action_bot_ai_model_pick(call, model, callback_bot_id)
+        else:  # Compatibility with model buttons sent before bot-scoped callbacks.
+            action_bot_ai_model_pick(call, payload)
+        return
     if data.startswith("bot_ai_start_"):   action_bot_ai_diagnosis_start(call, data[len("bot_ai_start_"):]); return
     if data.startswith("bot_ai_retry_"):   action_bot_ai_diagnosis_start(call, data[len("bot_ai_retry_"):]); return
     if data.startswith("bot_ai_cancel_"):  action_bot_ai_diagnosis_cancel(call, data[len("bot_ai_cancel_"):]); return
@@ -20538,7 +20545,7 @@ def render_ai_sentinel_model_picker(call: types.CallbackQuery, bot_id: str) -> N
         active = model == selected
         model_buttons.append(Btn(
             f"{'✅ ' if active else '🤖 '}{_public_ai_model_name(model)}",
-            callback_data=f"bot_ai_model_{model}",
+            callback_data=f"bot_ai_model_{bot_id}_{model}",
             style="success" if active else "primary",
         ))
     if model_buttons:
@@ -20556,7 +20563,9 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
     render_ai_sentinel_model_picker(call, bot_id)
 
 
-def action_bot_ai_model_pick(call: types.CallbackQuery, model: str) -> None:
+def action_bot_ai_model_pick(
+    call: types.CallbackQuery, model: str, callback_bot_id: Optional[str] = None,
+) -> None:
     uid = int(call.from_user.id)
     selection = AI_SENTINEL_MODEL_SELECTIONS.get(uid)
     if not selection or time.time() - float(selection.get("updated_at", 0) or 0) > AI_SENTINEL_SELECTION_TTL:
@@ -20564,6 +20573,9 @@ def action_bot_ai_model_pick(call: types.CallbackQuery, model: str) -> None:
         ack(call, "Selection expired. Open AI Diagnose again.", show_alert=True)
         return
     bot_id = str(selection.get("bot_id") or "")
+    if callback_bot_id is not None and callback_bot_id != bot_id:
+        ack(call, "That model button belongs to a different diagnosis.", show_alert=True)
+        return
     if not bot_id or not _get_manageable_ai_sentinel_bot(call, bot_id):
         return
     plan = get_ai_model(uid)
@@ -20825,7 +20837,7 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
     try:
         bot_dir = Path(b["dir"]).resolve()
         target_file = (bot_dir / patch["file"]).resolve()
-        if not target_file.is_relative_to(bot_dir):
+        if target_file == bot_dir or bot_dir not in target_file.parents:
             ack(call, "The pending patch path is invalid.", show_alert=True)
             return
         target_file.parent.mkdir(parents=True, exist_ok=True)
