@@ -139,6 +139,8 @@ AI_MODEL_FAILURE_COUNT: Dict[str, int] = {}
 AI_MODEL_CIRCUIT_OPEN_UNTIL: Dict[str, float] = {}
 AI_LAST_MODEL_USED: Dict[int, str] = {}   # uid -> operative that answered the last request
 AI_LAST_MODEL_FALLBACK: Dict[int, str] = {}   # uid -> operative the user chose when a fallback had to answer instead
+AI_SENTINEL_MODEL_SELECTIONS: Dict[int, Dict[str, Any]] = {}  # uid -> temporary per-diagnosis model choice
+AI_SENTINEL_SELECTION_TTL = 1800
 # One pooled HTTP session for every AI provider call: reusing TCP/TLS
 # connections removes a full handshake (~0.3-1s) from each reply.
 AI_HTTP: requests.Session = requests.Session()
@@ -723,8 +725,9 @@ def _build_cipher_ai_context(model_name: str) -> str:
         "from its underlying model/provider. "
         "\nPLATFORM FEATURES: Upload Bot accepts Python or ZIP bots. My Bots provides start, stop, "
         "restart, logs, and resource telemetry. The AI Suite includes AI Agent chat, AI File Analysis "
-        "for code/project files, AI Sentinel Diagnose for crash logs, and a Security Scanner. Suggested "
-        "code fixes are applied only after the user explicitly chooses Implement Fix. Users choose from "
+        "for code/project files, AI Sentinel Diagnose for crash logs, and a Security Scanner. Users "
+        "choose an eligible AI model before diagnosis. Suggested code fixes are applied only after the "
+        "user explicitly chooses Yes; choosing No leaves their source unchanged. Users choose from "
         "the AI models allowed by their plan. The platform also has tiered hosting plans, referrals, "
         "and encrypted backups. "
         f"\nPLANS AND PRICES: {plans_str}. When a user asks about plans or pricing, use these current "
@@ -19378,8 +19381,13 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_dl_"):          action_bot_download(call, data.split("_", 2)[2]); return
     if data.startswith("bot_webhook_"):     render_bot_webhook(call, data.split("_", 2)[2]); return
     if data.startswith("bot_wh_regen_"):   action_bot_webhook_regen(call, data.split("_", 3)[3]); return
-    if data.startswith("bot_ai_fix_"):     action_bot_ai_fix(call, data.split("_", 3)[3]); return
-    if data.startswith("bot_applyfix_"): action_bot_apply_fix(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_ai_model_"):   action_bot_ai_model_pick(call, data[len("bot_ai_model_"):]); return
+    if data.startswith("bot_ai_start_"):   action_bot_ai_diagnosis_start(call, data[len("bot_ai_start_"):]); return
+    if data.startswith("bot_ai_retry_"):   action_bot_ai_diagnosis_start(call, data[len("bot_ai_retry_"):]); return
+    if data.startswith("bot_ai_cancel_"):  action_bot_ai_diagnosis_cancel(call, data[len("bot_ai_cancel_"):]); return
+    if data.startswith("bot_ai_fix_"):     action_bot_ai_fix(call, data[len("bot_ai_fix_"):]); return
+    if data.startswith("bot_applyfix_"):   action_bot_apply_fix(call, data[len("bot_applyfix_"):]); return
+    if data.startswith("bot_rejectfix_"):  action_bot_reject_fix(call, data[len("bot_rejectfix_"):]); return
     if data.startswith("bot_pip_"):         start_pip_install_flow(call, data.split("_", 2)[2]); return
     if data == "adm_monitor_refresh":       render_adm_live_monitor(call); return
     if data == "adm_monitor_bots":          render_adm_monitor_bots(call); return
@@ -20053,7 +20061,12 @@ def ai_model_tag(uid: int, plan: str) -> str:
     model = AI_LAST_MODEL_USED.get(uid) or _ai_selected_model(uid, plan) or "claude"
     return _public_ai_model_name(model).upper()
 
-def _call_ai_chain(prompt: str, user_plan: str, uid: Optional[int] = None) -> Tuple[Optional[str], Optional[str]]:
+def _call_ai_chain(
+    prompt: str,
+    user_plan: str,
+    uid: Optional[int] = None,
+    preferred_model: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
     """Try the selected operative first, then eligible fallbacks in order.
 
     Racing providers made the selected model effectively random and sent
@@ -20063,9 +20076,12 @@ def _call_ai_chain(prompt: str, user_plan: str, uid: Optional[int] = None) -> Tu
     """
     plan_pool = get_plan_ai_models(user_plan)
     chain = get_user_ai_models(uid, user_plan) if uid is not None else list(plan_pool)
+    preferred = str(preferred_model or "").strip().lower()
+    if preferred and preferred in plan_pool:
+        chain = [preferred] + [m for m in chain if m != preferred]
     if uid is not None:
         session_pick = str((USER_STATES.get(uid) or {}).get("ai_model") or "").lower()
-        if session_pick and session_pick in plan_pool:
+        if not preferred and session_pick and session_pick in plan_pool:
             chain = [session_pick] + [m for m in chain if m != session_pick]
         # A user-selected model changes priority; other assigned models remain
         # eligible fallbacks in the administrator-configured order.
@@ -20079,7 +20095,12 @@ def _call_ai_chain(prompt: str, user_plan: str, uid: Optional[int] = None) -> Tu
             return outcome.text, outcome.model
     return None, None
 
-def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None) -> Optional[str]:
+def _call_ai_api(
+    prompt: str,
+    user_plan: str = "free",
+    uid: Optional[int] = None,
+    preferred_model: Optional[str] = None,
+) -> Optional[str]:
     """Tiered AI call system routing through the operatives configured for the plan / chosen by the user."""
     if not get_setting("ai_global_enabled", True):
         return None
@@ -20090,7 +20111,9 @@ def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None
     if uid is not None:
         # Record the expected operative even for instant local answers so the
         # reply badge always shows the model the user selected.
-        wanted = _ai_selected_model(uid, user_plan)
+        plan_pool = get_plan_ai_models(user_plan)
+        preferred = str(preferred_model or "").strip().lower()
+        wanted = preferred if preferred in plan_pool else _ai_selected_model(uid, user_plan)
         if wanted:
             AI_LAST_MODEL_USED[uid] = wanted
         AI_LAST_MODEL_FALLBACK.pop(uid, None)
@@ -20111,12 +20134,13 @@ def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None
             "analysis, and Cipher Tech Hosting. What would you like to work on?"
         )
 
-    res, used = _call_ai_chain(prompt, user_plan, uid)
+    res, used = _call_ai_chain(prompt, user_plan, uid, preferred_model=preferred_model)
     if uid is not None:
         AI_LAST_MODEL_FALLBACK.pop(uid, None)
         if res and used:
             AI_LAST_MODEL_USED[uid] = used
-            wanted = _ai_selected_model(uid, user_plan)
+            preferred = str(preferred_model or "").strip().lower()
+            wanted = preferred if preferred in get_plan_ai_models(user_plan) else _ai_selected_model(uid, user_plan)
             if wanted and wanted != used:
                 AI_LAST_MODEL_FALLBACK[uid] = wanted
     if res:
@@ -20457,11 +20481,131 @@ def handle_ai_chat_message(m: types.Message) -> None:
         bot.edit_message_text(f"❌ {sc('Connection to AI uplink lost. Falling back to manual support')}.", 
                               m.chat.id, loading_msg.message_id, parse_mode="HTML")
 
-def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
-    """Self-Healing AI Sentinel: analyzes crash logs, proposes a patch, and asks for explicit user permission before applying."""
+def _get_manageable_ai_sentinel_bot(call: types.CallbackQuery, bot_id: str) -> Optional[Dict[str, Any]]:
     b = find_bot(bot_id)
-    if not b: ack(call, "Bot not found"); return
-    
+    if not b:
+        ack(call, "Bot not found.", show_alert=True)
+        return None
+    if str(b.get("owner")) != str(call.from_user.id) and not is_admin(call.from_user.id):
+        ack(call, "You cannot manage this bot.", show_alert=True)
+        return None
+    return b
+
+
+def render_ai_sentinel_model_picker(call: types.CallbackQuery, bot_id: str) -> None:
+    """Let the bot owner choose a plan-eligible model before diagnosis."""
+    b = _get_manageable_ai_sentinel_bot(call, bot_id)
+    if not b:
+        return
+    if not get_setting("ai_global_enabled", True):
+        return _ai_fix_failed(call, bot_id, "AI Sentinel is currently switched off by the administrator.")
+
+    uid = int(call.from_user.id)
+    plan = get_ai_model(uid)
+    pool = get_plan_ai_models(plan)
+    if not pool:
+        return _ai_fix_failed(call, bot_id, "No AI models are currently available on your plan.")
+
+    now = time.time()
+    for stale_uid, selection in list(AI_SENTINEL_MODEL_SELECTIONS.items()):
+        try:
+            if now - float(selection.get("updated_at", 0)) > AI_SENTINEL_SELECTION_TTL:
+                AI_SENTINEL_MODEL_SELECTIONS.pop(stale_uid, None)
+        except Exception:
+            AI_SENTINEL_MODEL_SELECTIONS.pop(stale_uid, None)
+
+    selection = AI_SENTINEL_MODEL_SELECTIONS.get(uid) or {}
+    selected = str(selection.get("model") or "").lower()
+    if (str(selection.get("bot_id") or "") != str(bot_id)
+            or selected not in pool
+            or now - float(selection.get("updated_at", 0) or 0) > AI_SENTINEL_SELECTION_TTL):
+        selected = _ai_selected_model(uid, plan) or pool[0]
+    AI_SENTINEL_MODEL_SELECTIONS[uid] = {
+        "bot_id": str(bot_id), "model": selected, "updated_at": now,
+    }
+
+    plan_name = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"]).get("name", plan.title())
+    cap = (
+        f"<b>🛡️ {sc('AI Sentinel Diagnosis')}</b>\n{G['div_eq']}\n"
+        f"{bullet('Bot', esc(str(b.get('name') or bot_id)))}\n"
+        f"{bullet('Plan', esc(plan_name))}\n\n"
+        f"{sc('Choose the AI model to try first, then press Start Diagnosis. If it fails or returns no usable diagnosis, eligible models on your plan may be tried as fallbacks.')}\n"
+        f"{G['div']}{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    model_buttons = []
+    for model in pool:
+        active = model == selected
+        model_buttons.append(Btn(
+            f"{'✅ ' if active else '🤖 '}{_public_ai_model_name(model)}",
+            callback_data=f"bot_ai_model_{model}",
+            style="success" if active else "primary",
+        ))
+    if model_buttons:
+        kb.add(*model_buttons)
+    kb.add(
+        Btn("▶️ Start Diagnosis", callback_data=f"bot_ai_start_{bot_id}", style="success"),
+        Btn("🔴 Cancel", callback_data=f"bot_ai_cancel_{bot_id}", style="danger"),
+    )
+    ack(call)
+    show_menu(call.message.chat.id, PHOTOS["bot"], cap, kb, call=call)
+
+
+def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
+    """Open the model picker; diagnosis does not begin until Start is pressed."""
+    render_ai_sentinel_model_picker(call, bot_id)
+
+
+def action_bot_ai_model_pick(call: types.CallbackQuery, model: str) -> None:
+    uid = int(call.from_user.id)
+    selection = AI_SENTINEL_MODEL_SELECTIONS.get(uid)
+    if not selection or time.time() - float(selection.get("updated_at", 0) or 0) > AI_SENTINEL_SELECTION_TTL:
+        AI_SENTINEL_MODEL_SELECTIONS.pop(uid, None)
+        ack(call, "Selection expired. Open AI Diagnose again.", show_alert=True)
+        return
+    bot_id = str(selection.get("bot_id") or "")
+    if not bot_id or not _get_manageable_ai_sentinel_bot(call, bot_id):
+        return
+    plan = get_ai_model(uid)
+    if model not in get_plan_ai_models(plan):
+        ack(call, "That model is not available on your plan.", show_alert=True)
+        return
+    selection.update({"model": model, "updated_at": time.time()})
+    render_ai_sentinel_model_picker(call, bot_id)
+
+
+def action_bot_ai_diagnosis_start(call: types.CallbackQuery, bot_id: str) -> None:
+    uid = int(call.from_user.id)
+    if not _get_manageable_ai_sentinel_bot(call, bot_id):
+        return
+    selection = AI_SENTINEL_MODEL_SELECTIONS.get(uid)
+    if (not selection or str(selection.get("bot_id") or "") != str(bot_id)
+            or time.time() - float(selection.get("updated_at", 0) or 0) > AI_SENTINEL_SELECTION_TTL):
+        AI_SENTINEL_MODEL_SELECTIONS.pop(uid, None)
+        return render_ai_sentinel_model_picker(call, bot_id)
+    plan = get_ai_model(uid)
+    model = str(selection.get("model") or "").lower()
+    if model not in get_plan_ai_models(plan):
+        AI_SENTINEL_MODEL_SELECTIONS.pop(uid, None)
+        return render_ai_sentinel_model_picker(call, bot_id)
+    _run_bot_ai_diagnosis(call, bot_id, model)
+
+
+def action_bot_ai_diagnosis_cancel(call: types.CallbackQuery, bot_id: str) -> None:
+    if not _get_manageable_ai_sentinel_bot(call, bot_id):
+        return
+    selection = AI_SENTINEL_MODEL_SELECTIONS.get(int(call.from_user.id)) or {}
+    if str(selection.get("bot_id") or "") == str(bot_id):
+        AI_SENTINEL_MODEL_SELECTIONS.pop(int(call.from_user.id), None)
+    ack(call, "Diagnosis cancelled.")
+    render_bot_view(call, bot_id)
+
+
+def _run_bot_ai_diagnosis(call: types.CallbackQuery, bot_id: str, selected_model: str) -> None:
+    """Analyze the bot using the selected model first, then eligible fallbacks."""
+    b = _get_manageable_ai_sentinel_bot(call, bot_id)
+    if not b:
+        return
     st = child_status(bot_id, b)
     logs = st.get("logs", [])
     last_error = (b.get("last_error") or "").strip()
@@ -20475,6 +20619,14 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
         if not get_setting("ai_global_enabled", True):
             _ai_fix_failed(call, bot_id, "AI Sentinel is currently switched off by the administrator.")
             return
+
+        plan = get_ai_model(call.from_user.id)
+        if selected_model not in get_plan_ai_models(plan):
+            AI_SENTINEL_MODEL_SELECTIONS.pop(int(call.from_user.id), None)
+            return render_ai_sentinel_model_picker(call, bot_id)
+        # A fresh diagnosis invalidates any older unaccepted proposal.
+        if b.pop("pending_patch", None) is not None:
+            save_bot(b)
 
         # Read bot source code files for context
         bot_dir = Path(b["dir"])
@@ -20496,21 +20648,25 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
             "Analyze the following crash logs and source code of a hosted Telegram bot. "
             "Identify the bug causing the crash and provide:\n"
             "1. A clear, elite diagnosis.\n"
-            "2. The exact corrected complete Python code for the primary file (or the fixed section), wrapped in ```python ... ``` block.\n"
+            "2. If you can safely fix it, provide the COMPLETE corrected contents of the primary source file in one fenced code block labeled python, javascript, or typescript as appropriate. "
+            "Never provide only a section or sample when proposing an automated patch; if you cannot determine a safe complete replacement, omit the code block and explain why.\n"
             "CRITICAL: Do not apply changes automatically. We will ask the user for permission.\n\n"
             f"ERROR CONTEXT:\n{error_context}\n\nSOURCE FILES:\n{source_files_summary[:4000]}"
         )
         
-        plan = get_ai_model(call.from_user.id)
-        ai_resp = _call_ai_api(prompt, user_plan=plan, uid=call.from_user.id)
+        ai_resp = _call_ai_api(
+            prompt, user_plan=plan, uid=call.from_user.id, preferred_model=selected_model,
+        )
         
         if ai_resp:
             primary_model = ai_model_tag(call.from_user.id, plan)
             clean_resp = _sanitize_ai_reply(ai_resp)
             
-            # Extract code block if present
-            code_match = re.search(r'```(?:python)?\s*(.*?)```', clean_resp, re.DOTALL)
-            extracted_code = code_match.group(1).strip() if code_match else ""
+            # Accept a complete source block for the file's language; never
+            # treat an unlabeled snippet or unrelated code sample as a patch.
+            extracted_code = _extract_ai_diagnosis_patch(
+                clean_resp, target_file_path.suffix if target_file_path else "",
+            )
             
             # Store proposed fix in bot doc temporarily pending user permission
             if extracted_code and target_file_path:
@@ -20535,22 +20691,37 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
                 ])
                 del session[:-(AI_MEMORY_TURNS * 2)]
 
+            patch_preview = ""
+            consent_text = "No complete safe patch was prepared; your source has not been changed."
+            if extracted_code and target_file_path:
+                rel_file = str(target_file_path.relative_to(bot_dir))
+                preview = extracted_code[:1200]
+                if len(extracted_code) > len(preview):
+                    preview += "\n... (preview truncated; the complete file will be used if accepted)"
+                patch_preview = (
+                    f"\n<b>{sc('Proposed replacement')}:</b> <code>{esc(rel_file)}</code>\n"
+                    f"<pre>{esc(preview)}</pre>\n"
+                )
+                consent_text = "Review the patch preview. Yes replaces the file and restarts the bot; No discards it without changing your source."
+
             final_text = (
                 f"🛡️ <b>{sc('AI Sentinel — Self-Healing Report')}</b> (<code>{primary_model.upper()}</code>)\n"
                 f"{G['div_eq']}\n"
                 f"🤖 <b>{sc('Diagnosis')}</b>:\n"
                 f"<blockquote>{esc(diagnosis_text)}</blockquote>\n"
+                f"{patch_preview}"
                 f"{G['div']}\n"
-                f"⚠️ <i>{sc('AI has prepared a patch but requires your explicit permission to apply it and restart the bot')}.</i>{FOOTER}"
+                f"⚠️ <i>{sc(consent_text)}</i>{FOOTER}"
             )
             
             kb = types.InlineKeyboardMarkup(row_width=2)
             if extracted_code and target_file_path:
-                kb.add(Btn(f"{G['ok']}  Iᴍᴘʟᴇᴍᴇɴᴛ Fɪx", callback_data=f"bot_applyfix_{bot_id}", style="success"),
-                       Btn(f"{G['no']}  Dɪꜱᴍɪꜱꜱ",       callback_data=f"bot_view_{bot_id}",     style="danger"))
+                kb.add(Btn("🟢 Yes", callback_data=f"bot_applyfix_{bot_id}", style="success"),
+                       Btn("🔴 No",  callback_data=f"bot_rejectfix_{bot_id}", style="danger"))
             else:
                 kb.add(Btn(f"{G['back']}  Bᴏᴛ", callback_data=f"bot_view_{bot_id}", style="danger"))
 
+            AI_SENTINEL_MODEL_SELECTIONS.pop(int(call.from_user.id), None)
             show_text(call.message.chat.id, final_text, kb, call=call)
         else:
             _ai_fix_failed(call, bot_id,
@@ -20564,8 +20735,9 @@ def action_bot_ai_fix(call: types.CallbackQuery, bot_id: str) -> None:
 def _ai_fix_failed(call: types.CallbackQuery, bot_id: str, reason: str) -> None:
     """Replace the diagnosis progress bar with a visible error + way back."""
     kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(Btn(f"{G['refresh']}  Rᴇᴛʀʏ", callback_data=f"bot_ai_fix_{bot_id}", style="primary"),
-           Btn(f"{G['back']}  Bᴏᴛ", callback_data=f"bot_view_{bot_id}", style="danger"))
+    kb.add(Btn("🔄 Retry", callback_data=f"bot_ai_retry_{bot_id}", style="primary"),
+           Btn("🤖 Choose model", callback_data=f"bot_ai_fix_{bot_id}", style="success"))
+    kb.add(Btn(f"{G['back']}  Bᴏᴛ", callback_data=f"bot_view_{bot_id}", style="danger"))
     text = (
         f"🛡️ <b>{sc('AI Sentinel')}</b>\n{G['div_eq']}\n"
         f"{G['no']} <b>{sc('Diagnosis unavailable')}</b>\n"
@@ -20618,10 +20790,31 @@ def _bot_source_snapshot(b: Dict[str, Any]) -> List[Tuple[str, str]]:
             out.append((rel, content)); seen.add(rel)
     return out
 
+
+def _extract_ai_diagnosis_patch(text: str, file_suffix: str = "") -> str:
+    """Extract only a language-tagged source block suitable for a full-file patch."""
+    match = re.search(
+        r"```(python3?|py|javascript|js|typescript|ts|tsx)\b[ \t]*\r?\n(.*?)```",
+        str(text or ""),
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return ""
+    language = match.group(1).lower()
+    suffix = str(file_suffix or "").lower()
+    if suffix in {".py", ".pyw"} and language not in {"python", "python3", "py"}:
+        return ""
+    if suffix in {".js", ".mjs", ".cjs"} and language not in {"javascript", "js"}:
+        return ""
+    if suffix in {".ts", ".tsx"} and language not in {"typescript", "ts", "tsx"}:
+        return ""
+    return match.group(2).strip()
+
 def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
     """Applies the AI-suggested patch only after explicit user confirmation."""
-    b = find_bot(bot_id)
-    if not b: ack(call, "Bot not found"); return
+    b = _get_manageable_ai_sentinel_bot(call, bot_id)
+    if not b:
+        return
     
     patch = b.get("pending_patch")
     if not patch or not patch.get("code") or not patch.get("file"):
@@ -20630,8 +20823,11 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
     loading(call, "Applying patch and restarting bot...")
     
     try:
-        bot_dir = Path(b["dir"])
-        target_file = bot_dir / patch["file"]
+        bot_dir = Path(b["dir"]).resolve()
+        target_file = (bot_dir / patch["file"]).resolve()
+        if not target_file.is_relative_to(bot_dir):
+            ack(call, "The pending patch path is invalid.", show_alert=True)
+            return
         target_file.parent.mkdir(parents=True, exist_ok=True)
         
         # Backup original file before patching
@@ -20665,6 +20861,7 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
         # Clear pending patch
         b.pop("pending_patch", None)
         save_bot(b)
+        AI_SENTINEL_MODEL_SELECTIONS.pop(int(call.from_user.id), None)
         
         # Restart child process
         stop_child(bot_id, manual=True)
@@ -20680,6 +20877,28 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
     except Exception as e:
         print(f"[apply_fix] error: {e}", flush=True)
         ack(call, f"Failed to apply patch: {e}")
+
+
+def action_bot_reject_fix(call: types.CallbackQuery, bot_id: str) -> None:
+    """Discard the proposed code without modifying or restarting the bot."""
+    b = _get_manageable_ai_sentinel_bot(call, bot_id)
+    if not b:
+        return
+    if not b.get("pending_patch"):
+        ack(call, "No pending patch to reject.", show_alert=True)
+        return
+    b.pop("pending_patch", None)
+    save_bot(b)
+    AI_SENTINEL_MODEL_SELECTIONS.pop(int(call.from_user.id), None)
+    ack(call, "No changes made; proposed fix discarded.")
+    kb = types.InlineKeyboardMarkup()
+    kb.add(Btn(f"{G['back']}  Bᴏᴛ", callback_data=f"bot_view_{bot_id}", style="danger"))
+    text = (
+        f"<b>🛡️ {sc('AI Sentinel')}</b>\n{G['div_eq']}\n"
+        f"🔴 <b>{sc('Fix declined')}</b>\n"
+        f"{sc('The proposed patch was discarded. Your source code was not changed.')}{FOOTER}"
+    )
+    show_text(call.message.chat.id, text, kb, call=call)
 
 _AI_OPERATIVE_LABELS = {
     # Legacy OmegaTech endpoints confirmed usable in live checks.

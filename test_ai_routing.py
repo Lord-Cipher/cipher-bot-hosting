@@ -183,7 +183,7 @@ assert "master" in corrected_identity.lower()
 assert "not my creator" not in corrected_identity.lower()
 
 chain_calls = []
-def fake_ai_chain(prompt, plan, uid=None):
+def fake_ai_chain(prompt, plan, uid=None, preferred_model=None):
     chain_calls.append((prompt, plan, uid))
     return "I am a general assistant.", "claude"
 bot._call_ai_chain = fake_ai_chain
