@@ -83,6 +83,25 @@ def decrypt_secret(value: str, key: str) -> str:
     return Fernet(key.encode()).decrypt(value.encode()).decode()
 
 
+def load_ssh_private_key(secret: str):
+    """Parse an unencrypted RSA, ECDSA, or Ed25519 key accepted by Paramiko."""
+    import io
+    import paramiko
+
+    last_error: Optional[Exception] = None
+    for class_name in ("Ed25519Key", "ECDSAKey", "RSAKey"):
+        key_class = getattr(paramiko, class_name, None)
+        if key_class is None:
+            continue
+        try:
+            return key_class.from_private_key(io.StringIO(secret))
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(
+        "Unsupported or encrypted private key; use an unencrypted Ed25519, ECDSA, or RSA key."
+    ) from last_error
+
+
 def local_capabilities() -> Dict[str, Any]:
     usage = shutil.disk_usage(Path.cwd())
     return {
@@ -117,22 +136,25 @@ def test_ssh_node(node: Dict[str, Any], secret: str, timeout: int = 8) -> Dict[s
         return {"state": "NEEDS CREDENTIALS", "reason": "SSH host and username required"}
     if not secret:
         return {"state": "NEEDS CREDENTIALS", "reason": "Encrypted SSH credential required"}
-    client = paramiko.SSHClient(); client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    client = paramiko.SSHClient()
     try:
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
         kwargs = {"hostname": host, "port": int(node.get("ssh_port", 22)), "username": node["username"], "timeout": timeout, "banner_timeout": timeout, "auth_timeout": timeout}
         if node.get("auth_method", "key") == "password":
             kwargs["password"] = secret
         else:
             try:
-                key = paramiko.RSAKey.from_private_key(__import__("io").StringIO(secret))
+                key = load_ssh_private_key(secret)
             except Exception as exc:
                 return {"state": "NEEDS CREDENTIALS", "reason": f"Invalid private key: {exc}"}
             kwargs["pkey"] = key
         client.connect(**kwargs)
-        command = "uname -s; uname -m; getconf _NPROCESSORS_ONLN; awk '/MemTotal/ {print $2}' /proc/meminfo; df -Pk / | tail -1; command -v docker || true; python3 --version 2>/dev/null || true; node --version 2>/dev/null || true"
+        command = "uname -s; uname -m; getconf _NPROCESSORS_ONLN; awk '/MemTotal/ {print $2}' /proc/meminfo; df -Pk / | tail -1; docker info --format '{{.ServerVersion}}' 2>/dev/null || echo ''; python3 --version 2>/dev/null || echo ''; node --version 2>/dev/null || echo ''"
         _, stdout, _ = client.exec_command(command, timeout=timeout)
         lines = [line.strip() for line in stdout.read().decode("utf-8", "replace").splitlines()]
-        return {"state": "AUTHENTICATED", "capabilities": {"os": lines[0] if len(lines)>0 else "", "architecture": lines[1] if len(lines)>1 else "", "cpuCores": lines[2] if len(lines)>2 else "", "ramKb": lines[3] if len(lines)>3 else "", "disk": lines[4] if len(lines)>4 else "", "docker": bool(lines[5]) if len(lines)>5 else False, "python": lines[6] if len(lines)>6 else "", "node": lines[7] if len(lines)>7 else ""}}
+        docker_version = lines[5] if len(lines) > 5 else ""
+        return {"state": "AUTHENTICATED", "capabilities": {"os": lines[0] if len(lines)>0 else "", "architecture": lines[1] if len(lines)>1 else "", "cpuCores": lines[2] if len(lines)>2 else "", "ramKb": lines[3] if len(lines)>3 else "", "disk": lines[4] if len(lines)>4 else "", "docker": bool(docker_version), "dockerVersion": docker_version, "python": lines[6] if len(lines)>6 else "", "node": lines[7] if len(lines)>7 else ""}}
     except (paramiko.AuthenticationException, paramiko.BadAuthenticationType):
         return {"state": "AUTHENTICATION FAILED", "reason": "SSH authentication failed"}
     except (paramiko.SSHException, OSError, socket.timeout) as exc:

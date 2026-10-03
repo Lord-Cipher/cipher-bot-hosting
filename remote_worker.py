@@ -4,6 +4,7 @@ import base64, os, posixpath, shlex, time
 from pathlib import Path
 from typing import Any, Dict
 from sandbox_runtime import limits_for_plan
+from node_manager import load_ssh_private_key
 
 
 def _client(node: Dict[str, Any], secret: str, timeout: int = 10):
@@ -15,7 +16,7 @@ def _client(node: Dict[str, Any], secret: str, timeout: int = 10):
     if node.get("auth_method", "key") == "password":
         kwargs["password"] = secret
     else:
-        kwargs["pkey"] = paramiko.RSAKey.from_private_key(__import__("io").StringIO(secret))
+        kwargs["pkey"] = load_ssh_private_key(secret)
     c.connect(**kwargs); return c
 
 
@@ -23,6 +24,39 @@ def _run(c, command: str, timeout: int = 60):
     _, stdout, stderr = c.exec_command(command, timeout=timeout)
     out, err = stdout.read().decode("utf-8", "replace"), stderr.read().decode("utf-8", "replace")
     return stdout.channel.recv_exit_status(), out, err
+
+
+def _dependency_install_command(remote: str, runtime: str, plan: str, uid: int, gid: int) -> str:
+    """Build a network-enabled but otherwise constrained dependency-install job."""
+    lim = limits_for_plan(plan)
+    if runtime == "node":
+        image = "node:22-slim"
+        script = (
+            "mkdir -p /app/.deps/node_modules && "
+            "if [ -f /app/package.json ]; then "
+            "cp /app/package.json /app/.deps/package.json && "
+            "if [ -f /app/package-lock.json ]; then cp /app/package-lock.json /app/.deps/package-lock.json; fi && "
+            "cd /app/.deps && npm install --ignore-scripts --no-audit --no-fund; "
+            "fi"
+        )
+    else:
+        image = "python:3.11-slim"
+        script = (
+            "if [ -f /app/requirements.txt ]; then "
+            "python -m pip install --disable-pip-version-check --no-cache-dir --no-input "
+            "--target /app/.deps -r /app/requirements.txt; fi"
+        )
+    args = [
+        "docker", "run", "--rm", "--network", "bridge",
+        "--cpus", lim["cpus"], "--memory", lim["memory"],
+        "--pids-limit", str(lim["pids"]), "--read-only", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true", "--user", f"{uid}:{gid}",
+        "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+        "-e", "PIP_NO_CACHE_DIR=1", "-e", "NPM_CONFIG_CACHE=/tmp/npm-cache",
+        "-v", f"{remote}:/app:ro", "-v", f"{remote}/.deps:/app/.deps:rw",
+        image, "sh", "-lc", script,
+    ]
+    return " ".join(shlex.quote(arg) for arg in args)
 
 
 class RemoteHandle:
@@ -100,7 +134,7 @@ def _cleanup(c, remote: str, container: str) -> None:
     _run(c, f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true; rm -rf -- {shlex.quote(remote)}", timeout=30)
 
 
-def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path, runtime: str, entry: str, plan: str, env: Dict[str, str]) -> Dict[str, Any]:
+def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path, runtime: str, entry: str, plan: str, env: Dict[str, str], network: bool = False) -> Dict[str, Any]:
     if not node.get("enabled") or node.get("status") not in {"ONLINE", "AUTHENTICATED"}:
         return {"ok": False, "error": "Node is disabled or unauthenticated."}
     if not secret:
@@ -120,7 +154,14 @@ def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path
             except Exception: pass
             c = None
         run_remote = (lambda command, timeout=60: _run(c, command, timeout=timeout)) if c else (lambda command, timeout=60: _run_fresh(node, secret, command, timeout=timeout))
-        run_remote(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true; rm -rf -- {shlex.quote(remote)}; mkdir -p {shlex.quote(remote)}/.deps {shlex.quote(remote)}/.tmp_run && chmod 700 {shlex.quote(remote)}")
+        identity_code, identity_out, _ = run_remote("id -u && id -g", timeout=10)
+        identity = identity_out.strip().splitlines()
+        if identity_code or len(identity) < 2 or not all(value.isdigit() for value in identity[:2]):
+            return {"ok": False, "error": "Could not determine the remote SSH user's numeric UID/GID."}
+        uid, gid = int(identity[0]), int(identity[1])
+        if uid == 0:
+            return {"ok": False, "error": "Use a non-root SSH account with Docker access for Sandbox isolation."}
+        run_remote(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true; rm -rf -- {shlex.quote(remote)}; mkdir -p {shlex.quote(remote)}/.deps && chmod 700 {shlex.quote(remote)}")
         root = Path(local_dir).resolve()
         for src in root.rglob("*"):
             if not src.is_file() or any(x in src.parts for x in {".git", "__pycache__", ".deps", ".tmp_run", ".cipher-runtime.env"}): continue
@@ -141,8 +182,18 @@ def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path
             _put_via_exec(node, secret, env_path, env_payload)
             run_remote(f"chmod 600 {shlex.quote(env_path)}")
         lim = limits_for_plan(plan)
+        dep_cmd = _dependency_install_command(remote, runtime, plan, uid, gid)
+        dep_code, _, dep_err = run_remote(dep_cmd, timeout=900)
+        if dep_code:
+            return {"ok": False, "error": dep_err[-300:] or "Remote dependency installation failed."}
         image_cmd = "node:22-slim node" if runtime == "node" else "python:3.11-slim python"
-        cmd = f"docker run -d --rm --name {shlex.quote(container)} --cpus {shlex.quote(lim['cpus'])} --memory {shlex.quote(lim['memory'])} --pids-limit {int(lim['pids'])} --read-only --cap-drop ALL --security-opt no-new-privileges:true --user 65532:65532 --network none --env-file {shlex.quote(env_path)} -v {shlex.quote(remote)}:/app:ro -v {shlex.quote(remote+'/.deps')}:/app/.deps:rw -v {shlex.quote(remote+'/.tmp_run')}:/app/.tmp_run:rw -w /app {image_cmd} {shlex.quote(entry)}"
+        network_mode = "bridge" if network else "none"
+        node_modules_mount = (
+            f" -v {shlex.quote(remote+'/.deps/node_modules')}:/app/node_modules:ro"
+            if runtime == "node" else ""
+        )
+        python_path = " -e PYTHONPATH=/app/.deps" if runtime == "python" else ""
+        cmd = f"docker run -d --rm --name {shlex.quote(container)} --cpus {shlex.quote(lim['cpus'])} --memory {shlex.quote(lim['memory'])} --pids-limit {int(lim['pids'])} --read-only --cap-drop ALL --security-opt no-new-privileges:true --user {uid}:{gid} --network {network_mode} --env-file {shlex.quote(env_path)} -v {shlex.quote(remote)}:/app:ro -v {shlex.quote(remote+'/.deps')}:/app/.deps:ro{node_modules_mount} --tmpfs /app/.tmp_run:rw,noexec,nosuid,size=64m,uid={uid},gid={gid} --tmpfs /tmp:rw,noexec,nosuid,size=64m{python_path} -w /app {image_cmd} {shlex.quote(entry)}"
         code, out, err = run_remote(cmd)
         if code or not out.strip():
             return {"ok": False, "error": err[-300:] or "Docker startup failed."}

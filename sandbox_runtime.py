@@ -31,13 +31,27 @@ def install_dependencies_command(workdir: str | Path, plan: str = "free", runtim
     root = Path(workdir).resolve()
     lim = limits_for_plan(plan)
     if runtime == "node":
-        image, script = "node:22-slim", "npm install --ignore-scripts --prefix /app"
+        image = "node:22-slim"
+        script = (
+            "mkdir -p /app/.deps/node_modules && "
+            "if [ -f /app/package.json ]; then "
+            "cp /app/package.json /app/.deps/package.json && "
+            "if [ -f /app/package-lock.json ]; then cp /app/package-lock.json /app/.deps/package-lock.json; fi && "
+            "cd /app/.deps && npm install --ignore-scripts --no-audit --no-fund; fi"
+        )
     elif runtime == "python":
-        image, script = "python:3.11-slim", "python -m pip install --disable-pip-version-check --no-input --target /app/.deps -r /app/requirements.txt"
+        image = "python:3.11-slim"
+        script = (
+            "if [ -f /app/requirements.txt ]; then "
+            "python -m pip install --disable-pip-version-check --no-cache-dir --no-input "
+            "--target /app/.deps -r /app/requirements.txt; fi"
+        )
     else:
         raise ValueError("unsupported runtime")
     deps = root / ".deps"; deps.mkdir(parents=True, exist_ok=True)
-    return ["docker", "run", "--rm", "--network", "bridge", "--cpus", lim["cpus"], "--memory", lim["memory"], "--pids-limit", str(lim["pids"]), "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "65532:65532", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "-v", f"{root}:/app:ro", "-v", f"{deps}:/app/.deps:rw", image, "sh", "-lc", script]
+    deps_stat = deps.stat()
+    install_user = f"{deps_stat.st_uid}:{deps_stat.st_gid}"
+    return ["docker", "run", "--rm", "--network", "bridge", "--cpus", lim["cpus"], "--memory", lim["memory"], "--pids-limit", str(lim["pids"]), "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", install_user, "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "-e", "PIP_NO_CACHE_DIR=1", "-e", "NPM_CONFIG_CACHE=/tmp/npm-cache", "-v", f"{root}:/app:ro", "-v", f"{deps}:/app/.deps:rw", image, "sh", "-lc", script]
 
 
 def build_run_command(bot_id: str, workdir: str | Path, entrypoint: str, plan: str = "free", network: bool = False, runtime: str = "python", env_file: str | Path | None = None) -> list[str]:
@@ -59,7 +73,14 @@ def build_run_command(bot_id: str, workdir: str | Path, entrypoint: str, plan: s
     if runtime not in {"python", "node"}:
         raise ValueError("unsupported runtime")
     image, executable = ("node:22-slim", "node") if runtime == "node" else ("python:3.11-slim", "python")
-    tmp = root / ".tmp_run"; tmp.mkdir(parents=True, exist_ok=True)
     deps = root / ".deps"; deps.mkdir(parents=True, exist_ok=True)
-    cmd += ["-v", f"{root}:/app:ro", "-v", f"{deps}:/app/.deps:rw", "-v", f"{tmp}:/app/.tmp_run:rw", "-w", "/app", image, executable, str(entry)]
+    cmd += ["-v", f"{root}:/app:ro", "-v", f"{deps}:/app/.deps:ro"]
+    if runtime == "python":
+        cmd += ["-e", "PYTHONPATH=/app/.deps"]
+    else:
+        node_modules = deps / "node_modules"
+        node_modules.mkdir(parents=True, exist_ok=True)
+        cmd += ["-v", f"{node_modules}:/app/node_modules:ro"]
+    cmd += ["--tmpfs", "/app/.tmp_run:rw,noexec,nosuid,size=64m,uid=65532,gid=65532"]
+    cmd += ["-w", "/app", image, executable, str(entry)]
     return cmd

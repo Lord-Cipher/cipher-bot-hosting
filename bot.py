@@ -2753,6 +2753,12 @@ def bot_actions_kb(bot_id: str, running: bool, premium: bool = False) -> types.I
                    style="danger" if is_open else "success"))
 
     if b := find_bot(bot_id):
+        network_on = bool(b.get("allow_network", False))
+        kb.add(Btn(
+            f"{'🌐' if network_on else '🚫'}  Sandbox Network: {'ON' if network_on else 'OFF'}",
+            callback_data=f"bot_network_{bot_id}",
+            style="success" if network_on else "danger",
+        ))
         if b.get("source") == "github" and premium:
             kb.add(Btn(f"🚀  Aᴜᴛᴏ-Dᴇᴘʟᴏʏ", callback_data=f"bot_webhook_{bot_id}", style="success"))
     kb.add(Btn(f"{G['no']}  Dᴇʟᴇᴛᴇ",       callback_data=f"bot_delete_{bot_id}", style="danger"))
@@ -3392,6 +3398,7 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
         save_bot(b)
     selected_node = None
     if sandbox_on:
+        allow_network = _sandbox_network_allowed(b)
         nodes = _nodes_load()
         requested_node = b.get("node_id") or b.get("assigned_node")
         candidates = [nodes.get(requested_node)] if requested_node and nodes.get(requested_node) else list(nodes.values())
@@ -3401,7 +3408,11 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             if not secret:
                 return _start_failure(b, "Selected VPS has no stored credential.")
             try:
-                remote_result = remote_deploy(selected_node, secret, bid, bot_dir, kind, entry, str((owner or {}).get("plan", "free")), extra_env)
+                remote_result = remote_deploy(
+                    selected_node, secret, bid, bot_dir, kind, entry,
+                    str((owner or {}).get("plan", "free")), extra_env,
+                    network=allow_network,
+                )
             except Exception as exc:
                 remote_result = {"ok": False, "error": str(exc)[:240]}
             if not remote_result.get("ok"):
@@ -3420,7 +3431,6 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
         if not docker_available():
             return _start_failure(b, "Sandbox mode requires Docker on the selected node.")
         plan_key = str((owner or {}).get("plan", "free")).lower()
-        allow_network = bool(get_setting("sandbox_network", False) and b.get("allow_network", False))
         runtime_env_file = bot_dir / ".cipher-runtime.env"
         try:
             runtime_env_file.write_text("".join(f"{k}={str(v).replace(chr(10), '')}\n" for k, v in extra_env.items() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k))), encoding="utf-8")
@@ -6244,10 +6254,12 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_bc_env":              return render_adm_bc_env(call)
     if data.startswith("adm_bc_toggle_"):
         flag_key = data[len("adm_bc_toggle_"):]
-        cur = bool(get_setting(f"bc_{flag_key}", False))
+        cur = bool(_bc_get(flag_key))
         set_setting(f"bc_{flag_key}", not cur)
         audit(call.from_user.id, f"bc_toggle_{flag_key}", f"now={not cur}")
         ack(call, f"{flag_key}: {'ON' if not cur else 'OFF'}")
+        if flag_key == "sandbox_network":
+            return render_adm_bc_sandbox(call)
         return render_adm_bot_cfg(call)
     # Currency preset quick-select buttons (e.g. adm_bc_set_currency_BDT_৳)
     # MUST be checked BEFORE the generic adm_bc_set_ catch-all below, otherwise
@@ -8409,6 +8421,13 @@ def _bc_get(key: str) -> Any:
     return get_setting(f"bc_{key}", _BOT_CONFIG_DEFAULTS.get(key))
 def _bc_set(key: str, val: Any) -> None:
     set_setting(f"bc_{key}", val)
+
+
+def _sandbox_network_allowed(bot_record: Dict[str, Any]) -> bool:
+    """Require both administrator policy and the bot owner's opt-in."""
+    return bool(_bc_get("sandbox_network") and bot_record.get("allow_network", False))
+
+
 def render_adm_bot_cfg(call: types.CallbackQuery) -> None:
     """Full bot configuration panel."""
     _mu  = str(_bc_get("max_upload_mb")) + " MB"
@@ -16525,6 +16544,23 @@ def action_bot_node_assign(call: types.CallbackQuery, bot_id: str, node_id: str)
     b["node_assignment"] = node_id; save_bot(b)
     audit(call.from_user.id, "bot_node_assign", f"bot={bot_id} node={node_id}")
     ack(call, f"Assigned to {node_id}"); render_bot_view(call, bot_id)
+
+
+def action_bot_sandbox_network_toggle(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or (b.get("owner") != call.from_user.id and not is_admin(call.from_user.id)):
+        ack(call, "Not yours", show_alert=True)
+        return
+    b["allow_network"] = not bool(b.get("allow_network", False))
+    save_bot(b)
+    audit(call.from_user.id, "bot_sandbox_network_toggle", f"bot={bot_id} allowed={b['allow_network']}")
+    if b["allow_network"] and not bool(_bc_get("sandbox_network")):
+        ack(call, "Per-bot network enabled, but the administrator has disabled Sandbox network globally.")
+    else:
+        ack(call, f"Sandbox network {'enabled' if b['allow_network'] else 'disabled'} for this bot.")
+    render_bot_view(call, bot_id)
+
+
 def render_env_menu(call: types.CallbackQuery, bot_id: str) -> None:
     b = find_bot(bot_id)
     if not b or (b["owner"] != call.from_user.id and not is_admin(call.from_user.id)):
@@ -19354,6 +19390,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "pay_proof": start_proof_flow(call); return
     # Bot actions
     if data.startswith("bot_view_"):        render_bot_view(call, data.split("_", 2)[2]); return
+    if data.startswith("bot_network_"):     action_bot_sandbox_network_toggle(call, data[len("bot_network_"):]); return
     if data.startswith("bot_node_set_"):
         parts = data.split("_", 4)
         if len(parts) >= 5: action_bot_node_assign(call, parts[3], parts[4]); return
