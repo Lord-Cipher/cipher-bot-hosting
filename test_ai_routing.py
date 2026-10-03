@@ -162,6 +162,11 @@ assert "Cipher Tech Hosting" in context
 assert "Telegram platform" in context
 assert "Lord Cipher" in context and "master" in context
 assert "tiered hosting" in context.lower() or "plans and prices" in context.lower()
+assert "general-purpose AI" in context
+assert "coding, debugging" in context
+assert "do not redirect unrelated questions to hosting" in context
+assert "ask one concise clarifying question" in context
+assert "do not mention them when unrelated" in context.lower()
 assert "ABSOLUTE STEALTH" not in context
 assert "Military-Grade End-to-End Encryption" not in context
 fable_context = bot._build_cipher_ai_context("claude-fable-5")
@@ -192,6 +197,18 @@ assert "lord cipher is my creator" not in ordinary_reply.lower(), ordinary_reply
 assert "welcome to cipher tech hosting" not in ordinary_reply.lower(), ordinary_reply
 assert len(chain_calls) == 2, chain_calls
 
+# Greeting variants get a warm general welcome; a short substantive question
+# like "Why?" must still go through the AI chain instead of being mistaken for
+# a greeting.
+before_greeting = len(chain_calls)
+greeting_reply = bot._call_ai_api("Hi there!", "lifetime", 42)
+assert "hello" in greeting_reply.lower() and "coding" in greeting_reply.lower()
+assert "what would you like to work on" in greeting_reply.lower()
+assert len(chain_calls) == before_greeting
+short_question = bot._call_ai_api("Why?", "free", None)
+assert short_question == "I am a general assistant."
+assert len(chain_calls) == before_greeting + 1
+
 bot._remember_ai_turn(42, "My project is called Atlas", "I will remember Atlas for this account.")
 profile_prompt = bot._build_ai_request("Can you help me debug this?", 42)
 assert "Can you help me debug this?" in profile_prompt
@@ -216,6 +233,7 @@ provider_attribution = bot._sanitize_ai_reply(
 assert "Anthropic" in provider_attribution
 assert "Cipher AI" not in provider_attribution
 assert bot._lord_cipher_profile_answer().lower().count("lord cipher") >= 2
+bot.AI_LAST_MODEL_USED[42] = "claude"
 assert bot.ai_model_tag(42, "lifetime") == bot._public_ai_model_name("claude").upper()
 
 print("AI routing regression tests passed")

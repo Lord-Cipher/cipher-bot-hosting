@@ -22,6 +22,7 @@ class ModelRoute:
     endpoint: str
     build_params: Callable[[str], Mapping[str, Any]]
     timeout: Tuple[float, float] = (6, 30)
+    public_label: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -42,27 +43,46 @@ class AIEngine:
 
     _IDENTITY_DRIFT_RE = re.compile(
         r"^\s*(?:i'?m|i am|this is|you(?:'re| are) (?:talking|speaking) (?:to|with))\s+"
-        r"(?:gpt|chatgpt|openai|claude|gemini|copilot|deepseek|llama|mistral|an ai|a gpt)\b",
+        r"(?P<claimed>(?:gpt|chatgpt|openai|anthropic|claude|gemini|copilot|deepseek|llama|mistral|qwen)\b"
+        r"(?:[\s._-]+(?:code|chat|fable|sonnet|haiku|opus|pro|mini|4o|5|4|3|2|1|80b|70b|r1|v4|v3|flash|cli))*)\b",
         re.IGNORECASE,
     )
     _GENERIC_WELCOME_RE = re.compile(
         r"^(?:(?:hello|hi|hey|good morning|good afternoon|good evening)[!,. ]*)?"
         r"(?:what can i (?:help|assist) you with(?: today)?|"
         r"how (?:can|may) i (?:help|assist) you(?: today)?|"
-        r"what would you like to talk about)[?.! ]*$",
+        r"how are you(?: doing)?(?: today)?|"
+        r"what would you like to talk about|what(?:'s| is) on your mind|"
+        r"what would you like to (?:work on|know|do))[?.! ]*$",
         re.IGNORECASE,
     )
     _READY_AND_ASK_RE = re.compile(
         r"^(?:(?:hello|hi|hey)[!,. ]*)?"
         r"(?:i(?:'m| am) (?:ready|here) to (?:assist|help)\b|"
-        r"i can help with any questions you have\b)"
-        r"[\s\S]{0,220}\b(?:how can|how may|what can) i (?:help|assist|do)\b"
-        r"[^.!?]*[.!?]?$",
+        r"i can help with any questions you have\b|"
+        r"i(?:'m| am) (?:happy|glad) to help\b)"
+        r"[\s\S]{0,260}\b(?:"
+        r"(?:how can|how may|what can) i (?:help|assist|do)|"
+        r"what(?:'s| is) on your mind|"
+        r"what would you like to (?:work on|know|do|talk about)"
+        r")\b[^.!?]*[.!?]?$",
+        re.IGNORECASE,
+    )
+    _SMALLTALK_ONLY_RE = re.compile(
+        r"^(?:(?:hello|hi|hey|good morning|good afternoon|good evening)[!,. ]*)?"
+        r"(?:how are you(?: doing)?(?: today)?[?!. ]*)?"
+        r"(?:is there (?:anything|something) i can (?:help|assist) you with|"
+        r"would you like to (?:chat|talk)|do you have (?:any )?questions|"
+        r"what would you like to (?:chat|talk about))"
+        r"(?:\s+or would you like to (?:chat|talk))?[^.!?]*[.!?]?$",
         re.IGNORECASE,
     )
     _GREETING_REQUESTS = {
         "hi", "hello", "hey", "sup", "yo", "morning", "evening", "afternoon",
-        "goodmorning", "goodevening", "goodafternoon",
+        "goodmorning", "goodevening", "goodafternoon", "goodday", "howdy", "greetings",
+        "hellothere", "hithere", "heythere", "howareyou", "howareyoudoing", "howsitgoing",
+        "whatsup", "nicetomeetyou", "hola", "bonjour", "ciao", "hallo", "namaste",
+        "salam", "assalamualaikum", "nihao", "konnichiwa", "privet",
     }
     _UNUSABLE_PREFIXES = (
         "maaf,", "sign up", "api key", "unauthorized", "rate limit",
@@ -193,7 +213,12 @@ class AIEngine:
         return normalized in cls._GREETING_REQUESTS
 
     @classmethod
-    def is_usable(cls, text: Optional[str], prompt: Optional[str] = None) -> bool:
+    def is_usable(
+        cls,
+        text: Optional[str],
+        prompt: Optional[str] = None,
+        expected_model: Optional[str] = None,
+    ) -> bool:
         """Reject provider errors and generic welcome text that ignores a request."""
         if not isinstance(text, str) or not text.strip():
             return False
@@ -209,9 +234,19 @@ class AIEngine:
             return False
         if "hotbot chat" in lowered and "how can i help" in lowered:
             return False
-        if len(reply) <= 220 and cls._IDENTITY_DRIFT_RE.match(reply):
-            return False
-        if (cls._GENERIC_WELCOME_RE.fullmatch(reply) or cls._READY_AND_ASK_RE.fullmatch(reply)) \
+        identity = cls._IDENTITY_DRIFT_RE.match(reply)
+        if identity:
+            expected = re.sub(r"[^a-z0-9]", "", str(expected_model or "").lower())
+            claimed = re.sub(r"[^a-z0-9]", "", identity.group("claimed").lower())
+            # A provider may describe itself as a different product (for
+            # example Claude Code on the Claude Chat route). Accept only a
+            # claim that is an exact match or a less-specific prefix of the
+            # configured public operative label.
+            if not expected or not claimed or not expected.startswith(claimed):
+                return False
+        if (cls._GENERIC_WELCOME_RE.fullmatch(reply)
+                or cls._READY_AND_ASK_RE.fullmatch(reply)
+                or cls._SMALLTALK_ONLY_RE.fullmatch(reply)) \
                 and not cls._is_greeting_request(prompt):
             return False
         return True
@@ -376,7 +411,7 @@ class AIEngine:
                 if not text:
                     last_error = "empty provider response"
                     break
-                if not self.is_usable(text, prompt):
+                if not self.is_usable(text, prompt, route.public_label):
                     last_error = "provider returned a non-answer"
                     break
 
@@ -412,13 +447,16 @@ class AIEngine:
                 else:
                     if isinstance(raw, ModelResult):
                         outcome = raw
-                    elif self.is_usable(raw, prompt):
-                        outcome = ModelResult(key, text=str(raw).strip())
                     else:
-                        outcome = ModelResult(
-                            key,
-                            error="provider returned a non-answer" if raw else "provider returned no usable text",
-                        )
+                        route = self.routes.get(key)
+                        expected_model = route.public_label if route else None
+                        if self.is_usable(raw, prompt, expected_model):
+                            outcome = ModelResult(key, text=str(raw).strip())
+                        else:
+                            outcome = ModelResult(
+                                key,
+                                error="provider returned a non-answer" if raw else "provider returned no usable text",
+                            )
             attempts.append(outcome)
             if outcome.ok:
                 break

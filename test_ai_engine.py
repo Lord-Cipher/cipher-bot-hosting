@@ -25,8 +25,8 @@ class FakeSession:
         return self.handler(url, params or {})
 
 
-def route(name):
-    return ModelRoute(name, lambda text: {"message": text})
+def route(name, public_label=None):
+    return ModelRoute(name, lambda text: {"message": text}, public_label=public_label)
 
 
 def engine(session, routes, **kwargs):
@@ -52,10 +52,35 @@ assert not AIEngine.is_usable(
     "I'm ready to assist you with your question about Cipher Tech Hosting. How can I help you today?",
     "Reply with exactly: synthetic health check passed.",
 )
+assert not AIEngine.is_usable(
+    "I'm ready to assist you with any questions you have about Cipher Tech Hosting or its features. What's on your mind?",
+    "Explain this Python error and give a fix.",
+)
+assert not AIEngine.is_usable(
+    "Hello! How are you today? Is there something I can help you with or would you like to chat?",
+    "Explain this Python error and give a fix.",
+)
+assert not AIEngine.is_usable("Hello! How are you today?", "Explain this Python error and give a fix.")
+assert AIEngine.is_usable("Hello! How are you today?", "hello")
 assert AIEngine.is_usable("What can I assist you with today?", "hello")
+assert AIEngine.is_usable("Hello! What would you like to work on today?", "hi there")
+assert AIEngine._is_greeting_request("Good morning!")
+assert AIEngine._is_greeting_request("How are you?")
+assert AIEngine._is_greeting_request("Hola")
+assert not AIEngine._is_greeting_request("Hi, can you debug this Python function?")
 assert not AIEngine.is_usable("I received your message, but the AI provider returned no usable text.")
 assert not AIEngine.is_usable("Your free usage limit was reached. Upgrade to VIP.")
 assert not AIEngine.is_usable("I'm Claude, developed by Anthropic. How can I help?")
+assert not AIEngine.is_usable(
+    "I'm Claude Code, Anthropic's official CLI for Claude. Here is the requested code review and fix.",
+    "Review this code.",
+    expected_model="Claude Chat",
+)
+assert AIEngine.is_usable(
+    "I'm Claude Fable 5, the configured operative for this response.",
+    "Which model is answering?",
+    expected_model="Claude Fable 5",
+)
 assert AIEngine.is_usable("Restart the process with the service manager, then inspect its logs.", "How do I restart it?")
 
 # Long requests are trimmed while preserving the context prefix and newest tail.
@@ -78,6 +103,15 @@ assert [attempt.model for attempt in attempts] == ["primary", "backup"]
 assert attempts[0].text is None and attempts[0].error == "provider returned a non-answer"
 assert attempts[1].text == "Here is the requested explanation with useful steps."
 assert [call[0].rsplit("/", 1)[-1] for call in fallback_session.calls] == ["primary", "backup"]
+
+# Keep the matching public operative identity but reject a different product
+# persona even when the response later contains useful-looking content.
+persona_session = FakeSession(lambda *_: FakeResponse(200, {
+    "result": "I'm Claude Code, Anthropic's official CLI for Claude. Here is a review of your code."
+}))
+persona_engine = engine(persona_session, {"chatbot": route("chatbot", "Claude Chat")})
+persona_result = persona_engine.complete("chatbot", "Review this code and suggest a fix.")
+assert persona_result.text is None and persona_result.error == "provider returned a non-answer"
 
 # One transient upstream failure is retried once; the operative stays selected
 # if the same route recovers on that retry.

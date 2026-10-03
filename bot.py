@@ -700,8 +700,16 @@ def _build_cipher_ai_context(model_name: str) -> str:
     plans_str = " | ".join(plans_info)
     return (
         "[SYSTEM DIRECTIVE: You are the helpful AI assistant integrated into Cipher Tech Hosting, "
-        "a Telegram platform for hosting users' own Telegram bots. Answer the user's current question "
-        "directly, naturally, and accurately. Use the following product facts as your source of truth. "
+        "a Telegram platform for hosting users' own Telegram bots. You are also a general-purpose AI, "
+        "not limited to platform support. Answer ordinary questions and help with coding, debugging, "
+        "writing, explanation, analysis, math, brainstorming, and file/project review. Keep a natural "
+        "conversation, respond warmly to greetings, and do not redirect unrelated questions to hosting. "
+        "Use platform facts only when relevant; do not insert plan or feature details into unrelated answers. "
+        "If a short or ambiguous question is not clear from the conversation, ask one concise clarifying "
+        "question instead of guessing or assuming it is about a subscription plan. "
+        "For code, provide clear, practical examples; do not claim you ran code or inspected files unless "
+        "you actually did. Answer the user's current question directly, naturally, and accurately. Use the "
+        "following product facts as the source of truth when the question is about this platform. "
         "\nPLATFORM OWNER: Lord Cipher founded and owns Cipher Tech Hosting and built/configured this "
         "platform assistant. In the context of this platform, Lord Cipher is your creator and master. "
         "If asked who Lord Cipher is or what he means to you, say so clearly and respectfully. Do not "
@@ -719,8 +727,8 @@ def _build_cipher_ai_context(model_name: str) -> str:
         "code fixes are applied only after the user explicitly chooses Implement Fix. Users choose from "
         "the AI models allowed by their plan. The platform also has tiered hosting plans, referrals, "
         "and encrypted backups. "
-        f"\nPLANS AND PRICES: {plans_str}. Use these current plan details; do not invent other limits "
-        "or prices. "
+        f"\nPLANS AND PRICES: {plans_str}. When a user asks about plans or pricing, use these current "
+        "details and do not invent other limits or prices. Do not mention them when unrelated. "
         f"\nLATEST PLATFORM UPDATE: {system_news}. "
         "\nPRIVACY: Never disclose credentials, tokens, encryption keys, backup destinations, snapshot "
         "identifiers, or private storage paths. Do not claim perfect or end-to-end security unless "
@@ -20079,10 +20087,6 @@ def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None
     if "verified active plan:" not in prompt.lower():
         prompt = f"VERIFIED ACTIVE PLAN: {str(user_plan or 'free').lower()}\n{prompt}"
 
-    p_low = prompt.lower().strip()
-    if "current user request:" in p_low:
-        p_low = p_low.rsplit("current user request:", 1)[1].strip()
-
     if uid is not None:
         # Record the expected operative even for instant local answers so the
         # reply badge always shows the model the user selected.
@@ -20093,18 +20097,19 @@ def _call_ai_api(prompt: str, user_plan: str = "free", uid: Optional[int] = None
         profile_doc = (db_load_ro().get("users", {}) or {}).get(str(uid), {}) or {}
         handle = str(profile_doc.get("username") or "").strip().lstrip("@")
         display = f"@{handle}" if handle else (str(profile_doc.get("name") or "").strip() or "friend")
-        # Keep exact greetings instant, but never replace a real first
-        # question with the generic welcome used by the old first-contact path.
-        greetings = {"hello", "hi", "hey", "sup", "yo", "morning", "evening",
-                     "afternoon", "goodmorning", "goodevening", "goodafternoon"}
-        normalized_greeting = re.sub(r"[^a-z]+", "", p_low)
-        if normalized_greeting in greetings:
-            return (f"Hello {display}! I am your Cipher AI operative. How may I assist you "
-                    f"with your bot hosting today?")
-        if len(p_low) < 4:
-            return f"Hello {display}! How may I assist you with your bot hosting today?"
-    elif len(p_low) < 4:
-        return "Hello! How may I assist you with your bot hosting today?"
+        # Keep simple greetings instant and welcoming without limiting the AI
+        # to hosting questions. All substantive and short non-greeting inputs
+        # continue through the selected model and its ordered fallback chain.
+        if AIEngine._is_greeting_request(prompt):
+            return (
+                f"Hello {display}! I am your AI assistant. I can help with general questions, "
+                "coding, writing, analysis, and Cipher Tech Hosting. What would you like to work on?"
+            )
+    elif AIEngine._is_greeting_request(prompt):
+        return (
+            "Hello! I am your AI assistant. I can help with general questions, coding, writing, "
+            "analysis, and Cipher Tech Hosting. What would you like to work on?"
+        )
 
     res, used = _call_ai_chain(prompt, user_plan, uid)
     if uid is not None:
@@ -20733,7 +20738,7 @@ def _ai_operative_enabled(key: str) -> bool:
 def _create_ai_engine() -> AIEngine:
     """Wire the provider-independent runtime to the current operative catalog."""
     routes = {
-        key: ModelRoute(endpoint, build_params)
+        key: ModelRoute(endpoint, build_params, public_label=_AI_OPERATIVE_LABELS.get(key, key))
         for key, (endpoint, build_params) in _OMEGATECH_MODELS.items()
     }
     for key, provider_model in _OMEGATECH_SECRET_MODELS.items():
@@ -20742,6 +20747,7 @@ def _create_ai_engine() -> AIEngine:
             lambda text, selected_model=provider_model: {
                 "action": "chat", "model": selected_model, "message": text,
             },
+            public_label=_AI_OPERATIVE_LABELS.get(key, key),
         )
     return AIEngine(
         session=AI_HTTP,
