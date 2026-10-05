@@ -141,6 +141,8 @@ AI_LAST_MODEL_USED: Dict[int, str] = {}   # uid -> operative that answered the l
 AI_LAST_MODEL_FALLBACK: Dict[int, str] = {}   # uid -> operative the user chose when a fallback had to answer instead
 AI_SENTINEL_MODEL_SELECTIONS: Dict[int, Dict[str, Any]] = {}  # uid -> temporary per-diagnosis model choice
 AI_SENTINEL_SELECTION_TTL = 1800
+AI_SENTINEL_APPLYING: set[str] = set()  # bot ids with an approved patch/restart in progress
+AI_SENTINEL_APPLY_LOCK = threading.Lock()
 # One pooled HTTP session for every AI provider call: reusing TCP/TLS
 # connections removes a full handshake (~0.3-1s) from each reply.
 AI_HTTP: requests.Session = requests.Session()
@@ -20860,72 +20862,139 @@ def _extract_ai_diagnosis_patch(text: str, file_suffix: str = "") -> str:
     return match.group(2).strip()
 
 def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
-    """Applies the AI-suggested patch only after explicit user confirmation."""
+    """Apply an AI patch only after explicit approval; do slow restart work off-thread."""
     b = _get_manageable_ai_sentinel_bot(call, bot_id)
     if not b:
         return
-    
     patch = b.get("pending_patch")
-    if not patch or not patch.get("code") or not patch.get("file"):
-        ack(call, "No pending patch found or expired."); return
+    if not isinstance(patch, dict) or not patch.get("code") or not patch.get("file"):
+        ack(call, "No pending patch found or expired.", show_alert=True)
+        return
 
-    loading(call, "Applying patch and restarting bot...")
-    
-    try:
-        bot_dir = Path(b["dir"]).resolve()
-        target_file = (bot_dir / patch["file"]).resolve()
-        if target_file == bot_dir or bot_dir not in target_file.parents:
-            ack(call, "The pending patch path is invalid.", show_alert=True)
+    bot_id = str(bot_id)
+    with AI_SENTINEL_APPLY_LOCK:
+        if bot_id in AI_SENTINEL_APPLYING:
+            ack(call, "A fix is already being applied. Please wait for its result.", show_alert=True)
             return
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Backup original file before patching
-        if target_file.exists():
-            backup_path = target_file.with_suffix(target_file.suffix + ".bak")
-            shutil.copy2(target_file, backup_path)
-            
-        # Write new patched code
-        plain_code = patch["code"]
-        target_file.write_text(plain_code, encoding="utf-8")
-        
-        # ── PERSIST PATCH TO ENCRYPTED STORAGE ──
-        # Find the metadata for this file in enc_files
-        rel_path = patch["file"].replace("\\", "/").lstrip("/")
-        enc_files = b.get("enc_files", [])
-        target_meta = None
-        for f_meta in enc_files:
-            meta_rel = (f_meta.get("rel_path") or f_meta.get("filename", "")).replace("\\", "/").lstrip("/")
-            if meta_rel == rel_path:
-                target_meta = f_meta
-                break
-        
-        if target_meta:
-            key = KEYRING.fetch(target_meta["key_id"])
-            if key:
-                # Overwrite the encrypted storage file
-                write_encrypted(Path(target_meta["enc_path"]), key, plain_code.encode("utf-8"))
-                target_meta["size"] = len(plain_code)
+        AI_SENTINEL_APPLYING.add(bot_id)
+
+    def _apply_in_background() -> None:
+        key_id = ""
+        patch_saved = False
+        try:
+            current = _get_manageable_ai_sentinel_bot(call, bot_id)
+            if not current:
+                return
+            current_patch = current.get("pending_patch")
+            if not isinstance(current_patch, dict) or not current_patch.get("code") or not current_patch.get("file"):
+                ack(call, "No pending patch found or expired.", show_alert=True)
+                return
+
+            bot_dir = Path(current["dir"]).resolve()
+            rel_path = str(current_patch["file"]).replace("\\", "/").lstrip("/")
+            target_file = (bot_dir / rel_path).resolve()
+            if target_file == bot_dir or bot_dir not in target_file.parents:
+                ack(call, "The pending patch path is invalid.", show_alert=True)
+                return
+            plain_code = str(current_patch["code"])
+            if not plain_code.strip():
+                ack(call, "The pending patch is empty.", show_alert=True)
+                return
+            plain_bytes = plain_code.encode("utf-8")
+
+            target_meta = None
+            for f_meta in current.get("enc_files") or []:
+                meta_rel = (f_meta.get("rel_path") or f_meta.get("filename", "")).replace("\\", "/").lstrip("/")
+                if meta_rel == rel_path:
+                    target_meta = f_meta
+                    break
+
+            if target_meta:
+                key_id = str(target_meta.get("key_id") or "")
+                key = KEYRING.fetch(key_id) if key_id else None
+                if not key:
+                    raise RuntimeError("encrypted source key is unavailable; reload the bot credentials and retry")
+                enc_path = Path(target_meta.get("enc_path") or "")
+                if not target_meta.get("enc_path") or not enc_path.is_file():
+                    raise RuntimeError("encrypted source file is missing; the patch was not saved")
+                fd, tmp_name = tempfile.mkstemp(prefix=f".{enc_path.name}.sentinel-", dir=str(enc_path.parent))
+                os.close(fd)
+                enc_tmp = Path(tmp_name)
+                try:
+                    write_encrypted(enc_tmp, key, plain_bytes)
+                    if read_encrypted(enc_tmp, key) != plain_bytes:
+                        raise RuntimeError("encrypted patch verification failed")
+                    os.replace(enc_tmp, enc_path)
+                finally:
+                    enc_tmp.unlink(missing_ok=True)
+                target_meta["size"] = len(plain_bytes)
                 target_meta["patched_at"] = ts_iso()
-        
-        # Clear pending patch
-        b.pop("pending_patch", None)
-        save_bot(b)
-        AI_SENTINEL_MODEL_SELECTIONS.pop(int(call.from_user.id), None)
-        
-        # Restart child process
-        stop_child(bot_id, manual=True)
-        time.sleep(1)
-        res = start_child(b)
-        
-        if res.get("ok"):
-            ack(call, "Fix applied successfully! Bot restarted.")
-        else:
-            ack(call, f"Patch applied, but start failed: {res.get('error')}")
-            
-        render_bot_view(call, bot_id)
+            else:
+                # Workspace-only/editor-created files are wiped from the
+                # plaintext Sandbox directory after launch. Add them to the
+                # encrypted manifest so a restart restores the approved patch.
+                enc_files = current.setdefault("enc_files", [])
+                if not isinstance(enc_files, list):
+                    raise RuntimeError("bot source manifest is invalid; the patch was not saved")
+                stored = store_uploaded_file(call.from_user, rel_path, plain_bytes)
+                key_id = str(stored["key_id"])
+                enc_files.append({
+                    "key_id": stored["key_id"],
+                    "enc_path": stored["path"],
+                    "filename": rel_path,
+                    "rel_path": rel_path,
+                    "size": stored["size"],
+                    "patched_at": ts_iso(),
+                })
+
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            if target_file.exists():
+                shutil.copy2(target_file, target_file.with_suffix(target_file.suffix + ".bak"))
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{target_file.name}.sentinel-", dir=str(target_file.parent))
+            try:
+                with os.fdopen(fd, "wb") as tmp_file:
+                    tmp_file.write(plain_bytes)
+                os.replace(tmp_name, target_file)
+            finally:
+                Path(tmp_name).unlink(missing_ok=True)
+
+            current.pop("pending_patch", None)
+            save_bot(current)
+            patch_saved = True
+            AI_SENTINEL_MODEL_SELECTIONS.pop(int(call.from_user.id), None)
+
+            # Yes is explicit operator approval; use the normal manual restart
+            # path so crash-loop guards are cleared as they are on Start/Restart.
+            try:
+                res = restart_child(current, manual=True)
+            except Exception as exc:
+                res = {"ok": False, "error": str(exc)}
+            if res.get("ok"):
+                ack(call, "Fix applied successfully! Bot restarted.")
+            else:
+                ack(call, f"Patch saved, but restart failed: {res.get('error', 'unknown error')}", show_alert=True)
+            render_bot_view(call, bot_id)
+        except Exception as e:
+            print(f"[apply_fix] error: {e}", flush=True)
+            prefix = "Patch saved, but restart failed" if patch_saved else "Failed to apply patch"
+            ack(call, f"{prefix}: {e}", show_alert=True)
+        finally:
+            if key_id:
+                try:
+                    KEYRING.wipe(key_id)
+                except Exception:
+                    pass
+            with AI_SENTINEL_APPLY_LOCK:
+                AI_SENTINEL_APPLYING.discard(bot_id)
+
+    try:
+        loading(call, "Applying patch and restarting bot...")
+        threading.Thread(target=_apply_in_background, daemon=True).start()
     except Exception as e:
-        print(f"[apply_fix] error: {e}", flush=True)
-        ack(call, f"Failed to apply patch: {e}")
+        with AI_SENTINEL_APPLY_LOCK:
+            AI_SENTINEL_APPLYING.discard(bot_id)
+        print(f"[apply_fix] thread start error: {e}", flush=True)
+        ack(call, "Could not start the patch operation. Please try again.", show_alert=True)
 
 
 def action_bot_reject_fix(call: types.CallbackQuery, bot_id: str) -> None:
@@ -20933,6 +21002,10 @@ def action_bot_reject_fix(call: types.CallbackQuery, bot_id: str) -> None:
     b = _get_manageable_ai_sentinel_bot(call, bot_id)
     if not b:
         return
+    with AI_SENTINEL_APPLY_LOCK:
+        if str(bot_id) in AI_SENTINEL_APPLYING:
+            ack(call, "A fix is already being applied. Please wait for its result.", show_alert=True)
+            return
     if not b.get("pending_patch"):
         ack(call, "No pending patch to reject.", show_alert=True)
         return

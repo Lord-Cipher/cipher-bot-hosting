@@ -186,13 +186,87 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert source_path.read_text(encoding="utf-8") == "print('original')\n"
     assert shown_texts[-1][2] is not None
 
+    # Yes persists a workspace-only source into encrypted storage before the
+    # Sandbox source-wipe/restart, and uses the ordinary manual restart path.
+    encryption_key = bot.Fernet.generate_key()
+    encrypted_source = Path(tmp) / "sentinel-main.enc"
+    original_store = bot.store_uploaded_file
+    original_fetch_key = bot.KEYRING.fetch
+    original_wipe_key = bot.KEYRING.wipe
+    original_restart_child = bot.restart_child
+    original_render_bot_view = bot.render_bot_view
+    original_thread = bot.threading.Thread
+    restart_calls = []
+
+    def fake_store_uploaded_file(uploader, filename, plain):
+        encrypted_source.write_bytes(bot.Fernet(encryption_key).encrypt(plain))
+        return {"key_id": "sentinel-test-key", "path": str(encrypted_source), "size": len(plain)}
+
+    class ImmediateThread:
+        def __init__(self, target, daemon=False):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    bot.store_uploaded_file = fake_store_uploaded_file
+    bot.KEYRING.fetch = lambda key_id: encryption_key if key_id == "sentinel-test-key" else None
+    bot.KEYRING.wipe = lambda key_id: None
+    bot.restart_child = lambda record, manual=False: restart_calls.append((record["id"], manual)) or {"ok": True}
+    bot.render_bot_view = lambda call, bid: None
+    bot.threading.Thread = ImmediateThread
+    sentinel_bot["enc_files"] = []
+    sentinel_bot["pending_patch"] = {"file": "main.py", "code": "print('fixed')\n"}
+    bot.action_bot_apply_fix(owner_call, bot_id)
+    assert "pending_patch" not in sentinel_bot
+    assert source_path.read_text(encoding="utf-8") == "print('fixed')\n"
+    assert sentinel_bot["enc_files"][0]["rel_path"] == "main.py"
+    assert bot.Fernet(encryption_key).decrypt(encrypted_source.read_bytes()) == b"print('fixed')\n"
+    assert restart_calls == [(bot_id, True)]
+    assert acknowledgements[-1][0] == "Fix applied successfully! Bot restarted."
+
+    # A Sandbox wipe must not erase the approved edit: start materialization
+    # restores the patched source from the new encrypted manifest entry.
+    source_path.write_text("# sandboxed\n", encoding="utf-8")
+    bot.materialize_bot_files(sentinel_bot)
+    assert source_path.read_text(encoding="utf-8") == "print('fixed')\n"
+
+    # A later approval for the same uploaded file replaces its existing
+    # encrypted blob instead of creating duplicate manifest entries.
+    sentinel_bot["pending_patch"] = {"file": "main.py", "code": "print('updated')\n"}
+    bot.action_bot_apply_fix(owner_call, bot_id)
+    assert len(sentinel_bot["enc_files"]) == 1
+    assert source_path.read_text(encoding="utf-8") == "print('updated')\n"
+    assert bot.Fernet(encryption_key).decrypt(encrypted_source.read_bytes()) == b"print('updated')\n"
+    assert restart_calls == [(bot_id, True), (bot_id, True)]
+
+    # Missing encryption keys fail before any source/blob change and retain the
+    # pending proposal so the owner can retry after repairing the keyring.
+    encrypted_before = encrypted_source.read_bytes()
+    sentinel_bot["pending_patch"] = {"file": "main.py", "code": "print('third attempt')\n"}
+    bot.KEYRING.fetch = lambda key_id: None
+    bot.action_bot_apply_fix(owner_call, bot_id)
+    assert source_path.read_text(encoding="utf-8") == "print('updated')\n"
+    assert encrypted_source.read_bytes() == encrypted_before
+    assert sentinel_bot["pending_patch"]["code"] == "print('third attempt')\n"
+    assert "encrypted source key is unavailable" in acknowledgements[-1][0]
+    assert restart_calls == [(bot_id, True), (bot_id, True)]
+
+    bot.store_uploaded_file = original_store
+    bot.KEYRING.fetch = original_fetch_key
+    bot.KEYRING.wipe = original_wipe_key
+    bot.restart_child = original_restart_child
+    bot.render_bot_view = original_render_bot_view
+    bot.threading.Thread = original_thread
+    sentinel_bot.pop("pending_patch", None)
+
     # Another user cannot start diagnosis or apply a crafted/stale callback.
     menus_before_unauthorized_attempt = len(shown_menus)
     bot.render_ai_sentinel_model_picker(user_call, bot_id)
     assert len(shown_menus) == menus_before_unauthorized_attempt
     sentinel_bot["pending_patch"] = {"file": "main.py", "code": "print('attacker')"}
     bot.action_bot_apply_fix(user_call, bot_id)
-    assert source_path.read_text(encoding="utf-8") == "print('original')\n"
+    assert source_path.read_text(encoding="utf-8") == "print('updated')\n"
     assert any(kwargs.get("show_alert") for _, kwargs in acknowledgements)
 
     # Even an authorized stale/corrupt pending patch cannot escape the bot directory.
@@ -200,6 +274,7 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     sentinel_bot["pending_patch"] = {"file": "../outside.py", "code": "print('escape')"}
     bot.action_bot_apply_fix(owner_call, bot_id)
     assert not outside_path.exists()
+    assert source_path.read_text(encoding="utf-8") == "print('updated')\n"
     assert any("path" in text.lower() and kwargs.get("show_alert") for text, kwargs in acknowledgements)
 
     bot.child_status = original_status
