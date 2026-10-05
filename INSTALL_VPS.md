@@ -171,7 +171,7 @@ Set the generated result as `CIPHER_VAULT_KEY` in the **control panel's** enviro
 
 ### 3. Register and test the node in Telegram
 
-As the panel owner, open **Admin → Settings → Infrastructure Nodes → Add Node**, then send JSON like this (IPv6 is entered as a plain, unbracketed address):
+As the panel owner, open **Admin → Settings → Infrastructure Nodes → Add Node**. Send exactly one valid JSON object—only the text inside the braces, with no Markdown code fences or labels before/after it. For a direct IPv6 connection, enter the address as a plain, unbracketed string:
 
 ```json
 {
@@ -186,7 +186,22 @@ As the panel owner, open **Admin → Settings → Infrastructure Nodes → Add N
 }
 ```
 
-Leave `hostname` and `ipv4` empty when using the `ipv6` field. Open that node's **Credentials** button and send the complete private-key text in the protected admin flow; the message is deleted after capture and the credential is encrypted at rest. Then press **Test**. A successful SSH check shows `AUTHENTICATED`; verify Docker is listed in the detected capabilities too.
+If the worker is a **Freestyle VM reached through its SSH gateway**, use `hostname` instead of `ipv6`. Replace the username placeholder with the Freestyle VM ID:
+
+```json
+{
+  "name": "My Freestyle VM",
+  "connection_type": "ssh",
+  "provider": "freestyle",
+  "hostname": "beta-ssh.freestyle.sh",
+  "ssh_port": 22,
+  "username": "YOUR_FREESTYLE_VM_ID",
+  "auth_method": "password",
+  "enabled": true
+}
+```
+
+Do not put a password, access token, or private key in the JSON. After adding the node, open its **Credentials** button and submit the SSH credential separately: the Freestyle access token for `auth_method: "password"`, or the complete unencrypted private key for `auth_method: "key"`. The credential is encrypted at rest and the submitted message is deleted after capture. Then press **Test**. A successful SSH check shows `AUTHENTICATED`; verify Docker is listed in the detected capabilities too. The control-panel service user must also trust the SSH host key in its `known_hosts` file; do not disable host-key validation.
 
 Turn **Admin → Bot Config → Sandbox → Network** on only if workloads are allowed internet access. Sandbox starts blocked by default per bot: open the bot's action menu and toggle **Sandbox Network** for that bot. Both the global admin switch and per-bot switch must be on before a hosted bot container receives network access.
 
