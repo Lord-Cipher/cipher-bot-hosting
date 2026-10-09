@@ -5513,7 +5513,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_node_add":
         if not admin_only_call(call, "full_access"): return
         USER_STATES[call.from_user.id] = {"flow": "await_adm_node_add"}
-        bot.send_message(call.message.chat.id, "Send node JSON: name, connection_type (local/ssh/agent), provider, hostname or IP, port, and username. No passwords or private keys in chat.")
+        bot.send_message(call.message.chat.id, "Send node JSON as a regular text message or attach a .json file. Include name, connection_type, provider, hostname/IP, port, username, and auth_method. Do not include passwords or private keys; save those later through Credentials.")
         ack(call)
         return
     if data.startswith("adm_node_test:"):
@@ -10205,6 +10205,126 @@ def _do_export_data(admin_uid: int) -> Path:
                     zf.write(f, arcname=f"bot_data/{f.name}")
     audit(admin_uid, "export_data", f"file={target.name}")
     return target
+
+_NODE_CONFIG_FIELDS = {
+    "name", "connection_type", "provider", "ipv4", "ipv6", "hostname",
+    "url", "ssh_port", "username", "auth_method", "enabled",
+}
+_NODE_CONFIG_SECRET_FIELDS = {
+    "password", "ssh_password", "passphrase", "private_key", "privatekey",
+    "ssh_key", "key", "api_key", "access_token", "credential",
+    "credentials", "token", "secret", "secret_ref",
+}
+
+def _node_config_payload_from_message(m: types.Message) -> Dict[str, Any]:
+    """Read a node config from pasted text or a bounded .json document."""
+    document = getattr(m, "document", None)
+    if document:
+        filename = str(getattr(document, "file_name", "") or "")
+        mime_type = str(getattr(document, "mime_type", "") or "").lower()
+        if not (filename.lower().endswith(".json") or mime_type in {"application/json", "text/json"}):
+            raise ValueError("Send a .json document or paste the JSON text")
+        if int(getattr(document, "file_size", 0) or 0) > 64 * 1024:
+            raise ValueError("Node JSON file is too large (maximum 64 KB)")
+        file_info = bot.get_file(document.file_id)
+        raw = bot.download_file(file_info.file_path)
+        if len(raw) > 64 * 1024:
+            raise ValueError("Node JSON file is too large (maximum 64 KB)")
+        text = raw.decode("utf-8-sig")
+    else:
+        text = str(getattr(m, "text", "") or "").strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].strip().lower() in {"```", "```json"}:
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+    if not text:
+        raise ValueError("Send JSON as a text message or attach a .json file")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON syntax at line {exc.lineno}, column {exc.colno}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("The JSON must be an object enclosed in { } brackets")
+    keys = {str(key).strip().lower().replace("-", "_") for key in payload}
+    if keys & _NODE_CONFIG_SECRET_FIELDS:
+        raise ValueError("Do not put passwords, keys, or tokens in JSON; use the protected Credentials flow")
+    unknown = set(payload) - _NODE_CONFIG_FIELDS
+    if unknown:
+        raise ValueError("Unsupported node field; use only the fields shown in the Add Node example")
+    if not payload:
+        raise ValueError("The node JSON object is empty")
+    for key in ("name", "connection_type", "provider", "ipv4", "ipv6", "hostname", "url", "username", "auth_method"):
+        if key in payload:
+            if not isinstance(payload[key], str):
+                raise ValueError(f"{key} must be text")
+            payload[key] = payload[key].strip()
+    if "name" in payload and not payload["name"]:
+        raise ValueError("name cannot be empty")
+    if "connection_type" in payload and payload["connection_type"] not in {"local", "ssh", "agent"}:
+        raise ValueError("connection_type must be local, ssh, or agent")
+    if "auth_method" in payload and payload["auth_method"] not in {"key", "password"}:
+        raise ValueError("auth_method must be key or password")
+    if "ssh_port" in payload:
+        if isinstance(payload["ssh_port"], bool):
+            raise ValueError("ssh_port must be a port number")
+        try:
+            payload["ssh_port"] = int(payload["ssh_port"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ssh_port must be a port number") from exc
+        if not 1 <= payload["ssh_port"] <= 65535:
+            raise ValueError("ssh_port must be between 1 and 65535")
+    if "enabled" in payload and not isinstance(payload["enabled"], bool):
+        raise ValueError("enabled must be true or false")
+    return payload
+
+def _handle_adm_node_config_message(m: types.Message, st: Dict[str, Any]) -> None:
+    """Consume one Add/Edit Node input, keeping the flow open after errors."""
+    uid = m.from_user.id
+    flow = st.get("flow")
+    if not is_admin(uid) or not admin_can(uid, "full_access"):
+        USER_STATES.pop(uid, None)
+        audit(uid, "denied", "node_config")
+        bot.reply_to(m, "You do not have permission to manage Sandbox nodes.")
+        return
+    try:
+        payload = _node_config_payload_from_message(m)
+        nodes = _nodes_load()
+        if not isinstance(nodes, dict):
+            raise ValueError("Node storage is unavailable")
+        if flow == "await_adm_node_add":
+            name = payload.get("name")
+            if not name:
+                raise ValueError("name is required")
+            node = new_node(name, payload.get("connection_type", "local"), **{
+                key: value for key, value in payload.items()
+                if key not in {"name", "connection_type"}
+            })
+            nodes[node["id"]] = node
+            _nodes_save(nodes)
+            USER_STATES.pop(uid, None)
+            audit(uid, "node_add", f"node={node['id']} type={node['connection_type']}")
+            extra = " Next, use Credentials to save its SSH password or private key." if node["connection_type"] == "ssh" else ""
+            bot.reply_to(m, f"{G['ok']} Node added: <b>{esc(node['name'])}</b>.{extra}", parse_mode="HTML")
+            return
+
+        node_id = str(st.get("node_id", ""))
+        if flow != "await_adm_node_edit" or node_id not in nodes:
+            raise ValueError("node not found; reopen the node editor and try again")
+        old = dict(nodes[node_id])
+        old.update(payload)
+        if not str(old.get("name", "")).strip():
+            raise ValueError("name cannot be empty")
+        nodes[node_id] = old
+        _nodes_save(nodes)
+        USER_STATES.pop(uid, None)
+        audit(uid, "node_edit", f"node={node_id}")
+        bot.reply_to(m, f"{G['ok']} Node updated: <b>{esc(old.get('name', node_id))}</b>", parse_mode="HTML")
+    except Exception as exc:
+        bot.reply_to(m, f"{G['no']} Node JSON not accepted: <code>{esc(exc)}</code>\nThe Add/Edit Node step is still open; correct it and send again.", parse_mode="HTML")
+
 @bot.message_handler(content_types=["document"])
 def on_document(m: types.Message) -> None:
     # ── MANDATORY VAULT SYNC (ABSOLUTE TOP) ──
@@ -10243,31 +10363,8 @@ def on_document(m: types.Message) -> None:
         return _handle_payment_proof(m, st)
     if st.get("flow") == "await_topup_proof":
         return _handle_topup_proof(m)
-    if st.get("flow") == "await_adm_node_edit":
-        node_id = st.get("node_id", ""); USER_STATES.pop(uid, None)
-        if not is_admin(uid): audit(uid, "denied", "node_edit"); return
-        try:
-            payload = json.loads((m.text or "").strip()); nodes = _nodes_load()
-            if node_id not in nodes: raise ValueError("node not found")
-            old = nodes[node_id]; allowed = {"name", "provider", "connection_type", "ipv4", "ipv6", "hostname", "url", "ssh_port", "username", "auth_method", "enabled"}
-            old.update({k: v for k, v in payload.items() if k in allowed}); nodes[node_id] = old; _nodes_save(nodes); audit(uid, "node_edit", f"node={node_id}")
-            bot.reply_to(m, f"{G['ok']} Node updated: <b>{esc(old.get('name', node_id))}</b>", parse_mode="HTML")
-        except Exception as exc: bot.reply_to(m, f"{G['no']} Invalid node JSON: <code>{esc(exc)}</code>", parse_mode="HTML")
-        return
-    if st.get("flow") == "await_adm_node_add":
-        USER_STATES.pop(uid, None)
-        if not is_admin(uid):
-            audit(uid, "denied", "node_add")
-            return
-        try:
-            payload = json.loads((m.text or "").strip())
-            node = new_node(str(payload["name"]), str(payload.get("connection_type", "local")), **{k: v for k, v in payload.items() if k not in {"name", "connection_type"}})
-            nodes = _nodes_load(); nodes[node["id"]] = node; _nodes_save(nodes)
-            audit(uid, "node_add", f"node={node['id']} type={node['connection_type']}")
-            bot.reply_to(m, f"{G['ok']} Node added: <b>{esc(node['name'])}</b>", parse_mode="HTML")
-        except Exception as exc:
-            bot.reply_to(m, f"{G['no']} Invalid node JSON: <code>{esc(exc)}</code>", parse_mode="HTML")
-        return
+    if st.get("flow") in {"await_adm_node_edit", "await_adm_node_add"}:
+        return _handle_adm_node_config_message(m, st)
     if st.get("flow") == "await_adm_import_cfg":
         USER_STATES.pop(uid, None)
         if not is_owner(uid):
@@ -10390,6 +10487,11 @@ def on_text(m: types.Message) -> None:
 
     st = USER_STATES.get(uid) or {}
     flow = st.get("flow")
+    if flow in {"await_adm_node_edit", "await_adm_node_add"}:
+        return _handle_adm_node_config_message(m, st)
+    if flow not in {"await_adm_node_edit", "await_adm_node_add"} and is_admin(uid) and text.lstrip().startswith(("{", "```")) and any(f'"{field}"' in text for field in ("connection_type", "hostname", "ipv4", "ipv6", "ssh_port")):
+        bot.reply_to(m, "No Add/Edit Node step is active. Open Admin → Infrastructure Nodes → Add Node again, then send the JSON. The setup step resets after a bot restart.")
+        return
     try:
         if flow == "await_adm_node_cred":
             USER_STATES.pop(uid, None)
