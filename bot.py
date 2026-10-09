@@ -2,6 +2,7 @@ from __future__ import annotations
 import base64
 import csv
 import copy
+import difflib
 import hashlib
 import hmac
 import io
@@ -143,6 +144,9 @@ AI_SENTINEL_MODEL_SELECTIONS: Dict[int, Dict[str, Any]] = {}  # uid -> temporary
 AI_SENTINEL_SELECTION_TTL = 1800
 AI_SENTINEL_APPLYING: set[str] = set()  # bot ids with an approved patch/restart in progress
 AI_SENTINEL_APPLY_LOCK = threading.Lock()
+NODE_TESTING: set[str] = set()
+NODE_TEST_LOCK = threading.Lock()
+LOCAL_NODE_HEALTH: Dict[str, Any] = {"status": "NEEDS SETUP", "capabilities": {}, "last_test": None, "health_reason": ""}
 # One pooled HTTP session for every AI provider call: reusing TCP/TLS
 # connections removes a full handshake (~0.3-1s) from each reply.
 AI_HTTP: requests.Session = requests.Session()
@@ -4685,6 +4689,8 @@ def save_bot(doc: Dict[str, Any]) -> Dict[str, Any]:
             "dir":       doc.get("dir"),
             "created":   doc.get("created"),
             "last_started": doc.get("last_started"),
+            "ai_sentinel_backup": doc.get("ai_sentinel_backup"),
+            "ai_sentinel_backup_key_id": doc.get("ai_sentinel_backup_key_id"),
             "updated":   ts_iso(),
         })
     except Exception:
@@ -5495,6 +5501,19 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return
     if data == "adm_nodes":
         return render_adm_nodes(call)
+    if data == "adm_node_wizard":
+        return action_adm_vps_wizard_start(call)
+    if data == "adm_vps_wizard_cancel":
+        if not admin_only_call(call, "full_access"): return
+        state = USER_STATES.get(call.from_user.id) or {}
+        if state.get("flow") == "await_adm_vps_wizard":
+            USER_STATES.pop(call.from_user.id, None)
+        ack(call, "VPS setup cancelled.")
+        return render_adm_nodes(call)
+    if data.startswith("adm_vps_wizard_auth:"):
+        return action_adm_vps_wizard_auth(call, data.split(":", 1)[1])
+    if data.startswith("adm_node_health:"):
+        return action_adm_node_health(call, data.split(":", 1)[1])
     if data == "adm_sandbox_toggle":
         if not admin_only_call(call, "full_access"): return
         enabled = not bool(get_setting("sandbox_mode", False))
@@ -10355,6 +10374,9 @@ def on_document(m: types.Message) -> None:
     st = USER_STATES.get(uid) or {}
     if st.get("flow") == "ai_chat":
         return _handle_ai_chat_document(m)
+    if st.get("flow") == "await_adm_vps_wizard":
+        bot.reply_to(m, "The VPS wizard expects a text reply for this step. Continue in the wizard or press Cancel.")
+        return
     if st.get("flow") == "await_adm_product_file":
         if not is_admin(uid):
             USER_STATES.pop(uid, None); return
@@ -10487,6 +10509,8 @@ def on_text(m: types.Message) -> None:
 
     st = USER_STATES.get(uid) or {}
     flow = st.get("flow")
+    if flow == "await_adm_vps_wizard":
+        return _handle_adm_vps_wizard_text(m, st)
     if flow in {"await_adm_node_edit", "await_adm_node_add"}:
         return _handle_adm_node_config_message(m, st)
     if flow not in {"await_adm_node_edit", "await_adm_node_add"} and is_admin(uid) and text.lstrip().startswith(("{", "```")) and any(f'"{field}"' in text for field in ("connection_type", "hostname", "ipv4", "ipv6", "ssh_port")):
@@ -16556,6 +16580,8 @@ def render_bot_view(
     if tun and tun.get("proc") and tun["proc"].poll() is None and tun.get("url"):
         cap = cap[:-len(FOOTER)] + f"\n{bullet('Public URL', tun['url'])}" + FOOTER
     actions_kb = bot_actions_kb(bot_id, st["running"], premium=is_premium)
+    if isinstance(b.get("ai_sentinel_backup"), dict):
+        actions_kb.add(Btn("↩️ Roll back Sentinel fix", callback_data=f"bot_rollbackfix_{bot_id}", style="danger"))
     # If the original photo menu had already fallen back to a text message,
     # keep live telemetry updates as in-place text edits. Calling show_menu
     # here would try to send a new photo every five seconds.
@@ -18557,6 +18583,160 @@ def _node_secret(node_id: str) -> str:
     store = _node_credentials()
     try: return store.get(node_id) if store else ""
     except Exception: return ""
+
+def _node_health_state(node: Dict[str, Any]) -> Tuple[bool, str]:
+    status = str(node.get("status", "NEEDS SETUP"))
+    if status in {"ONLINE", "AUTHENTICATED"}:
+        if node.get("connection_type") == "ssh" and not (node.get("capabilities") or {}).get("docker"):
+            return False, "DOCKER NOT READY"
+        return True, "READY"
+    return False, status
+
+def _node_health_card(call: types.CallbackQuery, node_id: str) -> None:
+    if not admin_only_call(call, "full_access"):
+        return
+    node = dict(LOCAL_NODE_HEALTH) if node_id == "local" else _nodes_load().get(node_id)
+    if not node:
+        ack(call, "Node not found", show_alert=True)
+        return
+    healthy, label = _node_health_state(node)
+    caps = node.get("capabilities") or {}
+    lines = [
+        f"<b>🖥 {esc(node.get('name', 'Local node'))} health</b>",
+        G["div_eq"],
+        f"Status: {'🟢' if healthy else '🔴'} <b>{esc(label)}</b>",
+        f"Connection: <code>{esc(node.get('connection_type', 'local'))}</code>",
+    ]
+    host = node.get("hostname") or node.get("ipv4") or node.get("ipv6")
+    if host:
+        lines.append(f"Host: <code>{esc(host)}</code>:<code>{esc(node.get('ssh_port', 22))}</code>")
+    if caps:
+        lines.append(f"Docker: {'🟢' if caps.get('docker') else '🔴'} <code>{esc(caps.get('dockerVersion') or ('available' if caps.get('docker') else 'not detected'))}</code>")
+        for label_name, key in (("OS", "os"), ("Architecture", "architecture"), ("CPU cores", "cpuCores"), ("Python", "python"), ("Node.js", "node")):
+            if caps.get(key):
+                lines.append(f"{label_name}: <code>{esc(caps[key])}</code>")
+    if node.get("last_test"):
+        lines.append(f"Last check: <code>{esc(node['last_test'])}</code>")
+    if node.get("health_reason"):
+        lines.append(f"Details: <blockquote>{esc(str(node['health_reason'])[:300])}</blockquote>")
+    lines.append("Health checks use read-only SSH capability probes; they do not deploy or change VPS files.")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn(f"{'🟢' if healthy else '🔴'} {label}", callback_data="noop", style="success" if healthy else "danger"),
+           Btn("🔄 Test now", callback_data=f"adm_node_test:{node_id}", style="success"))
+    if node_id != "local":
+        kb.add(Btn("🔐 Credentials", callback_data=f"adm_node_cred:{node_id}", style="primary"),
+               Btn("Edit", callback_data=f"adm_node_edit:{node_id}", style="primary"))
+    kb.add(Btn(f"{G['back']} Nodes", callback_data="adm_nodes", style="danger"))
+    show_text(call.message.chat.id, "\n".join(lines) + FOOTER, kb, call=call)
+
+def action_adm_node_health(call: types.CallbackQuery, node_id: str) -> None:
+    if not admin_only_call(call, "full_access"):
+        return
+    _node_health_card(call, node_id)
+
+def action_adm_vps_wizard_start(call: types.CallbackQuery) -> None:
+    if not admin_only_call(call, "full_access"):
+        return
+    USER_STATES[call.from_user.id] = {"flow": "await_adm_vps_wizard", "step": "name", "values": {}}
+    kb = types.InlineKeyboardMarkup()
+    kb.add(Btn("🔴 Cancel", callback_data="adm_vps_wizard_cancel", style="danger"))
+    bot.send_message(call.message.chat.id, "<b>VPS setup · Step 1 of 4</b>\nSend a short label for this node (for example: My IPv6 VPS). Credentials will be added separately and never go in the JSON.", parse_mode="HTML", reply_markup=kb)
+    ack(call, "VPS setup started")
+
+def _parse_vps_host(value: str) -> Tuple[str, str]:
+    import ipaddress
+    host = value.strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1].strip()
+    if not host or len(host) > 253 or any(ch.isspace() for ch in host):
+        raise ValueError("Send a DNS hostname, IPv4 address, or IPv6 address")
+    try:
+        address = ipaddress.ip_address(host)
+        return ("ipv4" if address.version == 4 else "ipv6", address.compressed)
+    except ValueError:
+        labels = host.rstrip(".").split(".")
+        if not all(label and len(label) <= 63 and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label) for label in labels):
+            raise ValueError("That does not look like a valid DNS hostname or IP address")
+        return "hostname", host.rstrip(".")
+
+def _handle_adm_vps_wizard_text(m: types.Message, st: Dict[str, Any]) -> None:
+    uid = m.from_user.id
+    if not is_admin(uid) or not admin_can(uid, "full_access"):
+        USER_STATES.pop(uid, None)
+        bot.reply_to(m, "You do not have permission to configure VPS nodes.")
+        return
+    text = str(m.text or "").strip()
+    step = st.get("step")
+    values = dict(st.get("values") or {})
+    try:
+        if step == "name":
+            if not text or len(text) > 64:
+                raise ValueError("Send a label between 1 and 64 characters")
+            values["name"] = text
+            st.update(step="host", values=values)
+            USER_STATES[uid] = st
+            bot.reply_to(m, "<b>Step 2 of 4</b>\nSend the VPS DNS hostname, IPv4 address, or IPv6 address (brackets around IPv6 are optional).", parse_mode="HTML")
+        elif step == "host":
+            values["host_field"], values["host"] = _parse_vps_host(text)
+            st.update(step="port", values=values)
+            USER_STATES[uid] = st
+            bot.reply_to(m, "<b>Step 3 of 4</b>\nSend the SSH port (usually <code>22</code>).", parse_mode="HTML")
+        elif step == "port":
+            if not text.isdigit() or not 1 <= int(text) <= 65535:
+                raise ValueError("SSH port must be a whole number from 1 to 65535")
+            values["ssh_port"] = int(text)
+            st.update(step="username", values=values)
+            USER_STATES[uid] = st
+            bot.reply_to(m, "<b>Step 4 of 4</b>\nSend the SSH username for this VPS.", parse_mode="HTML")
+        elif step == "username":
+            if not text or len(text) > 128 or any(ch.isspace() for ch in text):
+                raise ValueError("Send a non-empty SSH username without spaces")
+            values["username"] = text
+            st.update(step="auth", values=values)
+            USER_STATES[uid] = st
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            kb.add(Btn("Password", callback_data="adm_vps_wizard_auth:password", style="success"),
+                   Btn("SSH private key", callback_data="adm_vps_wizard_auth:key", style="primary"))
+            kb.add(Btn("🔴 Cancel", callback_data="adm_vps_wizard_cancel", style="danger"))
+            bot.send_message(m.chat.id, "Choose how this VPS authenticates. You will enter the secret afterward in the protected Credentials flow.", reply_markup=kb)
+        else:
+            USER_STATES.pop(uid, None)
+            bot.reply_to(m, "The VPS setup expired. Open Infrastructure Nodes and start the wizard again.")
+    except ValueError as exc:
+        bot.reply_to(m, f"{G['no']} {esc(exc)}\nThis wizard step is still open; try again or press Cancel.", parse_mode="HTML")
+
+def action_adm_vps_wizard_auth(call: types.CallbackQuery, auth_method: str) -> None:
+    if not admin_only_call(call, "full_access"):
+        return
+    if auth_method not in {"password", "key"}:
+        ack(call, "Choose password or SSH key.", show_alert=True)
+        return
+    uid = call.from_user.id
+    st = USER_STATES.get(uid) or {}
+    values = st.get("values") or {}
+    if st.get("flow") != "await_adm_vps_wizard" or st.get("step") != "auth" or not values.get("host") or not values.get("username"):
+        ack(call, "VPS wizard expired. Start again.", show_alert=True)
+        return
+    fields = {
+        "provider": "self-hosted",
+        "username": values["username"],
+        "ssh_port": int(values.get("ssh_port", 22)),
+        "auth_method": auth_method,
+        values["host_field"]: values["host"],
+    }
+    node = new_node(str(values["name"]), "ssh", **fields)
+    nodes = _nodes_load()
+    nodes[node["id"]] = node
+    _nodes_save(nodes)
+    USER_STATES.pop(uid, None)
+    audit(uid, "node_add_wizard", f"node={node['id']} auth={auth_method}")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("🔐 Save Credentials", callback_data=f"adm_node_cred:{node['id']}", style="success"),
+           Btn("🔄 Test health", callback_data=f"adm_node_test:{node['id']}", style="primary"))
+    kb.add(Btn("🔴 Cancel", callback_data="adm_nodes", style="danger"))
+    bot.send_message(call.message.chat.id, f"🟢 <b>VPS node added</b>: {esc(node['name'])}\nNext, save the password or private key using Credentials. Before testing, verify the VPS SSH host-key fingerprint independently and trust/pin it on the panel host; strict host-key checking will reject unknown keys. The health test is read-only and reports SSH and Docker readiness.", parse_mode="HTML", reply_markup=kb)
+    ack(call, "VPS node created")
+
 def render_adm_nodes(call: types.CallbackQuery) -> None:
     if not admin_only_call(call, "full_access"):
         return
@@ -18565,18 +18745,32 @@ def render_adm_nodes(call: types.CallbackQuery) -> None:
     if not nodes:
         lines.append("No nodes configured. The local node can be tested automatically.")
     for nid, node in nodes.items():
-        lines.append(f"• <b>{esc(node.get('name', nid))}</b> — {esc(node.get('status', 'NEEDS SETUP'))} ({esc(node.get('connection_type', 'unknown'))})")
+        healthy, label = _node_health_state(node)
+        lines.append(f"• <b>{esc(node.get('name', nid))}</b> — {'🟢' if healthy else '🔴'} <b>{esc(label)}</b> ({esc(node.get('connection_type', 'unknown'))})")
+        caps = node.get("capabilities") or {}
+        if node.get("last_test"):
+            docker = "ready" if caps.get("docker") else "not detected"
+            lines.append(f"  Docker: <code>{docker}</code> · Last check: <code>{esc(node['last_test'])}</code>")
+        if node.get("health_reason"):
+            lines.append(f"  <i>{esc(str(node['health_reason'])[:120])}</i>")
     kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(Btn("Add Node", callback_data="adm_node_add", style="success"))
+    kb.add(Btn("🧭 VPS Setup Wizard", callback_data="adm_node_wizard", style="success"),
+           Btn("Add/Edit JSON", callback_data="adm_node_add", style="primary"))
     for nid, node in list(nodes.items())[:12]:
-        kb.add(Btn(f"Test {node.get('name', nid)}", callback_data=f"adm_node_test:{nid}", style="primary"),
-               Btn("Edit", callback_data=f"adm_node_edit:{nid}", style="primary"),
+        healthy, label = _node_health_state(node)
+        kb.add(Btn(f"{'🟢' if healthy else '🔴'} {label[:18]}", callback_data=f"adm_node_health:{nid}", style="success" if healthy else "danger"),
+               Btn("🔄 Test", callback_data=f"adm_node_test:{nid}", style="primary"))
+        kb.add(Btn("Edit", callback_data=f"adm_node_edit:{nid}", style="primary"),
                Btn("Disable" if node.get('enabled', True) else "Enable", callback_data=f"adm_node_disable:{nid}", style="danger"),
                Btn("Remove", callback_data=f"adm_node_remove:{nid}", style="danger"),
                Btn("Credentials", callback_data=f"adm_node_cred:{nid}", style="danger"))
-    kb.add(Btn("Test Local Node", callback_data="adm_node_test:local", style="success"),
+    local_healthy, local_label = _node_health_state({**LOCAL_NODE_HEALTH, "connection_type": "local"})
+    kb.add(Btn(f"{'🟢' if local_healthy else '🔴'} Local: {local_label}", callback_data="adm_node_health:local", style="success" if local_healthy else "danger"),
+           Btn("Test Local", callback_data="adm_node_test:local", style="success"))
+    kb.add(
            Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("sysinfo", PHOTOS["admin"]), "\n".join(lines) + FOOTER, kb, call=call)
+
 def action_adm_node_test(call: types.CallbackQuery, node_id: str) -> None:
     if not admin_only_call(call, "full_access"):
         return
@@ -18586,15 +18780,57 @@ def action_adm_node_test(call: types.CallbackQuery, node_id: str) -> None:
         node = _nodes_load().get(node_id)
         if not node:
             ack(call, "Node not found"); return
-    result = test_node(node, secret=_node_secret(node_id) if node_id != "local" else "")
-    node["status"] = result.get("state", "OFFLINE")
-    node["capabilities"] = result.get("capabilities", {})
-    node["last_test"] = ts_iso()
-    if node_id != "local":
-        nodes = _nodes_load(); nodes[node_id] = node; _nodes_save(nodes)
-    audit(call.from_user.id, "node_test", f"node={node_id} state={node['status']}")
-    ack(call, node["status"])
-    render_adm_nodes(call)
+    test_key = str(node_id)
+    with NODE_TEST_LOCK:
+        if test_key in NODE_TESTING:
+            ack(call, "Health check is already running.", show_alert=True)
+            return
+        NODE_TESTING.add(test_key)
+    ack(call, "Read-only health check started.")
+
+    def _run_check() -> None:
+        try:
+            current = {"name": "Local node", "connection_type": "local", "enabled": True} if node_id == "local" else _nodes_load().get(node_id)
+            if not current:
+                bot.send_message(call.message.chat.id, "Node was removed before the health check completed.")
+                return
+            result = test_node(current, secret=_node_secret(node_id) if node_id != "local" else "", timeout=8)
+            current["status"] = result.get("state", "OFFLINE")
+            current["capabilities"] = result.get("capabilities", {})
+            current["health_reason"] = result.get("reason", "")
+            current["last_test"] = ts_iso()
+            if node_id == "local":
+                LOCAL_NODE_HEALTH.update(current)
+            else:
+                nodes = _nodes_load()
+                if node_id not in nodes:
+                    bot.send_message(call.message.chat.id, "Node was removed before the health check completed.")
+                    return
+                nodes[node_id].update(current)
+                _nodes_save(nodes)
+            try:
+                audit(call.from_user.id, "node_test", f"node={node_id} state={current['status']}")
+            except Exception as audit_exc:
+                print(f"[node_health] audit failed: {audit_exc}", flush=True)
+            _node_health_card(call, node_id)
+        except Exception as exc:
+            print(f"[node_health] probe failed for {node_id}: {exc}", flush=True)
+            try:
+                bot.send_message(call.message.chat.id, "🔴 Health check failed unexpectedly. Check the panel logs and retry.")
+            except Exception:
+                pass
+        finally:
+            with NODE_TEST_LOCK:
+                NODE_TESTING.discard(test_key)
+
+    try:
+        threading.Thread(target=_run_check, daemon=True).start()
+    except Exception as exc:
+        with NODE_TEST_LOCK:
+            NODE_TESTING.discard(test_key)
+        print(f"[node_health] could not start probe: {exc}", flush=True)
+        bot.send_message(call.message.chat.id, "Health check could not start. Try again.")
+
 def render_adm_vault(call: types.CallbackQuery) -> None:
     if not admin_only_call(call, "full_access"):
         return
@@ -19536,6 +19772,9 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_ai_fix_"):     action_bot_ai_fix(call, data[len("bot_ai_fix_"):]); return
     if data.startswith("bot_applyfix_"):   action_bot_apply_fix(call, data[len("bot_applyfix_"):]); return
     if data.startswith("bot_rejectfix_"):  action_bot_reject_fix(call, data[len("bot_rejectfix_"):]); return
+    if data.startswith("bot_rollbackfix_"): action_bot_rollback_confirm(call, data[len("bot_rollbackfix_"):]); return
+    if data.startswith("bot_rollbackyes_"): action_bot_rollback_fix(call, data[len("bot_rollbackyes_"):]); return
+    if data.startswith("bot_rollbackno_"): action_bot_rollback_cancel(call, data[len("bot_rollbackno_"):]); return
     if data.startswith("bot_pip_"):         start_pip_install_flow(call, data.split("_", 2)[2]); return
     if data == "adm_monitor_refresh":       render_adm_live_monitor(call); return
     if data == "adm_monitor_bots":          render_adm_monitor_bots(call); return
@@ -20820,15 +21059,20 @@ def _run_bot_ai_diagnosis(call: types.CallbackQuery, bot_id: str, selected_model
             extracted_code = _extract_ai_diagnosis_patch(
                 clean_resp, target_file_path.suffix if target_file_path else "",
             )
-            
-            # Store proposed fix in bot doc temporarily pending user permission
-            if extracted_code and target_file_path:
-                b["pending_patch"] = {
-                    "file": str(target_file_path.relative_to(bot_dir)),
-                    "code": extracted_code,
-                    "timestamp": ts_iso(),
-                }
-                save_bot(b)
+            patch_candidate = bool(extracted_code and target_file_path)
+            patch_preflight: Dict[str, Any] = {"ok": False, "message": "No complete patch was proposed."}
+            rel_file = ""
+            if patch_candidate:
+                rel_file = str(target_file_path.relative_to(bot_dir))
+                patch_preflight = _sentinel_patch_preflight(rel_file, extracted_code)
+                if patch_preflight.get("ok"):
+                    b["pending_patch"] = {
+                        "file": rel_file,
+                        "code": extracted_code,
+                        "preflight": patch_preflight,
+                        "timestamp": ts_iso(),
+                    }
+                    save_bot(b)
 
             diagnosis_text = clean_resp.split("```")[0].strip() if "```" in clean_resp else clean_resp
             if len(diagnosis_text) > 800:
@@ -20846,16 +21090,25 @@ def _run_bot_ai_diagnosis(call: types.CallbackQuery, bot_id: str, selected_model
 
             patch_preview = ""
             consent_text = "No complete safe patch was prepared; your source has not been changed."
-            if extracted_code and target_file_path:
-                rel_file = str(target_file_path.relative_to(bot_dir))
-                preview = extracted_code[:1200]
-                if len(extracted_code) > len(preview):
-                    preview += "\n... (preview truncated; the complete file will be used if accepted)"
+            patch_ready = bool(patch_candidate and patch_preflight.get("ok"))
+            if patch_candidate:
+                diff = "".join(difflib.unified_diff(
+                    target_file_content.splitlines(keepends=True),
+                    extracted_code.splitlines(keepends=True),
+                    fromfile=f"a/{rel_file}", tofile=f"b/{rel_file}",
+                )) or "(The proposed file is identical to the current source.)"
+                preview = diff[:850]
+                if len(diff) > len(preview):
+                    preview += "\n… (diff truncated; only the complete validated file is stored)"
                 patch_preview = (
-                    f"\n<b>{sc('Proposed replacement')}:</b> <code>{esc(rel_file)}</code>\n"
+                    f"\n<b>{sc('Proposed unified diff')}:</b> <code>{esc(rel_file)}</code>\n"
                     f"<pre>{esc(preview)}</pre>\n"
                 )
-                consent_text = "Review the patch preview. Yes replaces the file and restarts the bot; No discards it without changing your source."
+                patch_preview += f"<b>Preflight:</b> {esc(patch_preflight.get('message', ''))}\n"
+                if patch_ready:
+                    consent_text = "Review the diff. Yes applies the syntax-checked patch and restarts the bot; an encrypted rollback remains available. No discards it."
+                else:
+                    consent_text = "Automatic fix withheld: the syntax preflight failed. Your source is unchanged."
 
             final_text = (
                 f"🛡️ <b>{sc('AI Sentinel — Self-Healing Report')}</b> (<code>{primary_model.upper()}</code>)\n"
@@ -20868,7 +21121,7 @@ def _run_bot_ai_diagnosis(call: types.CallbackQuery, bot_id: str, selected_model
             )
             
             kb = types.InlineKeyboardMarkup(row_width=2)
-            if extracted_code and target_file_path:
+            if patch_ready:
                 kb.add(Btn("🟢 Yes", callback_data=f"bot_applyfix_{bot_id}", style="success"),
                        Btn("🔴 No",  callback_data=f"bot_rejectfix_{bot_id}", style="danger"))
             else:
@@ -20963,6 +21216,69 @@ def _extract_ai_diagnosis_patch(text: str, file_suffix: str = "") -> str:
         return ""
     return match.group(2).strip()
 
+def _sentinel_patch_preflight(file_name: str, code: str) -> Dict[str, Any]:
+    """Check syntax without executing any AI-generated project code."""
+    suffix = Path(str(file_name or "")).suffix.lower()
+    if suffix in {".py", ".pyw"}:
+        try:
+            compile(str(code), f"<AI-Sentinel:{Path(file_name).name}>", "exec", dont_inherit=True)
+            return {"ok": True, "message": "Python syntax check passed (code was not executed)."}
+        except SyntaxError as exc:
+            line = f" at line {exc.lineno}" if exc.lineno else ""
+            return {"ok": False, "message": f"Python syntax check failed{line}: {exc.msg}."}
+    if suffix in {".js", ".mjs", ".cjs"}:
+        node = shutil.which("node")
+        if not node:
+            return {"ok": False, "message": "Node.js parser is unavailable; automatic patching is disabled."}
+        try:
+            with tempfile.TemporaryDirectory(prefix="cipher-sentinel-check-") as temp_dir:
+                probe = Path(temp_dir) / ("candidate" + suffix)
+                probe.write_text(str(code), encoding="utf-8")
+                result = subprocess.run([node, "--check", str(probe)], capture_output=True, text=True, timeout=10, check=False)
+            if result.returncode == 0:
+                return {"ok": True, "message": "JavaScript syntax check passed (code was not executed)."}
+            return {"ok": False, "message": "JavaScript syntax check failed; the parser rejected the replacement."}
+        except Exception as exc:
+            return {"ok": False, "message": f"JavaScript preflight could not complete ({type(exc).__name__}); automatic patching is disabled."}
+    return {"ok": False, "message": "No safe syntax parser is configured for this file type; automatic patching is disabled."}
+
+def _sentinel_atomic_write(path: Path, payload: bytes, key: Optional[bytes] = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.sentinel-", dir=str(path.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        if key:
+            write_encrypted(tmp, key, payload)
+            if read_encrypted(tmp, key) != payload:
+                raise RuntimeError("encrypted source verification failed")
+        else:
+            tmp.write_bytes(payload)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+def _sentinel_backup_root(bot_id: str) -> Path:
+    return (DIRS["encfiles"] / "sentinel_backups" / safe_name(str(bot_id))).resolve()
+
+def _sentinel_remove_backup(backup: Any, bot_id: str, preserve_key_id: str = "") -> None:
+    if not isinstance(backup, dict):
+        return
+    root = _sentinel_backup_root(bot_id)
+    path = Path(str(backup.get("path") or "")).resolve()
+    if path.parent != root:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    key_id = str(backup.get("key_id") or "")
+    if key_id and key_id != str(preserve_key_id or ""):
+        try:
+            KEYRING.remove(key_id)
+        except Exception:
+            pass
+
 def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
     """Apply an AI patch only after explicit approval; do slow restart work off-thread."""
     b = _get_manageable_ai_sentinel_bot(call, bot_id)
@@ -20981,7 +21297,19 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
         AI_SENTINEL_APPLYING.add(bot_id)
 
     def _apply_in_background() -> None:
-        key_id = ""
+        source_key_id = ""
+        backup_key_id = ""
+        backup_path: Optional[Path] = None
+        new_backup: Optional[Dict[str, Any]] = None
+        backup_key_created = False
+        old_backup: Any = None
+        target_file: Optional[Path] = None
+        enc_path: Optional[Path] = None
+        original_bytes: Optional[bytes] = None
+        old_ciphertext: Optional[bytes] = None
+        current: Optional[Dict[str, Any]] = None
+        created_source_blob = False
+        source_blob_path: Optional[Path] = None
         patch_saved = False
         try:
             current = _get_manageable_ai_sentinel_bot(call, bot_id)
@@ -21002,6 +21330,12 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
             if not plain_code.strip():
                 ack(call, "The pending patch is empty.", show_alert=True)
                 return
+            preflight = _sentinel_patch_preflight(rel_path, plain_code)
+            if not preflight.get("ok"):
+                current.pop("pending_patch", None)
+                save_bot(current)
+                ack(call, f"Patch rejected by safety preflight: {preflight.get('message', 'invalid source')}", show_alert=True)
+                return
             plain_bytes = plain_code.encode("utf-8")
 
             target_meta = None
@@ -21012,58 +21346,75 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
                     break
 
             if target_meta:
-                key_id = str(target_meta.get("key_id") or "")
-                key = KEYRING.fetch(key_id) if key_id else None
-                if not key:
+                source_key_id = str(target_meta.get("key_id") or "")
+                source_key = KEYRING.fetch(source_key_id) if source_key_id else None
+                if not source_key:
                     raise RuntimeError("encrypted source key is unavailable; reload the bot credentials and retry")
                 enc_path = Path(target_meta.get("enc_path") or "")
-                if not target_meta.get("enc_path") or not enc_path.is_file():
+                enc_root = Path(DIRS["encfiles"]).resolve()
+                if not target_meta.get("enc_path") or not enc_path.is_file() or not enc_path.resolve().is_relative_to(enc_root):
                     raise RuntimeError("encrypted source file is missing; the patch was not saved")
-                fd, tmp_name = tempfile.mkstemp(prefix=f".{enc_path.name}.sentinel-", dir=str(enc_path.parent))
-                os.close(fd)
-                enc_tmp = Path(tmp_name)
-                try:
-                    write_encrypted(enc_tmp, key, plain_bytes)
-                    if read_encrypted(enc_tmp, key) != plain_bytes:
-                        raise RuntimeError("encrypted patch verification failed")
-                    os.replace(enc_tmp, enc_path)
-                finally:
-                    enc_tmp.unlink(missing_ok=True)
-                target_meta["size"] = len(plain_bytes)
-                target_meta["patched_at"] = ts_iso()
+                old_ciphertext = enc_path.read_bytes()
+                original_bytes = read_encrypted(enc_path, source_key)
             else:
-                # Workspace-only/editor-created files are wiped from the
-                # plaintext Sandbox directory after launch. Add them to the
-                # encrypted manifest so a restart restores the approved patch.
                 enc_files = current.setdefault("enc_files", [])
                 if not isinstance(enc_files, list):
                     raise RuntimeError("bot source manifest is invalid; the patch was not saved")
+                if not target_file.is_file():
+                    raise RuntimeError("the original workspace source is missing; patch was not saved")
+                original_bytes = target_file.read_bytes()
+
+            if original_bytes is None:
+                raise RuntimeError("could not read the original source for a safe rollback")
+            old_backup = current.get("ai_sentinel_backup")
+            backup_key_id = str(current.get("ai_sentinel_backup_key_id") or (old_backup.get("key_id") if isinstance(old_backup, dict) else ""))
+            backup_key = KEYRING.fetch(backup_key_id) if backup_key_id else None
+            if not backup_key:
+                backup_key_id = secrets.token_urlsafe(16)
+                backup_key = KEYRING.new_key()
+                if not KEYRING.store(backup_key_id, backup_key, {"purpose": "ai_sentinel_rollback", "bot_id": bot_id, "file": rel_path}):
+                    raise RuntimeError("could not persist the encrypted rollback key; source was not changed")
+                backup_key_created = True
+            backup_root = _sentinel_backup_root(bot_id)
+            backup_root.mkdir(parents=True, exist_ok=True)
+            backup_path = backup_root / f"{secrets.token_hex(12)}.enc"
+            _sentinel_atomic_write(backup_path, original_bytes, backup_key)
+            new_backup = {"file": rel_path, "path": str(backup_path), "key_id": backup_key_id, "created": ts_iso(), "size": len(original_bytes)}
+            current["ai_sentinel_backup_key_id"] = backup_key_id
+
+            if target_meta:
+                _sentinel_atomic_write(enc_path, plain_bytes, source_key)
+                target_meta["size"] = len(plain_bytes)
+                target_meta["patched_at"] = ts_iso()
+            else:
+                # Editor-created files must enter the encrypted manifest so
+                # Sandbox materialization restores the approved replacement.
                 stored = store_uploaded_file(call.from_user, rel_path, plain_bytes)
-                key_id = str(stored["key_id"])
+                source_key_id = str(stored["key_id"])
+                source_blob_path = Path(stored["path"])
+                created_source_blob = True
+                enc_path = source_blob_path
+                new_backup["source_key_id"] = source_key_id
                 enc_files.append({
-                    "key_id": stored["key_id"],
-                    "enc_path": stored["path"],
+                    "key_id": source_key_id,
+                    "enc_path": str(source_blob_path),
                     "filename": rel_path,
                     "rel_path": rel_path,
                     "size": stored["size"],
                     "patched_at": ts_iso(),
                 })
-
+            if target_meta:
+                new_backup["source_key_id"] = source_key_id
+            current["ai_sentinel_backup"] = new_backup
             target_file.parent.mkdir(parents=True, exist_ok=True)
-            if target_file.exists():
-                shutil.copy2(target_file, target_file.with_suffix(target_file.suffix + ".bak"))
-            fd, tmp_name = tempfile.mkstemp(prefix=f".{target_file.name}.sentinel-", dir=str(target_file.parent))
-            try:
-                with os.fdopen(fd, "wb") as tmp_file:
-                    tmp_file.write(plain_bytes)
-                os.replace(tmp_name, target_file)
-            finally:
-                Path(tmp_name).unlink(missing_ok=True)
+            _sentinel_atomic_write(target_file, plain_bytes)
 
             current.pop("pending_patch", None)
             save_bot(current)
             patch_saved = True
             AI_SENTINEL_MODEL_SELECTIONS.pop(int(call.from_user.id), None)
+            if isinstance(old_backup, dict) and old_backup.get("path") != str(backup_path):
+                _sentinel_remove_backup(old_backup, bot_id, preserve_key_id=backup_key_id)
 
             # Yes is explicit operator approval; use the normal manual restart
             # path so crash-loop guards are cleared as they are on Start/Restart.
@@ -21074,14 +21425,45 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
             if res.get("ok"):
                 ack(call, "Fix applied successfully! Bot restarted.")
             else:
-                ack(call, f"Patch saved, but restart failed: {res.get('error', 'unknown error')}", show_alert=True)
+                ack(call, f"Patch saved, but restart failed: {res.get('error', 'unknown error')}. Use Roll back Sentinel fix on the bot screen to restore the encrypted previous source.", show_alert=True)
             render_bot_view(call, bot_id)
         except Exception as e:
             print(f"[apply_fix] error: {e}", flush=True)
+            if not patch_saved:
+                try:
+                    if enc_path and old_ciphertext is not None and enc_path.exists():
+                        _sentinel_atomic_write(enc_path, old_ciphertext)
+                    elif created_source_blob and source_blob_path:
+                        source_blob_path.unlink(missing_ok=True)
+                        if current and isinstance(current.get("enc_files"), list):
+                            current["enc_files"] = [f for f in current["enc_files"] if str(f.get("enc_path")) != str(source_blob_path)]
+                        if source_key_id:
+                            KEYRING.remove(source_key_id)
+                    if target_file and original_bytes is not None:
+                        _sentinel_atomic_write(target_file, original_bytes)
+                except Exception as rollback_exc:
+                    print(f"[apply_fix] failed to restore pre-apply bytes: {rollback_exc}", flush=True)
+                if new_backup:
+                    _sentinel_remove_backup(new_backup, bot_id)
+                else:
+                    if backup_path:
+                        try:
+                            if backup_path.parent == _sentinel_backup_root(bot_id):
+                                backup_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    if backup_key_id:
+                        try:
+                            if backup_key_created:
+                                KEYRING.remove(backup_key_id)
+                            else:
+                                KEYRING.wipe(backup_key_id)
+                        except Exception:
+                            pass
             prefix = "Patch saved, but restart failed" if patch_saved else "Failed to apply patch"
             ack(call, f"{prefix}: {e}", show_alert=True)
         finally:
-            if key_id:
+            for key_id in {source_key_id, backup_key_id} - {""}:
                 try:
                     KEYRING.wipe(key_id)
                 except Exception:
@@ -21097,6 +21479,145 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
             AI_SENTINEL_APPLYING.discard(bot_id)
         print(f"[apply_fix] thread start error: {e}", flush=True)
         ack(call, "Could not start the patch operation. Please try again.", show_alert=True)
+
+def action_bot_rollback_confirm(call: types.CallbackQuery, bot_id: str) -> None:
+    b = _get_manageable_ai_sentinel_bot(call, bot_id)
+    if not b:
+        return
+    backup = b.get("ai_sentinel_backup")
+    if not isinstance(backup, dict):
+        ack(call, "No Sentinel rollback is available.", show_alert=True)
+        return
+    rel_path = str(backup.get("file") or "(unknown source)")
+    text = (
+        f"<b>🛡️ Confirm Sentinel rollback</b>\n{G['div_eq']}\n"
+        f"This will replace <code>{esc(rel_path)}</code> with the encrypted pre-fix source and restart the bot. "
+        "The currently patched version may be discarded. Continue only if you want to undo the last AI fix."
+        f"{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("🟢 Confirm rollback", callback_data=f"bot_rollbackyes_{bot_id}", style="success"),
+           Btn("🔴 Keep current patch", callback_data=f"bot_rollbackno_{bot_id}", style="danger"))
+    show_text(call.message.chat.id, text, kb, call=call)
+    ack(call, "Review the rollback details.")
+
+def action_bot_rollback_cancel(call: types.CallbackQuery, bot_id: str) -> None:
+    if not _get_manageable_ai_sentinel_bot(call, bot_id):
+        return
+    ack(call, "No changes made; the current patch was kept.")
+    render_bot_view(call, bot_id)
+
+def action_bot_rollback_fix(call: types.CallbackQuery, bot_id: str) -> None:
+    """Restore the encrypted pre-fix source snapshot and restart on explicit request."""
+    b = _get_manageable_ai_sentinel_bot(call, bot_id)
+    if not b:
+        return
+    backup = b.get("ai_sentinel_backup")
+    if not isinstance(backup, dict):
+        ack(call, "No Sentinel rollback is available.", show_alert=True)
+        return
+    bot_id = str(bot_id)
+    with AI_SENTINEL_APPLY_LOCK:
+        if bot_id in AI_SENTINEL_APPLYING:
+            ack(call, "A Sentinel source operation is already running.", show_alert=True)
+            return
+        AI_SENTINEL_APPLYING.add(bot_id)
+
+    def _rollback_in_background() -> None:
+        source_key_id = ""
+        backup_key_id = ""
+        source_path: Optional[Path] = None
+        target_file: Optional[Path] = None
+        old_ciphertext: Optional[bytes] = None
+        old_plain: Optional[bytes] = None
+        source_saved = False
+        current: Optional[Dict[str, Any]] = None
+        try:
+            current = _get_manageable_ai_sentinel_bot(call, bot_id)
+            if not current:
+                return
+            backup = current.get("ai_sentinel_backup")
+            if not isinstance(backup, dict):
+                raise RuntimeError("rollback backup is unavailable")
+            rel_path = str(backup.get("file") or "").replace("\\", "/").lstrip("/")
+            bot_dir = Path(current["dir"]).resolve()
+            target_file = (bot_dir / rel_path).resolve()
+            if not rel_path or target_file == bot_dir or bot_dir not in target_file.parents:
+                raise RuntimeError("rollback source path is invalid")
+            backup_root = _sentinel_backup_root(bot_id)
+            backup_path = Path(str(backup.get("path") or "")).resolve()
+            if backup_path.parent != backup_root or not backup_path.is_file():
+                raise RuntimeError("encrypted rollback file is missing or outside the expected storage directory")
+            backup_key_id = str(backup.get("key_id") or "")
+            backup_key = KEYRING.fetch(backup_key_id) if backup_key_id else None
+            if not backup_key:
+                raise RuntimeError("rollback encryption key is unavailable")
+            restored_bytes = read_encrypted(backup_path, backup_key)
+            target_meta = next((f for f in (current.get("enc_files") or [])
+                                if str(f.get("rel_path") or f.get("filename", "")).replace("\\", "/").lstrip("/") == rel_path), None)
+            if not target_meta:
+                raise RuntimeError("encrypted source manifest entry for rollback is missing")
+            source_key_id = str(target_meta.get("key_id") or "")
+            if source_key_id != str(backup.get("source_key_id") or ""):
+                raise RuntimeError("rollback source key does not match the current encrypted manifest")
+            source_key = KEYRING.fetch(source_key_id) if source_key_id else None
+            if not source_key:
+                raise RuntimeError("encrypted source key is unavailable")
+            source_path = Path(str(target_meta.get("enc_path") or ""))
+            enc_root = Path(DIRS["encfiles"]).resolve()
+            if not source_path.is_file() or not source_path.resolve().is_relative_to(enc_root):
+                raise RuntimeError("encrypted source file is missing")
+            old_ciphertext = source_path.read_bytes()
+            old_plain = read_encrypted(source_path, source_key)
+            _sentinel_atomic_write(source_path, restored_bytes, source_key)
+            _sentinel_atomic_write(target_file, restored_bytes)
+            target_meta["size"] = len(restored_bytes)
+            target_meta["rolled_back_at"] = ts_iso()
+            save_bot(current)
+            source_saved = True
+            try:
+                res = restart_child(current, manual=True)
+            except Exception as exc:
+                res = {"ok": False, "error": str(exc)}
+            if res.get("ok"):
+                current.pop("ai_sentinel_backup", None)
+                save_bot(current)
+                _sentinel_remove_backup(backup, bot_id, preserve_key_id=str(current.get("ai_sentinel_backup_key_id") or ""))
+                try:
+                    audit(call.from_user.id, "ai_sentinel_rollback", f"bot={bot_id} file={rel_path}")
+                except Exception as audit_exc:
+                    print(f"[sentinel_rollback] audit failed: {audit_exc}", flush=True)
+                ack(call, "Previous source restored and bot restarted.")
+            else:
+                ack(call, f"Previous source restored, but restart failed: {res.get('error', 'unknown error')}. The rollback copy is retained; correct the startup issue and try again.", show_alert=True)
+            render_bot_view(call, bot_id)
+        except Exception as exc:
+            print(f"[sentinel_rollback] error for {bot_id}: {exc}", flush=True)
+            if not source_saved and source_path and old_ciphertext is not None:
+                try:
+                    _sentinel_atomic_write(source_path, old_ciphertext)
+                    if target_file and old_plain is not None:
+                        _sentinel_atomic_write(target_file, old_plain)
+                except Exception as restore_exc:
+                    print(f"[sentinel_rollback] failed to restore current source: {restore_exc}", flush=True)
+            ack(call, "Rollback failed safely. The current encrypted source was not intentionally changed.", show_alert=True)
+        finally:
+            for key_id in {source_key_id, backup_key_id} - {""}:
+                try:
+                    KEYRING.wipe(key_id)
+                except Exception:
+                    pass
+            with AI_SENTINEL_APPLY_LOCK:
+                AI_SENTINEL_APPLYING.discard(bot_id)
+
+    try:
+        loading(call, "Restoring previous encrypted source...")
+        threading.Thread(target=_rollback_in_background, daemon=True).start()
+    except Exception as exc:
+        with AI_SENTINEL_APPLY_LOCK:
+            AI_SENTINEL_APPLYING.discard(bot_id)
+        print(f"[sentinel_rollback] thread start error: {exc}", flush=True)
+        ack(call, "Could not start rollback. Please try again.", show_alert=True)
 
 
 def action_bot_reject_fix(call: types.CallbackQuery, bot_id: str) -> None:

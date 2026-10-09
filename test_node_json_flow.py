@@ -116,4 +116,75 @@ bot.on_text(fenced_message)
 assert "No Add/Edit Node step is active" in replies[-1]
 assert len(nodes) == 2
 
-print("Node JSON flow regression tests passed")
+# The guided VPS flow accepts DNS/IPv4/IPv6 endpoints and never asks for a
+# password or private key in its node-details JSON/text fields.
+wizard_messages = []
+health_cards = []
+bot.admin_only_call = lambda call, action: True
+bot.ack = lambda *args, **kwargs: None
+bot.bot.send_message = lambda chat_id, text, **kwargs: wizard_messages.append((chat_id, str(text), kwargs))
+bot.show_menu = lambda chat_id, photo, text, markup, call=None: wizard_messages.append((chat_id, str(text), {"markup": markup}))
+bot.show_text = lambda chat_id, text, markup=None, call=None: health_cards.append((str(text), markup))
+callback = SimpleNamespace(from_user=user, message=SimpleNamespace(chat=chat, message_id=500))
+bot.action_adm_vps_wizard_start(callback)
+assert bot.USER_STATES[uid]["step"] == "name"
+
+def wizard_reply(text, message_id):
+    message = SimpleNamespace(from_user=user, chat=chat, text=text, message_id=message_id)
+    bot.on_text(message)
+
+wizard_reply("IPv6 VPS", 501)
+wizard_reply("[2001:db8::1234]", 502)
+wizard_reply("22", 503)
+wizard_reply("cipherbot", 504)
+assert bot.USER_STATES[uid]["step"] == "auth"
+auth_buttons = [b for row in wizard_messages[-1][2]["reply_markup"].keyboard for b in row]
+assert {b.callback_data for b in auth_buttons} >= {"adm_vps_wizard_auth:password", "adm_vps_wizard_auth:key", "adm_vps_wizard_cancel"}
+bot.action_adm_vps_wizard_auth(callback, "key")
+assert uid not in bot.USER_STATES
+vps_node = next(node for node in nodes.values() if node["name"] == "IPv6 VPS")
+assert vps_node["connection_type"] == "ssh"
+assert vps_node["ipv6"] == "2001:db8::1234" and vps_node["ssh_port"] == 22
+assert vps_node["username"] == "cipherbot" and vps_node["auth_method"] == "key"
+assert "password" not in vps_node and "private_key" not in vps_node
+assert "node added" in wizard_messages[-1][1].lower()
+credential_buttons = [b for row in wizard_messages[-1][2]["reply_markup"].keyboard for b in row]
+assert any(b.callback_data == f"adm_node_cred:{vps_node['id']}" for b in credential_buttons)
+
+# Node cards present visible success/danger health buttons, based on stored
+# readiness, and the read-only probe updates the status asynchronously.
+ready_node = bot.new_node("Ready VPS", "ssh", hostname="vps.example.test", username="cipherbot", auth_method="key")
+ready_node.update(status="AUTHENTICATED", capabilities={"docker": True, "dockerVersion": "29.1.3"})
+nodes[ready_node["id"]] = ready_node
+bot.render_adm_nodes(callback)
+node_markup = wizard_messages[-1][2]["markup"]
+node_buttons = [b for row in node_markup.keyboard for b in row]
+assert any(b.callback_data == f"adm_node_health:{ready_node['id']}" and b.style == "success" for b in node_buttons)
+assert any(b.callback_data == f"adm_node_health:{vps_node['id']}" and b.style == "danger" for b in node_buttons)
+bot.action_adm_node_health(callback, ready_node["id"])
+assert "Ready VPS health" in health_cards[-1][0]
+assert "READY" in health_cards[-1][0]
+
+class ImmediateThread:
+    def __init__(self, target, daemon=False):
+        self.target = target
+    def start(self):
+        self.target()
+
+original_thread = bot.threading.Thread
+original_test_node = bot.test_node
+bot.threading.Thread = ImmediateThread
+bot.test_node = lambda node, secret="", timeout=8: {
+    "state": "AUTHENTICATED", "capabilities": {"docker": True, "dockerVersion": "29.1.3"}
+}
+bot.action_adm_node_test(callback, vps_node["id"])
+assert nodes[vps_node["id"]]["status"] == "AUTHENTICATED"
+assert nodes[vps_node["id"]]["capabilities"]["docker"] is True
+assert nodes[vps_node["id"]]["last_test"]
+assert "READY" in health_cards[-1][0]
+health_buttons = [b for row in health_cards[-1][1].keyboard for b in row]
+assert any(b.style == "success" and b.callback_data == "noop" for b in health_buttons)
+bot.threading.Thread = original_thread
+bot.test_node = original_test_node
+
+print("Node JSON and VPS wizard/health regressions passed")

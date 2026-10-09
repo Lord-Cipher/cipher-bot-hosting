@@ -74,11 +74,17 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     original_model_action = bot.action_bot_ai_model_pick
     original_apply_action = bot.action_bot_apply_fix
     original_reject_action = bot.action_bot_reject_fix
+    original_rollback_action = bot.action_bot_rollback_fix
+    original_rollback_confirm = bot.action_bot_rollback_confirm
+    original_rollback_cancel = bot.action_bot_rollback_cancel
     bot.action_bot_ai_model_pick = lambda call, model, callback_bot_id=None: routed_callbacks.append(
         ("model", callback_bot_id, model)
     )
     bot.action_bot_apply_fix = lambda call, bid: routed_callbacks.append(("yes", bid))
     bot.action_bot_reject_fix = lambda call, bid: routed_callbacks.append(("no", bid))
+    bot.action_bot_rollback_fix = lambda call, bid: routed_callbacks.append(("rollback", bid))
+    bot.action_bot_rollback_confirm = lambda call, bid: routed_callbacks.append(("rollback_confirm", bid))
+    bot.action_bot_rollback_cancel = lambda call, bid: routed_callbacks.append(("rollback_cancel", bid))
     bot._route_callback(owner_call, f"bot_ai_model_{bot_id}_gpt-4o-mini")
     assert routed_callbacks[-1] == ("model", bot_id, "gpt-4o-mini")
     bot._route_callback(owner_call, f"bot_ai_model_gpt-4o-mini")
@@ -87,12 +93,29 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert routed_callbacks[-1] == ("yes", bot_id)
     bot._route_callback(owner_call, f"bot_rejectfix_{bot_id}")
     assert routed_callbacks[-1] == ("no", bot_id)
+    bot._route_callback(owner_call, f"bot_rollbackfix_{bot_id}")
+    assert routed_callbacks[-1] == ("rollback_confirm", bot_id)
+    bot._route_callback(owner_call, f"bot_rollbackyes_{bot_id}")
+    assert routed_callbacks[-1] == ("rollback", bot_id)
+    bot._route_callback(owner_call, f"bot_rollbackno_{bot_id}")
+    assert routed_callbacks[-1] == ("rollback_cancel", bot_id)
     bot.action_bot_ai_model_pick = original_model_action
     bot.action_bot_apply_fix = original_apply_action
     bot.action_bot_reject_fix = original_reject_action
+    bot.action_bot_rollback_fix = original_rollback_action
+    bot.action_bot_rollback_confirm = original_rollback_confirm
+    bot.action_bot_rollback_cancel = original_rollback_cancel
 
     pool = bot.get_plan_ai_models("lifetime")
     assert len(pool) > 1
+    sentinel_bot["ai_sentinel_backup"] = {"file": "main.py"}
+    bot.action_bot_rollback_confirm(owner_call, bot_id)
+    _, rollback_text, rollback_markup = shown_texts[-1]
+    rollback_buttons = [b for row in rollback_markup.keyboard for b in row]
+    assert "main.py" in rollback_text
+    assert next(b for b in rollback_buttons if b.callback_data == f"bot_rollbackyes_{bot_id}").style == "success"
+    assert next(b for b in rollback_buttons if b.callback_data == f"bot_rollbackno_{bot_id}").style == "danger"
+    sentinel_bot.pop("ai_sentinel_backup", None)
     assert bot._extract_ai_diagnosis_patch("Diagnosis\n```python\nprint('ok')\n```", ".py") == "print('ok')"
     assert bot._extract_ai_diagnosis_patch("Diagnosis\n```javascript\nconsole.log('ok')\n```") == "console.log('ok')"
     assert bot._extract_ai_diagnosis_patch("```javascript\nconsole.log('wrong file type')\n```", ".py") == ""
@@ -160,6 +183,8 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     original_snapshot = bot._bot_source_snapshot
     original_api = bot._call_ai_api
     original_save = bot.save_bot
+    original_audit = bot.audit
+    bot.audit = lambda *args, **kwargs: None
     original_last_used = bot.AI_LAST_MODEL_USED.get(9001)
     bot.child_status = lambda bid, record: {"logs": ["NameError: x"]}
     bot._bot_source_snapshot = lambda record: [("main.py", "print('original')\n")]
@@ -179,6 +204,9 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert no.callback_data == f"bot_rejectfix_{bot_id}" and no.style == "danger"
     assert yes.to_dict().get("style") == "success"
     assert no.to_dict().get("style") == "danger"
+    assert "-print('original')" in report_text and "+print('fixed')" in report_text
+    assert "syntax check passed" in report_text
+    assert bot._sentinel_patch_preflight("main.py", "if True print('broken')\n")["ok"] is False
 
     # No removes the stored proposal and leaves the source file untouched.
     bot.action_bot_reject_fix(owner_call, bot_id)
@@ -186,19 +214,42 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert source_path.read_text(encoding="utf-8") == "print('original')\n"
     assert shown_texts[-1][2] is not None
 
+    # Invalid syntax is shown but never receives a Yes button or a pending
+    # patch, and the source remains untouched.
+    bot._call_ai_api = lambda prompt, user_plan, uid, preferred_model=None: (
+        "The syntax is broken.\n```python\nif True print('broken')\n```"
+    )
+    bot._run_bot_ai_diagnosis(owner_call, bot_id, chosen_model)
+    _, invalid_report, invalid_markup = shown_texts[-1]
+    invalid_buttons = [b for row in invalid_markup.keyboard for b in row]
+    assert "syntax check failed" in invalid_report
+    assert not any(b.callback_data == f"bot_applyfix_{bot_id}" for b in invalid_buttons)
+    assert "pending_patch" not in sentinel_bot
+    assert source_path.read_text(encoding="utf-8") == "print('original')\n"
+    bot._call_ai_api = lambda prompt, user_plan, uid, preferred_model=None: (
+        "The crash uses an undefined variable.\n```python\nprint('fixed')\n```"
+    )
+
     # Yes persists a workspace-only source into encrypted storage before the
     # Sandbox source-wipe/restart, and uses the ordinary manual restart path.
     encryption_key = bot.Fernet.generate_key()
-    encrypted_source = Path(tmp) / "sentinel-main.enc"
+    encrypted_source = Path(tmp) / "encrypted" / "sentinel-main.enc"
     original_store = bot.store_uploaded_file
     original_fetch_key = bot.KEYRING.fetch
     original_wipe_key = bot.KEYRING.wipe
+    original_new_key = bot.KEYRING.new_key
+    original_store_key = bot.KEYRING.store
+    original_remove_key = bot.KEYRING.remove
+    original_encfiles_dir = bot.DIRS["encfiles"]
+    bot.DIRS["encfiles"] = Path(tmp) / "encrypted"
+    test_keys = {"sentinel-test-key": encryption_key}
     original_restart_child = bot.restart_child
     original_render_bot_view = bot.render_bot_view
     original_thread = bot.threading.Thread
     restart_calls = []
 
     def fake_store_uploaded_file(uploader, filename, plain):
+        encrypted_source.parent.mkdir(parents=True, exist_ok=True)
         encrypted_source.write_bytes(bot.Fernet(encryption_key).encrypt(plain))
         return {"key_id": "sentinel-test-key", "path": str(encrypted_source), "size": len(plain)}
 
@@ -210,8 +261,11 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
             self.target()
 
     bot.store_uploaded_file = fake_store_uploaded_file
-    bot.KEYRING.fetch = lambda key_id: encryption_key if key_id == "sentinel-test-key" else None
+    bot.KEYRING.new_key = lambda: encryption_key
+    bot.KEYRING.store = lambda key_id, key, meta: (test_keys.__setitem__(key_id, key) or True)
+    bot.KEYRING.fetch = lambda key_id: test_keys.get(key_id)
     bot.KEYRING.wipe = lambda key_id: None
+    bot.KEYRING.remove = lambda key_id: test_keys.pop(key_id, None)
     bot.restart_child = lambda record, manual=False: restart_calls.append((record["id"], manual)) or {"ok": True}
     bot.render_bot_view = lambda call, bid: None
     bot.threading.Thread = ImmediateThread
@@ -224,6 +278,10 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert bot.Fernet(encryption_key).decrypt(encrypted_source.read_bytes()) == b"print('fixed')\n"
     assert restart_calls == [(bot_id, True)]
     assert acknowledgements[-1][0] == "Fix applied successfully! Bot restarted."
+    first_backup = sentinel_bot["ai_sentinel_backup"]
+    assert Path(first_backup["path"]).is_file()
+    assert bot.Fernet(test_keys[first_backup["key_id"]]).decrypt(Path(first_backup["path"]).read_bytes()) == b"print('original')\n"
+    assert not source_path.with_suffix(".py.bak").exists()
 
     # A Sandbox wipe must not erase the approved edit: start materialization
     # restores the patched source from the new encrypted manifest entry.
@@ -239,6 +297,19 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert source_path.read_text(encoding="utf-8") == "print('updated')\n"
     assert bot.Fernet(encryption_key).decrypt(encrypted_source.read_bytes()) == b"print('updated')\n"
     assert restart_calls == [(bot_id, True), (bot_id, True)]
+    second_backup = sentinel_bot["ai_sentinel_backup"]
+    assert second_backup["path"] != first_backup["path"]
+    assert second_backup["key_id"] == first_backup["key_id"]
+    assert not Path(first_backup["path"]).exists()
+    assert bot.Fernet(test_keys[second_backup["key_id"]]).decrypt(Path(second_backup["path"]).read_bytes()) == b"print('fixed')\n"
+
+    # Explicit rollback restores the encrypted pre-patch version and restarts.
+    bot.action_bot_rollback_fix(owner_call, bot_id)
+    assert source_path.read_text(encoding="utf-8") == "print('fixed')\n"
+    assert bot.Fernet(encryption_key).decrypt(encrypted_source.read_bytes()) == b"print('fixed')\n"
+    assert "ai_sentinel_backup" not in sentinel_bot
+    assert not Path(second_backup["path"]).exists()
+    assert restart_calls == [(bot_id, True), (bot_id, True), (bot_id, True)]
 
     # Missing encryption keys fail before any source/blob change and retain the
     # pending proposal so the owner can retry after repairing the keyring.
@@ -246,18 +317,38 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     sentinel_bot["pending_patch"] = {"file": "main.py", "code": "print('third attempt')\n"}
     bot.KEYRING.fetch = lambda key_id: None
     bot.action_bot_apply_fix(owner_call, bot_id)
-    assert source_path.read_text(encoding="utf-8") == "print('updated')\n"
+    assert source_path.read_text(encoding="utf-8") == "print('fixed')\n"
     assert encrypted_source.read_bytes() == encrypted_before
     assert sentinel_bot["pending_patch"]["code"] == "print('third attempt')\n"
     assert "encrypted source key is unavailable" in acknowledgements[-1][0]
-    assert restart_calls == [(bot_id, True), (bot_id, True)]
+    assert restart_calls == [(bot_id, True), (bot_id, True), (bot_id, True)]
+
+    # If a syntactically valid patch still fails to restart, Sentinel retains
+    # the encrypted previous version and tells the owner where to roll back.
+    bot.KEYRING.fetch = lambda key_id: test_keys.get(key_id)
+    bot.restart_child = lambda record, manual=False: restart_calls.append((record["id"], manual)) or {"ok": False, "error": "simulated startup failure"}
+    sentinel_bot["pending_patch"] = {"file": "main.py", "code": "print('runtime failure')\n"}
+    bot.action_bot_apply_fix(owner_call, bot_id)
+    failed_restart_backup = sentinel_bot["ai_sentinel_backup"]
+    assert Path(failed_restart_backup["path"]).is_file()
+    assert bot.Fernet(test_keys[failed_restart_backup["key_id"]]).decrypt(Path(failed_restart_backup["path"]).read_bytes()) == b"print('fixed')\n"
+    assert "Roll back Sentinel fix" in acknowledgements[-1][0]
+    bot.restart_child = lambda record, manual=False: restart_calls.append((record["id"], manual)) or {"ok": True}
+    bot.action_bot_rollback_fix(owner_call, bot_id)
+    assert source_path.read_text(encoding="utf-8") == "print('fixed')\n"
+    assert "ai_sentinel_backup" not in sentinel_bot
+    assert not Path(failed_restart_backup["path"]).exists()
+    assert restart_calls == [(bot_id, True)] * 5
 
     bot.store_uploaded_file = original_store
     bot.KEYRING.fetch = original_fetch_key
     bot.KEYRING.wipe = original_wipe_key
+    bot.KEYRING.new_key = original_new_key
+    bot.KEYRING.store = original_store_key
+    bot.KEYRING.remove = original_remove_key
+    bot.DIRS["encfiles"] = original_encfiles_dir
     bot.restart_child = original_restart_child
     bot.render_bot_view = original_render_bot_view
-    bot.threading.Thread = original_thread
     sentinel_bot.pop("pending_patch", None)
 
     # Another user cannot start diagnosis or apply a crafted/stale callback.
@@ -266,7 +357,7 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert len(shown_menus) == menus_before_unauthorized_attempt
     sentinel_bot["pending_patch"] = {"file": "main.py", "code": "print('attacker')"}
     bot.action_bot_apply_fix(user_call, bot_id)
-    assert source_path.read_text(encoding="utf-8") == "print('updated')\n"
+    assert source_path.read_text(encoding="utf-8") == "print('fixed')\n"
     assert any(kwargs.get("show_alert") for _, kwargs in acknowledgements)
 
     # Even an authorized stale/corrupt pending patch cannot escape the bot directory.
@@ -274,13 +365,15 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     sentinel_bot["pending_patch"] = {"file": "../outside.py", "code": "print('escape')"}
     bot.action_bot_apply_fix(owner_call, bot_id)
     assert not outside_path.exists()
-    assert source_path.read_text(encoding="utf-8") == "print('updated')\n"
+    assert source_path.read_text(encoding="utf-8") == "print('fixed')\n"
     assert any("path" in text.lower() and kwargs.get("show_alert") for text, kwargs in acknowledgements)
+    bot.threading.Thread = original_thread
 
     bot.child_status = original_status
     bot._bot_source_snapshot = original_snapshot
     bot._call_ai_api = original_api
     bot.save_bot = original_save
+    bot.audit = original_audit
     if original_last_used is None:
         bot.AI_LAST_MODEL_USED.pop(9001, None)
     else:
