@@ -26,7 +26,7 @@ Log into your VPS via SSH as `root` (or a sudo-enabled user) and install Python 
 
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y python3 python3-pip python3-venv git curl
+sudo apt install -y python3 python3-pip python3-venv git curl openssh-client
 ```
 
 ---
@@ -202,6 +202,33 @@ If the worker is a **Freestyle VM reached through its SSH gateway**, use `hostna
 ```
 
 Do not put a password, access token, or private key in the JSON. After adding the node, open its **Credentials** button and submit the SSH credential separately: the Freestyle access token for `auth_method: "password"`, or the complete unencrypted private key for `auth_method: "key"`. The credential is encrypted at rest and the submitted message is deleted after capture. Then press **Test**. A successful SSH check shows `AUTHENTICATED`; verify Docker is listed in the detected capabilities too. The control-panel service user must also trust the SSH host key in its `known_hosts` file; do not disable host-key validation.
+
+#### Trust Freestyle's SSH gateway from the control-panel VPS
+
+If the health check reports `Server 'beta-ssh.freestyle.sh' not found in known_hosts`, SSH authentication has not started yet: the panel's service account does not trust the gateway host key. Freestyle's documented SSH gateway is `beta-ssh.freestyle.sh` ([Freestyle SSH docs](https://www.freestyle.sh/docs/vms/ssh)). The docs do not publish its host-key fingerprint, so verify the fingerprint with Freestyle through an independent trusted channel before adding it. **Do not trust an unverified `ssh-keyscan` result.**
+
+Run these commands on the control-panel VPS. The example assumes the systemd service runs as `cipherbot`; use the actual `User=` from `/etc/systemd/system/cipherbot.service` if different:
+
+```bash
+sudo -u cipherbot mkdir -p /home/cipherbot/.ssh
+sudo chmod 700 /home/cipherbot/.ssh
+
+ssh-keyscan -p 22 beta-ssh.freestyle.sh > /tmp/freestyle-hostkey
+ssh-keygen -lf /tmp/freestyle-hostkey
+```
+
+Compare **each displayed fingerprint** with Freestyle's independently verified value. Only after it matches, install the key for the service user and restart the panel:
+
+```bash
+sudo sh -c 'cat /tmp/freestyle-hostkey >> /home/cipherbot/.ssh/known_hosts'
+sudo chown cipherbot:cipherbot /home/cipherbot/.ssh/known_hosts
+sudo chmod 600 /home/cipherbot/.ssh/known_hosts
+rm -f /tmp/freestyle-hostkey
+
+sudo systemctl restart cipherbot
+```
+
+Then press **Test** again in Infrastructure Nodes. If `User=` is not `cipherbot`, put `known_hosts` in that service user's home directory with matching ownership and permissions. Do not disable strict host-key checking.
 
 Turn **Admin → Bot Config → Sandbox → Network** on only if workloads are allowed internet access. Sandbox starts blocked by default per bot: open the bot's action menu and toggle **Sandbox Network** for that bot. Both the global admin switch and per-bot switch must be on before a hosted bot container receives network access.
 
