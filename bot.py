@@ -10906,25 +10906,62 @@ def on_text(m: types.Message) -> None:
                 key_id, key, cipher = encrypt_file(token.encode())
                 KEYRING.store(key_id, key, {"purpose": "gh_user_token", "uid": uid})
                 d = db_load()
-                if str(uid) in d["users"]:
-                    # Store both key_id (to retrieve key from KEYRING) and
-                    # the cipher (base64-encoded) so we can decrypt later.
-                    d["users"][str(uid)]["gh_token_key_id"] = key_id
-                    d["users"][str(uid)]["gh_token_cipher"] = _b64.b64encode(cipher).decode()
-                    db_save(d)
+                if str(uid) not in d["users"]:
+                    raise RuntimeError("User profile is not initialized; reopen the bot and try again.")
+                # Store both key_id (to retrieve key from KEYRING) and
+                # the cipher (base64-encoded) so we can decrypt later.
+                d["users"][str(uid)]["gh_token_key_id"] = key_id
+                d["users"][str(uid)]["gh_token_cipher"] = _b64.b64encode(cipher).decode()
+                db_save(d)
                 audit(uid, "gh_user_token_set", "")
                 bot.reply_to(m, f"{G['ok']} GitHub token saved securely. You can now clone a repo.",
                              parse_mode="HTML")
             except Exception as e:
                 bot.reply_to(m, f"{G['no']} Could not save token: <code>{esc(e)}</code>", parse_mode="HTML")
             return
+        if flow == "await_gh_browser_repo":
+            USER_STATES.pop(uid, None)
+            from urllib.parse import urlparse
+            parsed = urlparse(text.strip())
+            parts = [part for part in parsed.path.strip("/").split("/") if part]
+            if parsed.scheme != "https" or parsed.netloc.lower() not in {"github.com", "www.github.com"} or len(parts) != 2:
+                bot.reply_to(m, "Send a repository URL in the form https://github.com/owner/repository.")
+                return
+            owner, repo_name = parts
+            if repo_name.endswith(".git"):
+                repo_name = repo_name[:-4]
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", repo_name):
+                bot.reply_to(m, "Invalid GitHub owner or repository name.")
+                return
+            repo = f"{owner}/{repo_name}"
+            try:
+                branches = _gh_user_api(uid, f"/repos/{repo}/branches?per_page=100")
+                branches = branches if isinstance(branches, list) else []
+                names = [str(item.get("name", "")) for item in branches[:50] if item.get("name")]
+                if not names:
+                    raise RuntimeError("No branches found in this repository.")
+                USER_STATES[uid] = {"ghb_repo": repo, "ghb_branches": names, "ghb_branch": "", "ghb_path": ""}
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                for i, name in enumerate(names):
+                    kb.add(Btn(f"🌿 {name[:45]}", callback_data=f"ghb_b_{i}", style="primary"))
+                bot.reply_to(m, f"<b>Choose a branch</b>\n<code>{esc(repo)}</code>", reply_markup=kb, parse_mode="HTML")
+            except Exception as exc:
+                bot.reply_to(m, f"{G['no']} {esc(str(exc)[:300])}", parse_mode="HTML")
+            return
         if flow == "await_gh_repo_url":
             # Clone the given GitHub repo URL and register it as a bot.
             if not SCAN_RATE.allow(uid):
                 bot.reply_to(m, f"{G['warn']} {sc('Security scanner is busy, try again in 10 minutes')}.")
                 return
+            pending_import = USER_STATES.get(uid, {})
+            selected_branch = str(pending_import.get("gh_import_branch") or "")
+            selected_repo = str(pending_import.get("gh_import_repo") or "")
+            if selected_repo and text.strip().lower() in {"yes", "y", "confirm"}:
+                repo_url = f"https://github.com/{selected_repo}"
+            else:
+                selected_branch = ""
+                repo_url = text.strip()
             USER_STATES.pop(uid, None)
-            repo_url = text.strip()
             from urllib.parse import urlparse
             parsed_repo = urlparse(repo_url)
             repo_parts = [p for p in parsed_repo.path.strip("/").split("/") if p]
@@ -10940,6 +10977,7 @@ def on_text(m: types.Message) -> None:
             # prevents any later message/state change from affecting the
             # repository selected by this specific clone request.
             requested_repo_url = repo_url
+            requested_branch = selected_branch
             u_doc = db_load()["users"].get(str(uid), {})
             if not _user_can_host_gh(u_doc):
                 bot.reply_to(m, f"{G['no']} Pro+ plan required to clone GitHub repos."); return
@@ -10952,7 +10990,7 @@ def on_text(m: types.Message) -> None:
             if len(existing_bots) >= max_bots + bonus:
                 bot.reply_to(m, f"{G['no']} Bot slot limit reached ({max_bots + bonus} bots). Upgrade your plan."); return
             bot.reply_to(m, f"⏳ Cloning <code>{esc(repo_url)}</code>…", parse_mode="HTML")
-            def _clone_bg(repo_url=requested_repo_url):
+            def _clone_bg(repo_url=requested_repo_url, requested_branch=requested_branch):
                 try:
                     # 1. Prepare ID and directory
                     bot_id_new = secrets.token_hex(8)
@@ -10987,21 +11025,34 @@ def on_text(m: types.Message) -> None:
                         if backup_tok and backup_tok not in token_candidates:
                             token_candidates.append(backup_tok)
 
-                    # 3. Clone repo using git (best for all branches/submodules)
+                    # 3. Verify each personal credential against this exact
+                    # repository before attempting the clone. Fine-grained PATs
+                    # must include this repository and Contents: Read access.
+                    verified_tokens = []
+                    token_errors = []
+                    for candidate in token_candidates:
+                        access = _check_gh_repo_access(repo_url, candidate)
+                        if access.get("ok"):
+                            verified_tokens.append(candidate)
+                        else:
+                            token_errors.append(access.get("error", "Token could not access this repository."))
+                    # Public repositories remain cloneable without a token.
+                    candidates_to_try = verified_tokens or [None]
                     res = {"ok": False, "error": "No GitHub token configured."}
                     archive_res = {"ok": False, "error": "No GitHub token configured."}
-                    for candidate in token_candidates or [None]:
-                        res = _clone_gh_repo(repo_url, candidate, bot_dir)
+                    for candidate in candidates_to_try:
+                        res = _clone_gh_repo(repo_url, candidate, bot_dir, branch=requested_branch or None)
                         if res.get("ok"):
                             break
                         # Fallback to the repository's actual default branch.
-                        archive_res = _download_gh_archive(repo_url, candidate, bot_dir)
+                        archive_res = _download_gh_archive(repo_url, candidate, bot_dir, branch=requested_branch or None)
                         if archive_res.get("ok"):
                             break
                     else:
+                        token_hint = f" Token check: {token_errors[0]}" if token_errors else ""
                         raise RuntimeError(
                             f"Git clone failed for <code>{esc(repo_url)}</code>: {res.get('error', 'unknown error')}; "
-                            f"archive fallback failed: {archive_res.get('error', 'unknown error')}"
+                            f"archive fallback failed: {archive_res.get('error', 'unknown error')}.{token_hint}"
                         )
                     
                     # 4. Security scan and database entry
@@ -14934,6 +14985,129 @@ def render_adm_tg_channel_backup(call: types.CallbackQuery) -> None:
 def _user_can_host_gh(u: Dict[str, Any]) -> bool:
     plan = u.get("plan", "free")
     return plan not in ("free",)
+def _user_gh_token(uid: int) -> str:
+    """Decrypt this user's GitHub token without consulting another user's state."""
+    try:
+        import base64 as _b64
+        user = db_load().get("users", {}).get(str(uid), {})
+        key_id = user.get("gh_token_key_id")
+        cipher = user.get("gh_token_cipher")
+        key = KEYRING.fetch(key_id) if key_id and cipher else None
+        if key:
+            return decrypt_with(key, _b64.b64decode(cipher)).decode().strip()
+    except Exception:
+        pass
+    return ""
+
+def _gh_user_api(uid: int, endpoint: str) -> Any:
+    token = _user_gh_token(uid)
+    if not token:
+        raise RuntimeError("Set your Private Token first to browse this repository.")
+    response = requests.get(
+        "https://api.github.com" + endpoint,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "cipher-bot-hosting/1.0"},
+        timeout=20,
+    )
+    if response.status_code == 401:
+        raise RuntimeError("GitHub rejected this token. Check that it is valid and not expired.")
+    if response.status_code == 403:
+        raise RuntimeError("GitHub denied access. Check the token's repository and Contents: Read permissions.")
+    if response.status_code == 404:
+        raise RuntimeError("Repository or path not found, or this token is not authorized for it.")
+    response.raise_for_status()
+    return response.json()
+
+def _gh_browser_show(call: types.CallbackQuery, text: str, kb: types.InlineKeyboardMarkup) -> None:
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                              reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+    except Exception:
+        bot.send_message(call.message.chat.id, text, reply_markup=kb, parse_mode="HTML",
+                         disable_web_page_preview=True)
+
+def action_gh_browser_start(call: types.CallbackQuery) -> None:
+    uid = call.from_user.id
+    if not _user_gh_token(uid):
+        ack(call, "Set your personal GitHub token first", show_alert=True)
+        return
+    USER_STATES[uid] = {"flow": "await_gh_browser_repo"}
+    bot.send_message(call.message.chat.id,
+        f"<b>{sc('GitHub Browser')}</b>\n{sc('Send a repository URL you can access')} — for example:\n"
+        "<code>https://github.com/owner/repository</code>", parse_mode="HTML")
+    ack(call)
+
+def action_gh_browser_branches(call: types.CallbackQuery, repo: str) -> None:
+    uid = call.from_user.id
+    ack(call, "Loading branches…")
+    try:
+        branches = _gh_user_api(uid, f"/repos/{repo}/branches?per_page=100")
+        branches = branches if isinstance(branches, list) else []
+        if not branches:
+            raise RuntimeError("No branches were returned for this repository.")
+        state = USER_STATES.setdefault(uid, {})
+        state.update({"ghb_repo": repo, "ghb_branches": [str(x.get("name", "")) for x in branches[:50]], "ghb_branch": "", "ghb_path": ""})
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for i, branch in enumerate(state["ghb_branches"]):
+            kb.add(Btn(f"🌿 {branch[:45]}", callback_data=f"ghb_b_{i}", style="primary"))
+        kb.add(Btn(f"{G['back']} {sc('GitHub Hosting')}", callback_data="menu_gh_host", style="danger"))
+        _gh_browser_show(call, f"<b>{sc('Choose a branch')}</b>\n<code>{esc(repo)}</code>", kb)
+    except Exception as exc:
+        _gh_browser_show(call, f"{G['no']} {esc(str(exc)[:300])}", types.InlineKeyboardMarkup())
+
+def action_gh_browser_files(call: types.CallbackQuery) -> None:
+    uid = call.from_user.id
+    state = USER_STATES.get(uid, {})
+    repo, branch, path = state.get("ghb_repo", ""), state.get("ghb_branch", ""), state.get("ghb_path", "")
+    if not repo or not branch:
+        ack(call, "Choose a repository and branch first", show_alert=True); return
+    ack(call, "Loading files…")
+    try:
+        from urllib.parse import quote
+        endpoint = f"/repos/{repo}/contents/{quote(path, safe='/')}?ref={quote(branch, safe='')}"
+        data = _gh_user_api(uid, endpoint)
+        items = data if isinstance(data, list) else [data]
+        items.sort(key=lambda item: (0 if item.get("type") == "dir" else 1, item.get("name", "").lower()))
+        state["ghb_items"] = [{"name": item.get("name", "?"), "path": item.get("path", ""), "type": item.get("type", "file"), "size": item.get("size", 0)} for item in items[:80]]
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for i, item in enumerate(state["ghb_items"][:30]):
+            icon = "📁" if item["type"] == "dir" else _file_icon(item["name"])
+            kb.add(Btn(f"{icon} {item['name'][:35]}", callback_data=f"ghb_i_{i}", style="primary"))
+        if path:
+            kb.add(Btn("⬆️ Up", callback_data="ghb_up", style="primary"))
+        kb.add(Btn("⬇️ Import this branch", callback_data="ghb_import", style="success"))
+        kb.add(Btn("🌿 Change branch", callback_data="ghb_branches", style="primary"))
+        kb.add(Btn(f"{G['back']} {sc('GitHub Hosting')}", callback_data="menu_gh_host", style="danger"))
+        title = f"{repo}/{path}" if path else repo
+        _gh_browser_show(call, f"<b>📂 {esc(title[:100])}</b>\n🌿 <code>{esc(branch)}</code>\n{len(items)} item(s)", kb)
+    except Exception as exc:
+        _gh_browser_show(call, f"{G['no']} {esc(str(exc)[:300])}", types.InlineKeyboardMarkup())
+
+def action_gh_browser_item(call: types.CallbackQuery, index: int) -> None:
+    uid = call.from_user.id
+    state = USER_STATES.get(uid, {})
+    items = state.get("ghb_items", [])
+    if index < 0 or index >= min(len(items), 30):
+        ack(call, "That item is no longer available", show_alert=True); return
+    item = items[index]
+    if item.get("type") == "dir":
+        state["ghb_path"] = item["path"]
+        return action_gh_browser_files(call)
+    ack(call, "Loading preview…")
+    try:
+        from urllib.parse import quote
+        data = _gh_user_api(uid, f"/repos/{state['ghb_repo']}/contents/{quote(item['path'], safe='/')}?ref={quote(state['ghb_branch'], safe='')}")
+        if data.get("encoding") != "base64" or item.get("size", 0) > 500_000:
+            preview = "(File is binary or too large to preview.)"
+        else:
+            raw = base64.b64decode(data.get("content", "").replace("\n", ""))
+            preview = raw[:3500].decode("utf-8", errors="replace")
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(Btn("⬅️ Back to files", callback_data="ghb_files", style="primary"))
+        _gh_browser_show(call, f"<b>{esc(item['name'])}</b>\n<code>{esc(item['path'][:100])}</code>\n<pre>{esc(preview[:3200])}</pre>", kb)
+    except Exception as exc:
+        _gh_browser_show(call, f"{G['no']} {esc(str(exc)[:300])}", types.InlineKeyboardMarkup())
+
 def render_gh_repo_host_menu(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
     d = db_load()
@@ -14968,11 +15142,46 @@ def render_gh_repo_host_menu(call: types.CallbackQuery) -> None:
     )
     kb.add(
         Btn("\U0001f4c2  M\u028f G\u029c B\u1d0f\u1d1b\u02e2", callback_data="gh_host_list", style="primary"),
+        Btn("🐙 Browse GitHub", callback_data="ghb_start", style="success"),
         Btn("\U0001f5d1\ufe0f  R\u1d07\u1d0d\u1d0f\u1d20\u1d07 R\u1d07\u1d18\u1d0f", callback_data="gh_host_remove_sel", style="danger"),
     )
     kb.add(Btn(f"{G['back']}  M\u1d00\u026a\u0274", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("upload", PHOTOS["main"]), cap, kb, call=call)
-def _clone_gh_repo(repo_url: str, token: Optional[str], dest_dir: Path) -> Dict[str, Any]:
+def _check_gh_repo_access(repo_url: str, token: str) -> Dict[str, Any]:
+    """Check that a personal token can see the exact repository before cloning."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse((repo_url or "").strip())
+    parts = [p for p in parsed.path.strip("/").split("/") if p]
+    if parsed.scheme != "https" or parsed.netloc.lower() not in {"github.com", "www.github.com"} or len(parts) != 2:
+        return {"ok": False, "error": "Use a GitHub repository URL like https://github.com/owner/repository."}
+    owner, repo = parts
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    try:
+        response = requests.get(
+            f"https://api.github.com/repos/{owner}/{repo}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "cipher-bot-hosting/1.0",
+            },
+            timeout=20,
+        )
+        if response.status_code == 200:
+            return {"ok": True}
+        if response.status_code == 401:
+            return {"ok": False, "error": "GitHub rejected this token. Check that it is valid and not expired."}
+        if response.status_code == 403:
+            return {"ok": False, "error": "GitHub denied access. Grant this token access to the repository with Contents: Read permission."}
+        if response.status_code == 404:
+            return {"ok": False, "error": "Repository not found or this token is not authorized for it. For a fine-grained token, select this repository and grant Contents: Read permission."}
+        return {"ok": False, "error": f"GitHub repository access check failed (HTTP {response.status_code})."}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc).replace(token, "[redacted]")[:300]}
+
+def _clone_gh_repo(repo_url: str, token: Optional[str], dest_dir: Path, branch: Optional[str] = None) -> Dict[str, Any]:
     """Clone a validated GitHub repo without placing the token in the URL."""
     import subprocess as _sp
     from urllib.parse import urlparse
@@ -14999,8 +15208,12 @@ def _clone_gh_repo(repo_url: str, token: Optional[str], dest_dir: Path) -> Dict[
             "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
         })
     try:
+        clone_args = ["git", "-c", "credential.interactive=false", "clone", "--depth=1", "--no-tags"]
+        if branch:
+            clone_args.extend(["--branch", branch])
+        clone_args.extend([clean_url, str(dest_dir)])
         result = _sp.run(
-            ["git", "-c", "credential.interactive=false", "clone", "--depth=1", "--no-tags", clean_url, str(dest_dir)],
+            clone_args,
             capture_output=True, text=True, timeout=120, env=env,
         )
         if result.returncode != 0:
@@ -15011,7 +15224,7 @@ def _clone_gh_repo(repo_url: str, token: Optional[str], dest_dir: Path) -> Dict[
         return {"ok": False, "error": "git not installed on server."}
     except Exception as e:
         return {"ok": False, "error": str(e).replace(token or "", "[redacted]")[:500]}
-def _download_gh_archive(repo_url: str, token: Optional[str], dest_dir: Path) -> Dict[str, Any]:
+def _download_gh_archive(repo_url: str, token: Optional[str], dest_dir: Path, branch: Optional[str] = None) -> Dict[str, Any]:
     """Download the repository's actual default branch when git clone fails."""
     from urllib.parse import urlparse, quote
     import urllib.request as _ur
@@ -15033,7 +15246,7 @@ def _download_gh_archive(repo_url: str, token: Optional[str], dest_dir: Path) ->
         meta_req = _ur.Request(f"https://api.github.com/repos/{owner}/{repo}", headers=headers)
         with _ur.urlopen(meta_req, timeout=30) as response:
             meta = json.loads(response.read().decode("utf-8"))
-        branch = str(meta.get("default_branch") or "main")
+        branch = str(branch or meta.get("default_branch") or "main")
         archive_req = _ur.Request(
             f"https://api.github.com/repos/{owner}/{repo}/zipball/{quote(branch, safe='')}",
             headers=headers,
@@ -19792,6 +20005,40 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("bot_delallyes_"):   action_bot_delall(call, data.split("_", 2)[2]); return
     if data.startswith("bot_delall_"):      render_bot_delall_confirm(call, data.split("_", 2)[2]); return
     if data.startswith("bot_delalyes_"):    action_bot_delall(call, data.split("_", 2)[2]); return # Backwards compatibility
+    # User-scoped GitHub browser
+    if data == "ghb_start": action_gh_browser_start(call); return
+    if data == "ghb_branches":
+        state = USER_STATES.get(call.from_user.id, {})
+        return action_gh_browser_branches(call, state.get("ghb_repo", ""))
+    if data.startswith("ghb_b_"):
+        uid = call.from_user.id
+        state = USER_STATES.get(uid, {})
+        try: idx = int(data.rsplit("_", 1)[1])
+        except ValueError: idx = -1
+        branches = state.get("ghb_branches", [])
+        if idx < 0 or idx >= len(branches): ack(call, "Branch selection expired", show_alert=True); return
+        state["ghb_branch"] = branches[idx]; state["ghb_path"] = ""
+        return action_gh_browser_files(call)
+    if data == "ghb_files": return action_gh_browser_files(call)
+    if data == "ghb_up":
+        state = USER_STATES.get(call.from_user.id, {})
+        state["ghb_path"] = "/".join(state.get("ghb_path", "").split("/")[:-1])
+        return action_gh_browser_files(call)
+    if data.startswith("ghb_i_"):
+        try: idx = int(data.rsplit("_", 1)[1])
+        except ValueError: idx = -1
+        return action_gh_browser_item(call, idx)
+    if data == "ghb_import":
+        uid = call.from_user.id
+        state = USER_STATES.get(uid, {})
+        repo, branch = state.get("ghb_repo", ""), state.get("ghb_branch", "")
+        if not repo or not branch: ack(call, "Choose a branch first", show_alert=True); return
+        USER_STATES[uid] = {"flow": "await_gh_repo_url", "gh_import_repo": repo, "gh_import_branch": branch}
+        bot.send_message(call.message.chat.id,
+            f"Import <code>{esc(repo)}</code> from branch <code>{esc(branch)}</code>? Send <code>yes</code> to continue or /cancel.",
+            parse_mode="HTML")
+        ack(call)
+        return
     # GitHub user hosting
     if data == "gh_host_clone":       action_gh_host_clone(call); return
     if data == "gh_host_set_token":   action_gh_host_set_token(call); return
