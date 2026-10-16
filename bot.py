@@ -15000,13 +15000,17 @@ def _user_gh_token(uid: int) -> str:
     return ""
 
 def _gh_user_api(uid: int, endpoint: str) -> Any:
+    # Public repositories are readable anonymously. If this user has a token,
+    # use only their credential so private repositories work without sharing a
+    # global bot credential with other accounts.
     token = _user_gh_token(uid)
-    if not token:
-        raise RuntimeError("Set your Private Token first to browse this repository.")
+    headers = {"Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "cipher-bot-hosting/1.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     response = requests.get(
         "https://api.github.com" + endpoint,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-                 "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "cipher-bot-hosting/1.0"},
+        headers=headers,
         timeout=20,
     )
     if response.status_code == 401:
@@ -15014,6 +15018,8 @@ def _gh_user_api(uid: int, endpoint: str) -> Any:
     if response.status_code == 403:
         raise RuntimeError("GitHub denied access. Check the token's repository and Contents: Read permissions.")
     if response.status_code == 404:
+        if not token:
+            raise RuntimeError("Repository not found or private. Add your personal GitHub token to browse private repositories.")
         raise RuntimeError("Repository or path not found, or this token is not authorized for it.")
     response.raise_for_status()
     return response.json()
@@ -15028,9 +15034,6 @@ def _gh_browser_show(call: types.CallbackQuery, text: str, kb: types.InlineKeybo
 
 def action_gh_browser_start(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
-    if not _user_gh_token(uid):
-        ack(call, "Set your personal GitHub token first", show_alert=True)
-        return
     USER_STATES[uid] = {"flow": "await_gh_browser_repo"}
     bot.send_message(call.message.chat.id,
         f"<b>{sc('GitHub Browser')}</b>\n{sc('Send a repository URL you can access')} — for example:\n"

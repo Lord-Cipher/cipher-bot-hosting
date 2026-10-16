@@ -45,6 +45,10 @@ assert seen["env"]["GIT_CONFIG_VALUE_0"] == f"Authorization: Basic {expected}"
 class FakeResponse:
     def __init__(self, status_code):
         self.status_code = status_code
+    def json(self):
+        return {"ok": True}
+    def raise_for_status(self):
+        return None
 
 old_get = bot.requests.get
 try:
@@ -77,6 +81,23 @@ finally:
         os.environ["CIPHER_VAULT_REPO"] = old_repo
 
 print("private GitHub access regression tests passed")
+
+# Public repository browsing must also work without any user token.
+old_user_token = bot._user_gh_token
+old_get = bot.requests.get
+try:
+    calls = {}
+    bot._user_gh_token = lambda uid: ""
+    def fake_public_get(url, **kwargs):
+        calls["url"] = url
+        calls["headers"] = kwargs["headers"]
+        return FakeResponse(200)
+    bot.requests.get = fake_public_get
+    assert bot._gh_user_api(9001, "/repos/acme/public-repo/branches") == {"ok": True}
+    assert "Authorization" not in calls["headers"]
+finally:
+    bot._user_gh_token = old_user_token
+    bot.requests.get = old_get
 
 # The interactive browser must authenticate with the requesting user's token.
 old_user_token = bot._user_gh_token
