@@ -10989,9 +10989,33 @@ def on_text(m: types.Message) -> None:
             bonus = int(u_doc.get("bot_slots_bonus", 0))
             if len(existing_bots) >= max_bots + bonus:
                 bot.reply_to(m, f"{G['no']} Bot slot limit reached ({max_bots + bonus} bots). Upgrade your plan."); return
-            bot.reply_to(m, f"⏳ Cloning <code>{esc(repo_url)}</code>…", parse_mode="HTML")
-            def _clone_bg(repo_url=requested_repo_url, requested_branch=requested_branch):
+            progress_msg = bot.reply_to(m, _gh_clone_progress(repo_url, 5, "Preparing clone"), parse_mode="HTML")
+            def _clone_bg(repo_url=requested_repo_url, requested_branch=requested_branch, progress_msg=progress_msg):
+                def progress(percent: int, stage: str) -> None:
+                    text = _gh_clone_progress(repo_url, percent, stage)
+                    try:
+                        bot.edit_message_text(text, chat_id=progress_msg.chat.id,
+                                              message_id=progress_msg.message_id,
+                                              parse_mode="HTML", disable_web_page_preview=True)
+                    except Exception as exc:
+                        if "message is not modified" not in str(exc).lower():
+                            print(f"[gh_clone_progress] {exc}", file=sys.stderr, flush=True)
+                def run_with_pulse(start: int, ceiling: int, label: str, operation):
+                    stop = threading.Event()
+                    def pulse() -> None:
+                        pct = start
+                        while not stop.wait(2.5):
+                            pct = min(ceiling, pct + 3)
+                            progress(pct, f"{label} (estimated)")
+                    ticker = threading.Thread(target=pulse, daemon=True)
+                    ticker.start()
+                    try:
+                        return operation()
+                    finally:
+                        stop.set()
+                        ticker.join(timeout=0.2)
                 try:
+                    progress(10, "Checking repository access")
                     # 1. Prepare ID and directory
                     bot_id_new = secrets.token_hex(8)
                     clean = repo_url.rstrip("/")
@@ -11036,16 +11060,24 @@ def on_text(m: types.Message) -> None:
                             verified_tokens.append(candidate)
                         else:
                             token_errors.append(access.get("error", "Token could not access this repository."))
+                    progress(20, "Access ready — starting download")
                     # Public repositories remain cloneable without a token.
                     candidates_to_try = verified_tokens or [None]
                     res = {"ok": False, "error": "No GitHub token configured."}
                     archive_res = {"ok": False, "error": "No GitHub token configured."}
                     for candidate in candidates_to_try:
-                        res = _clone_gh_repo(repo_url, candidate, bot_dir, branch=requested_branch or None)
+                        progress(35, "Downloading repository files")
+                        res = run_with_pulse(
+                            35, 60, "Downloading repository files",
+                            lambda: _clone_gh_repo(repo_url, candidate, bot_dir, branch=requested_branch or None),
+                        )
                         if res.get("ok"):
                             break
                         # Fallback to the repository's actual default branch.
-                        archive_res = _download_gh_archive(repo_url, candidate, bot_dir, branch=requested_branch or None)
+                        archive_res = run_with_pulse(
+                            40, 60, "Downloading repository archive",
+                            lambda: _download_gh_archive(repo_url, candidate, bot_dir, branch=requested_branch or None),
+                        )
                         if archive_res.get("ok"):
                             break
                     else:
@@ -11055,6 +11087,7 @@ def on_text(m: types.Message) -> None:
                             f"archive fallback failed: {archive_res.get('error', 'unknown error')}.{token_hint}"
                         )
                     
+                    progress(65, "Download complete — preparing file list")
                     # 4. Security scan and database entry
                     files_added = []
                     for root, dirs, files in os.walk(bot_dir):
@@ -11069,16 +11102,23 @@ def on_text(m: types.Message) -> None:
                             files_added.append((rel, p.read_bytes()))
                     
                     if not files_added:
+                        progress(100, "Repository is empty")
                         bot.send_message(uid, f"{G['no']} Repo appears empty."); return
                         
+                    progress(75, f"Security scan — {len(files_added)} files")
                     scan = _run_security_scan(files_added, uploader_uid=uid)
                     if scan.get("recommendation") == "REJECT":
+                        progress(100, "Stopped — security scan rejected this repository")
                         bot.send_message(uid, f"{G['no']} Security scan rejected this repo.\n<code>{esc(scan.get('summary',''))}</code>", parse_mode="HTML")
                         rmrf(bot_dir); return
 
                     # 5. Encrypt and store files
                     enc_files = []
-                    for rel, content in files_added:
+                    total_files = max(1, len(files_added))
+                    for file_index, (rel, content) in enumerate(files_added, 1):
+                        if file_index == 1 or file_index == total_files or file_index % max(1, total_files // 10) == 0:
+                            percent = 80 + int(15 * file_index / total_files)
+                            progress(percent, f"Securing files ({file_index}/{total_files})")
                         stored = store_uploaded_file(m.from_user, rel, content)
                         enc_files.append({"key_id": stored["key_id"], "enc_path": stored["path"], "filename": rel, "rel_path": rel})
                     
@@ -11118,6 +11158,7 @@ def on_text(m: types.Message) -> None:
                     # Automatic Vault Backup
                     _sync_vfs_state(bot_id_new, uid, name)
 
+                    progress(100, "Complete")
                     bot.send_message(uid,
                         f"<b>{G['ok']} Repo cloned!</b>\n"
                         f"{bullet('Bot', name)}\n"
@@ -11126,7 +11167,11 @@ def on_text(m: types.Message) -> None:
                         f"{sc('Go to My Bots to start it.')}{FOOTER}", parse_mode="HTML")
                 except Exception as e:
                     rmrf(locals().get("bot_dir", ""))
-                    bot.send_message(uid, f"{G['no']} Clone failed: <code>{esc(e)}</code>", parse_mode="HTML")
+                    progress(100, "Failed")
+                    try:
+                        bot.send_message(uid, f"{G['no']} Clone failed: <code>{esc(e)}</code>", parse_mode="HTML")
+                    except Exception:
+                        pass
             threading.Thread(target=_clone_bg, daemon=True).start()
             return
         if flow == "await_adm_private_apgrp":
@@ -14982,6 +15027,14 @@ def render_adm_tg_channel_backup(call: types.CallbackQuery) -> None:
     )
     kb.add(Btn(f"{G['back']}  A\u1d05\u1d0d\u026a\u0274", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
+def _gh_clone_progress(repo_url: str, percent: int, stage: str) -> str:
+    """Render a compact, escaped progress bar for Telegram clone updates."""
+    pct = max(0, min(100, int(percent)))
+    filled = pct // 10
+    bar = "█" * filled + "░" * (10 - filled)
+    return (f"<b>🐙 Cloning GitHub repository</b>\n<code>{esc(repo_url)}</code>\n"
+            f"<code>[{bar}] {pct}%</code>\n{esc(stage)}")
+
 def _user_can_host_gh(u: Dict[str, Any]) -> bool:
     plan = u.get("plan", "free")
     return plan not in ("free",)

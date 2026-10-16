@@ -118,3 +118,9 @@ try:
 finally:
     bot._user_gh_token = old_user_token
     bot.requests.get = old_get
+
+progress_view = bot._gh_clone_progress("https://github.com/acme/private-repo", 56, "Downloading files")
+assert "[█████░░░░░] 56%" in progress_view
+assert "Downloading files" in progress_view
+escaped_progress = bot._gh_clone_progress("<bad>", 150, "Done")
+assert "100%" in escaped_progress and "&lt;bad&gt;" in escaped_progress
