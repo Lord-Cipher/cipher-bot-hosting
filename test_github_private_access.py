@@ -124,3 +124,10 @@ assert "[█████░░░░░] 56%" in progress_view
 assert "Downloading files" in progress_view
 escaped_progress = bot._gh_clone_progress("<bad>", 150, "Done")
 assert "100%" in escaped_progress and "&lt;bad&gt;" in escaped_progress
+
+# Resource bars are relative to plan limits: green through the first half,
+# yellow through 79%, then red from 80% to the limit.
+assert bot._resource_usage_bar(40).startswith("🟩🟩🟩🟩⬜")
+assert bot._resource_usage_bar(70).startswith("🟩🟩🟩🟩🟩🟨🟨⬜")
+assert bot._resource_usage_bar(90).startswith("🟩🟩🟩🟩🟩🟨🟨🟨🟥")
+assert bot._resource_usage_bar(125).endswith("100%")

@@ -15035,6 +15035,19 @@ def _gh_clone_progress(repo_url: str, percent: int, stage: str) -> str:
     return (f"<b>🐙 Cloning GitHub repository</b>\n<code>{esc(repo_url)}</code>\n"
             f"<code>[{bar}] {pct}%</code>\n{esc(stage)}")
 
+def _resource_usage_bar(pct: float, width: int = 10) -> str:
+    """Render use relative to a configured limit with green/yellow/red thresholds."""
+    p = min(100.0, max(0.0, float(pct)))
+    width = max(1, int(width))
+    filled = min(width, int(p * width / 100.0))
+    green_end = int(width * 0.50)
+    yellow_end = int(width * 0.80)
+    parts = []
+    for idx in range(filled):
+        parts.append("🟩" if idx < green_end else "🟨" if idx < yellow_end else "🟥")
+    parts.extend(["⬜"] * (width - filled))
+    return "".join(parts) + f" {p:.0f}%"
+
 def _user_can_host_gh(u: Dict[str, Any]) -> bool:
     plan = u.get("plan", "free")
     return plan not in ("free",)
@@ -16815,20 +16828,16 @@ def render_bot_view(
     if b.get("source") in ("github", "github_browser"):
         src_info = f"\n{bullet('Source', '🐙 GitHub')}\n{bullet('Repo', esc((b.get('gh_repo','?'))[:40]))}"
 
-    # Visual resource gauges (Elite 20-block precision)
-    def _make_elite_bar(pct: float) -> str:
-        p = min(100.0, max(0.0, pct))
-        filled = int(p / 5)
-        return '█' * filled + '░' * (20 - filled) + f" {p:.1f}%"
-
-    cpu_bar = _make_elite_bar(st['cpuPct'])
-    
-    mem_mb = st['memBytes'] / (1024 * 1024)
+    # Resource meters show consumption relative to this user's configured plan
+    # limits, rather than percent of total host CPU/RAM capacity.
     plan_key = owner_doc.get("plan", "free")
     plan_ram = float(_plan_ram_mb(plan_key))
     plan_cpu = _plan_cpu_pct(plan_key)
+    cpu_pct_of_limit = (float(st['cpuPct']) / plan_cpu * 100) if plan_cpu > 0 else 0
+    cpu_bar = _resource_usage_bar(cpu_pct_of_limit)
+    mem_mb = st['memBytes'] / (1024 * 1024)
     mem_pct = (mem_mb / plan_ram) * 100 if plan_ram > 0 else 0
-    mem_bar = _make_elite_bar(mem_pct)
+    mem_bar = _resource_usage_bar(mem_pct)
 
     cap = (
         f"<b>{G['diamond']} {esc(b['name'])}</b>\n"
@@ -16838,6 +16847,7 @@ def render_bot_view(
         f"{bullet('Uptime', fmt_dur(st['uptimeMs']))}\n"
         f"{bullet('CPU Usage', '<code>' + cpu_bar + '</code> / ' + _format_cpu_limit(plan_cpu))}\n"
         f"{bullet('RAM Usage', fmt_bytes(st['memBytes']) + ' <code>' + mem_bar + '</code> / ' + str(int(plan_ram)) + ' MB')}\n"
+        f"<i>🟩 &lt;50%  🟨 50–79%  🟥 80–100% of plan limit</i>\n"
         f"{bullet('Storage', fmt_bytes(st['sizeBytes']))}\n"
         f"{bullet('Created', fmt_ts(b.get('created')))}"
         f"{src_info}"
