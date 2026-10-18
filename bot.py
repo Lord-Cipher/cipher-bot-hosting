@@ -2765,8 +2765,14 @@ def bot_actions_kb(bot_id: str, running: bool, premium: bool = False) -> types.I
             callback_data=f"bot_network_{bot_id}",
             style="success" if network_on else "danger",
         ))
-        if b.get("source") == "github" and premium:
-            kb.add(Btn(f"🚀  Aᴜᴛᴏ-Dᴇᴘʟᴏʏ", callback_data=f"bot_webhook_{bot_id}", style="success"))
+        if b.get("source") == "github":
+            kb.add(Btn("🔍 Check GitHub updates", callback_data=f"bot_gh_sync_{bot_id}", style="success"))
+            auto_label = "🔔 Auto-check: ON" if b.get("gh_auto_sync") else "🔕 Auto-check: OFF"
+            kb.add(Btn(auto_label, callback_data=f"bot_gh_auto_{bot_id}", style="primary"))
+            if b.get("gh_sync_backup"):
+                kb.add(Btn("↩️ Roll back last sync", callback_data=f"bot_gh_rollback_{bot_id}", style="danger"))
+            if premium:
+                kb.add(Btn(f"🚀  Aᴜᴛᴏ-Dᴇᴘʟᴏʏ", callback_data=f"bot_webhook_{bot_id}", style="success"))
     kb.add(Btn(f"{G['no']}  Dᴇʟᴇᴛᴇ",       callback_data=f"bot_delete_{bot_id}", style="danger"))
     kb.add(Btn(f"{G['back']}  Mʏ Bᴏᴛꜱ",    callback_data="menu_bots",            style="danger"))
     return kb
@@ -10950,11 +10956,13 @@ def on_text(m: types.Message) -> None:
                 return
             pending_import = USER_STATES.get(uid, {})
             selected_branch = str(pending_import.get("gh_import_branch") or "")
+            selected_commit = str(pending_import.get("gh_import_commit") or "")
             selected_repo = str(pending_import.get("gh_import_repo") or "")
             if selected_repo and text.strip().lower() in {"yes", "y", "confirm"}:
                 repo_url = f"https://github.com/{selected_repo}"
             else:
                 selected_branch = ""
+                selected_commit = ""
                 repo_url = text.strip()
             USER_STATES.pop(uid, None)
             from urllib.parse import urlparse
@@ -10973,6 +10981,7 @@ def on_text(m: types.Message) -> None:
             # repository selected by this specific clone request.
             requested_repo_url = repo_url
             requested_branch = selected_branch
+            requested_commit = selected_commit
             u_doc = db_load()["users"].get(str(uid), {})
             if not _user_can_host_gh(u_doc):
                 bot.reply_to(m, f"{G['no']} Pro+ plan required to clone GitHub repos."); return
@@ -10985,7 +10994,7 @@ def on_text(m: types.Message) -> None:
             if len(existing_bots) >= max_bots + bonus:
                 bot.reply_to(m, f"{G['no']} Bot slot limit reached ({max_bots + bonus} bots). Upgrade your plan."); return
             progress_msg = bot.reply_to(m, _gh_clone_progress(repo_url, 5, "Preparing clone"), parse_mode="HTML")
-            def _clone_bg(repo_url=requested_repo_url, requested_branch=requested_branch, progress_msg=progress_msg):
+            def _clone_bg(repo_url=requested_repo_url, requested_branch=requested_branch, requested_commit=requested_commit, progress_msg=progress_msg):
                 def progress(percent: int, stage: str) -> None:
                     text = _gh_clone_progress(repo_url, percent, stage)
                     try:
@@ -11055,6 +11064,19 @@ def on_text(m: types.Message) -> None:
                             verified_tokens.append(candidate)
                         else:
                             token_errors.append(access.get("error", "Token could not access this repository."))
+                    resolved_branch = requested_branch or "main"
+                    try:
+                        from urllib.parse import urlparse
+                        repo_parts_for_meta = [p for p in urlparse(repo_url).path.strip("/").split("/") if p]
+                        if len(repo_parts_for_meta) == 2:
+                            meta_headers = {"Accept": "application/vnd.github+json", "User-Agent": "cipher-bot-hosting/1.0"}
+                            if verified_tokens:
+                                meta_headers["Authorization"] = f"Bearer {verified_tokens[0]}"
+                            meta_response = requests.get(f"https://api.github.com/repos/{repo_parts_for_meta[0]}/{repo_parts_for_meta[1]}", headers=meta_headers, timeout=15)
+                            if meta_response.status_code == 200:
+                                resolved_branch = str(meta_response.json().get("default_branch") or resolved_branch)
+                    except Exception:
+                        pass
                     progress(20, "Access ready — starting download")
                     # Public repositories remain cloneable without a token.
                     candidates_to_try = verified_tokens or [None]
@@ -11062,17 +11084,25 @@ def on_text(m: types.Message) -> None:
                     archive_res = {"ok": False, "error": "No GitHub token configured."}
                     for candidate in candidates_to_try:
                         progress(35, "Downloading repository files")
-                        res = run_with_pulse(
-                            35, 60, "Downloading repository files",
-                            lambda: _clone_gh_repo(repo_url, candidate, bot_dir, branch=requested_branch or None),
-                        )
-                        if res.get("ok"):
-                            break
-                        # Fallback to the repository's actual default branch.
-                        archive_res = run_with_pulse(
-                            40, 60, "Downloading repository archive",
-                            lambda: _download_gh_archive(repo_url, candidate, bot_dir, branch=requested_branch or None),
-                        )
+                        if requested_commit:
+                            res = {"ok": False, "error": "Commit imports use the exact commit archive."}
+                            archive_res = run_with_pulse(
+                                35, 60, "Downloading selected commit",
+                                lambda: _download_gh_archive(repo_url, candidate, bot_dir, branch=requested_commit),
+                            )
+                        else:
+                            res = run_with_pulse(
+                                35, 60, "Downloading repository files",
+                                lambda: _clone_gh_repo(repo_url, candidate, bot_dir, branch=resolved_branch or None),
+                            )
+                            if res.get("ok"):
+                                archive_res = {"ok": True}
+                            else:
+                                # Fallback to the selected branch's archive.
+                                archive_res = run_with_pulse(
+                                    40, 60, "Downloading repository archive",
+                                    lambda: _download_gh_archive(repo_url, candidate, bot_dir, branch=resolved_branch or None),
+                                )
                         if archive_res.get("ok"):
                             break
                     else:
@@ -11123,6 +11153,8 @@ def on_text(m: types.Message) -> None:
                         "dir": str(bot_dir), "created": ts_iso(),
                         "enc_files": enc_files, "env": {}, "status": "stopped", "cron": {},
                         "source": "github", "gh_repo": repo_url,
+                        "gh_branch": resolved_branch,
+                        "gh_commit_sha": requested_commit,
                     }
                     clone_sandbox_on = bool(get_setting("sandbox_mode", False))
                     clone_recommendation = scan.get("recommendation", "MANUAL_REVIEW")
@@ -15117,16 +15149,41 @@ def action_gh_browser_branches(call: types.CallbackQuery, repo: str) -> None:
     except Exception as exc:
         _gh_browser_show(call, f"{G['no']} {esc(str(exc)[:300])}", types.InlineKeyboardMarkup())
 
+def action_gh_browser_commits(call: types.CallbackQuery) -> None:
+    uid = call.from_user.id
+    state = USER_STATES.get(uid, {})
+    repo, branch = state.get("ghb_repo", ""), state.get("ghb_branch", "")
+    if not repo or not branch:
+        ack(call, "Choose a repository and branch first", show_alert=True); return
+    ack(call, "Loading recent commits…")
+    try:
+        from urllib.parse import quote
+        commits = _gh_user_api(uid, f"/repos/{repo}/commits?sha={quote(branch, safe='')}&per_page=10")
+        commits = commits if isinstance(commits, list) else []
+        state["ghb_commits"] = [{"sha": str(item.get("sha", "")), "message": ((str((item.get("commit") or {}).get("message", "")).splitlines() or ["(no commit message)"])[0])} for item in commits[:10] if item.get("sha")]
+        if not state["ghb_commits"]:
+            raise RuntimeError("No commits were returned for this branch.")
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for i, commit in enumerate(state["ghb_commits"]):
+            kb.add(Btn(f"{commit['sha'][:7]} · {commit['message'][:32]}", callback_data=f"ghb_c_{i}", style="primary"))
+        kb.add(Btn("Browse branch tip", callback_data="ghb_tip", style="success"))
+        kb.add(Btn("🌿 Change branch", callback_data="ghb_branches", style="primary"))
+        _gh_browser_show(call, f"<b>Choose a commit</b>\n<code>{esc(repo)}</code> · <code>{esc(branch)}</code>", kb)
+    except Exception as exc:
+        _gh_browser_show(call, f"{G['no']} {esc(str(exc)[:300])}", types.InlineKeyboardMarkup())
+
 def action_gh_browser_files(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
     state = USER_STATES.get(uid, {})
     repo, branch, path = state.get("ghb_repo", ""), state.get("ghb_branch", ""), state.get("ghb_path", "")
+    commit_sha = state.get("ghb_commit_sha", "")
     if not repo or not branch:
         ack(call, "Choose a repository and branch first", show_alert=True); return
     ack(call, "Loading files…")
     try:
         from urllib.parse import quote
-        endpoint = f"/repos/{repo}/contents/{quote(path, safe='/')}?ref={quote(branch, safe='')}"
+        selected_ref = commit_sha or branch
+        endpoint = f"/repos/{repo}/contents/{quote(path, safe='/')}?ref={quote(selected_ref, safe='')}"
         data = _gh_user_api(uid, endpoint)
         items = data if isinstance(data, list) else [data]
         items.sort(key=lambda item: (0 if item.get("type") == "dir" else 1, item.get("name", "").lower()))
@@ -15137,11 +15194,12 @@ def action_gh_browser_files(call: types.CallbackQuery) -> None:
             kb.add(Btn(f"{icon} {item['name'][:35]}", callback_data=f"ghb_i_{i}", style="primary"))
         if path:
             kb.add(Btn("⬆️ Up", callback_data="ghb_up", style="primary"))
-        kb.add(Btn("⬇️ Import this branch", callback_data="ghb_import", style="success"))
-        kb.add(Btn("🌿 Change branch", callback_data="ghb_branches", style="primary"))
+        kb.add(Btn("⬇️ Import this commit", callback_data="ghb_import", style="success"))
+        kb.add(Btn("🕓 Choose another commit", callback_data="ghb_commits", style="primary"))
         kb.add(Btn(f"{G['back']} {sc('GitHub Hosting')}", callback_data="menu_gh_host", style="danger"))
         title = f"{repo}/{path}" if path else repo
-        _gh_browser_show(call, f"<b>📂 {esc(title[:100])}</b>\n🌿 <code>{esc(branch)}</code>\n{len(items)} item(s)", kb)
+        ref_label = commit_sha[:7] if commit_sha else "branch tip"
+        _gh_browser_show(call, f"<b>📂 {esc(title[:100])}</b>\n🌿 <code>{esc(branch)}</code> · commit <code>{esc(ref_label)}</code>\n{len(items)} item(s)", kb)
     except Exception as exc:
         _gh_browser_show(call, f"{G['no']} {esc(str(exc)[:300])}", types.InlineKeyboardMarkup())
 
@@ -15158,7 +15216,8 @@ def action_gh_browser_item(call: types.CallbackQuery, index: int) -> None:
     ack(call, "Loading preview…")
     try:
         from urllib.parse import quote
-        data = _gh_user_api(uid, f"/repos/{state['ghb_repo']}/contents/{quote(item['path'], safe='/')}?ref={quote(state['ghb_branch'], safe='')}")
+        preview_ref = state.get("ghb_commit_sha") or state["ghb_branch"]
+        data = _gh_user_api(uid, f"/repos/{state['ghb_repo']}/contents/{quote(item['path'], safe='/')}?ref={quote(preview_ref, safe='')}")
         if data.get("encoding") != "base64" or item.get("size", 0) > 500_000:
             preview = "(File is binary or too large to preview.)"
         else:
@@ -15169,6 +15228,328 @@ def action_gh_browser_item(call: types.CallbackQuery, index: int) -> None:
         _gh_browser_show(call, f"<b>{esc(item['name'])}</b>\n<code>{esc(item['path'][:100])}</code>\n<pre>{esc(preview[:3200])}</pre>", kb)
     except Exception as exc:
         _gh_browser_show(call, f"{G['no']} {esc(str(exc)[:300])}", types.InlineKeyboardMarkup())
+
+_GH_SYNC_APPLYING: set[str] = set()
+_GH_SYNC_APPLY_LOCK = threading.Lock()
+
+def _gh_repo_from_bot(b: Dict[str, Any]) -> str:
+    from urllib.parse import urlparse
+    parsed = urlparse(str(b.get("gh_repo", "")))
+    parts = [p for p in parsed.path.strip("/").split("/") if p]
+    if parsed.scheme != "https" or parsed.netloc.lower() not in {"github.com", "www.github.com"} or len(parts) != 2:
+        raise RuntimeError("This bot has an invalid GitHub repository link.")
+    repo = "/".join(parts)
+    return repo[:-4] if repo.endswith(".git") else repo
+
+def _gh_find_update(uid: int, b: Dict[str, Any]) -> Dict[str, Any]:
+    from urllib.parse import quote
+    repo = _gh_repo_from_bot(b)
+    branch = str(b.get("gh_branch") or "main")
+    latest_items = _gh_user_api(uid, f"/repos/{repo}/commits?sha={quote(branch, safe='')}&per_page=1")
+    latest = latest_items[0] if isinstance(latest_items, list) and latest_items else {}
+    head = str((latest or {}).get("sha") or "")
+    if not head:
+        raise RuntimeError("GitHub did not return the branch's current commit.")
+    base = str(b.get("gh_commit_sha") or "")
+    if not base:
+        git_dir = Path(str(b.get("dir") or ""))
+        if (git_dir / ".git").exists():
+            try:
+                local = subprocess.run(["git", "-C", str(git_dir), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, check=False)
+                if local.returncode == 0:
+                    base = local.stdout.strip()
+            except Exception:
+                pass
+    if not base:
+        b["gh_commit_sha"] = head
+        b["gh_branch"] = branch
+        save_bot(b)
+        return {"status": "baseline", "head": head, "branch": branch, "repo": repo}
+    b["gh_commit_sha"] = base
+    b["gh_branch"] = branch
+    if head == base:
+        return {"status": "current", "head": head, "base": base, "branch": branch, "repo": repo}
+    comparison = _gh_user_api(uid, f"/repos/{repo}/compare/{quote(base, safe='')}...{quote(head, safe='')}")
+    raw_files = comparison.get("files", []) if isinstance(comparison, dict) else []
+    files = [{"filename": str(item.get("filename", "?"))[:180],
+              "status": str(item.get("status", "modified"))[:24],
+              "additions": max(0, int(item.get("additions", 0) or 0)),
+              "deletions": max(0, int(item.get("deletions", 0) or 0)),
+              "patch": str(item.get("patch", ""))[:1600]}
+             for item in raw_files[:100] if isinstance(item, dict)]
+    raw_commits = comparison.get("commits", []) if isinstance(comparison, dict) else []
+    commits = [{"sha": str(item.get("sha", ""))[:40],
+                "message": str(((item.get("commit") or {}).get("message", "")).splitlines() or [""])[0][:200]}
+               for item in raw_commits[:20] if isinstance(item, dict)]
+    return {"status": "behind", "head": head, "base": base, "branch": branch, "repo": repo,
+            "files": files, "commits": commits}
+
+def action_bot_gh_sync(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or b.get("owner") != call.from_user.id:
+        ack(call, "Not found or not yours", show_alert=True); return
+    if b.get("source") != "github":
+        ack(call, "This bot is not linked to GitHub", show_alert=True); return
+    ack(call, "Checking GitHub…")
+    try:
+        result = _gh_find_update(call.from_user.id, b)
+        if result["status"] == "baseline":
+            text = f"<b>GitHub sync baseline saved</b>\nPinned to <code>{esc(result['head'][:12])}</code> on <code>{esc(result['branch'])}</code>. Future checks can detect changes."
+            show_text(call.message.chat.id, text, _adm_back(f"bot_view_{bot_id}"), call=call); return
+        if result["status"] == "current":
+            show_text(call.message.chat.id, f"<b>GitHub is up to date</b>\nBranch <code>{esc(result['branch'])}</code> · <code>{esc(result['head'][:12])}</code>", _adm_back(f"bot_view_{bot_id}"), call=call); return
+        b["gh_pending_sync"] = {k: result[k] for k in ("head", "base", "branch", "repo", "files", "commits")}
+        save_bot(b)
+        files = result.get("files", [])
+        rows = []
+        for item in files[:12]:
+            status = str(item.get("status", "modified"))
+            path = str(item.get("filename", "?"))[:64]
+            delta = f"+{int(item.get('additions', 0) or 0)}/-{int(item.get('deletions', 0) or 0)}"
+            rows.append(f"• <code>{esc(status)} {esc(path)}</code> <i>{delta}</i>")
+        if len(files) > 12: rows.append(f"…and {len(files)-12} more files")
+        patch_previews = []
+        for item in files[:2]:
+            patch = str(item.get("patch", ""))
+            if patch:
+                patch_previews.append(f"<b>{esc(str(item.get('filename', '?'))[:48])}</b>\n<pre>{esc(patch[:360])}</pre>")
+        if not rows: rows = ["GitHub reports new commits; file details are unavailable."]
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(Btn("✅ Review & apply", callback_data=f"bot_gh_apply_{bot_id}", style="success"),
+               Btn("Cancel", callback_data=f"bot_gh_cancel_{bot_id}", style="danger"))
+        text = (f"<b>GitHub updates found</b>\n{esc(result['repo'])} · <code>{esc(result['branch'])}</code>\n"
+                f"<code>{result['base'][:10]} → {result['head'][:10]}</code>\n\n" + "\n".join(rows) +
+                (("\n\n<b>Patch preview</b>\n" + "\n".join(patch_previews)) if patch_previews else "") +
+                "\n\nThe update will be security-scanned before apply. Confirm to replace the source and restart if currently running.")
+        show_text(call.message.chat.id, text, kb, call=call)
+    except Exception as exc:
+        show_text(call.message.chat.id, f"{G['no']} GitHub check failed: <code>{esc(str(exc)[:300])}</code>", _adm_back(f"bot_view_{bot_id}"), call=call)
+
+def action_bot_gh_auto_toggle(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or b.get("owner") != call.from_user.id or b.get("source") != "github":
+        ack(call, "Not found or not yours", show_alert=True); return
+    b["gh_auto_sync"] = not bool(b.get("gh_auto_sync"))
+    b["gh_auto_last_check"] = 0
+    save_bot(b)
+    ack(call, "Auto-check enabled" if b["gh_auto_sync"] else "Auto-check disabled")
+    if b["gh_auto_sync"]:
+        try:
+            bot.send_message(call.message.chat.id, "Automatic GitHub checks are on (every 15 minutes). I’ll notify you when updates are available; nothing is deployed without your confirmation.")
+        except Exception: pass
+    render_bot_view(call, bot_id)
+
+def _gh_bot_is_running(bot_id: str) -> bool:
+    info = RUNNING.get(bot_id) or {}
+    if info.get("remote"):
+        return info.get("node_status", "ONLINE") in {"ONLINE", "AUTHENTICATED"}
+    proc = info.get("proc")
+    try:
+        return bool(proc and proc.poll() is None)
+    except Exception:
+        return False
+
+def action_bot_gh_apply(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or b.get("owner") != call.from_user.id or b.get("source") != "github":
+        ack(call, "Not found or not yours", show_alert=True); return
+    pending = b.get("gh_pending_sync") or {}
+    head = str(pending.get("head") or "")
+    if not head or not pending.get("repo"):
+        ack(call, "Update preview expired; check again", show_alert=True); return
+    with _GH_SYNC_APPLY_LOCK:
+        if bot_id in _GH_SYNC_APPLYING:
+            ack(call, "A GitHub update is already running", show_alert=True); return
+        _GH_SYNC_APPLYING.add(bot_id)
+    if not SCAN_RATE.allow(call.from_user.id):
+        with _GH_SYNC_APPLY_LOCK: _GH_SYNC_APPLYING.discard(bot_id)
+        ack(call, "Security scanner busy; try again later", show_alert=True); return
+    ack(call, "Applying update securely…")
+    uid = call.from_user.id
+    def worker() -> None:
+        temp_dir = Path(tempfile.mkdtemp(prefix="gh-sync-stage-"))
+        new_blobs: List[Dict[str, Any]] = []
+        manifest_switched = False
+        old_snapshot = {k: b.get(k) for k in ("enc_files", "dir", "gh_commit_sha", "gh_branch", "security_scan")}
+        was_running = _gh_bot_is_running(bot_id)
+        try:
+            # Refuse a stale approval; the owner must review the newer head.
+            from urllib.parse import quote
+            latest_items = _gh_user_api(uid, f"/repos/{pending['repo']}/commits?sha={quote(str(pending['branch']), safe='')}&per_page=1")
+            latest = latest_items[0] if isinstance(latest_items, list) and latest_items else {}
+            if str(latest.get("sha") or "") != head:
+                b.pop("gh_pending_sync", None); save_bot(b)
+                bot.send_message(uid, "GitHub changed again since this preview. Please check updates and review the new diff.")
+                return
+            token = _user_gh_token(uid) or None
+            archived = _download_gh_archive(str(b.get("gh_repo")), token, temp_dir, branch=head)
+            if not archived.get("ok"):
+                raise RuntimeError(archived.get("error", "Could not download the selected GitHub commit."))
+            files: List[Tuple[str, bytes]] = []
+            total_bytes = 0
+            for root, dirs, names in os.walk(temp_dir):
+                dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "venv", ".venv", "__pycache__"}]
+                for name in names:
+                    path = Path(root) / name
+                    rel = path.relative_to(temp_dir).as_posix()
+                    content = path.read_bytes(); total_bytes += len(content)
+                    if total_bytes > 200 * 1024 * 1024 or len(files) >= 2000:
+                        raise RuntimeError("Repository exceeds safe sync limits (200 MB or 2,000 files).")
+                    files.append((rel, content))
+            if not files:
+                raise RuntimeError("The selected GitHub commit contains no files.")
+            scan = _run_security_scan(files, uploader_uid=uid)
+            if scan.get("recommendation") == "REJECT" or scan.get("verdict") == "DANGEROUS":
+                raise RuntimeError("Security scan rejected this update: " + str(scan.get("summary", "dangerous code"))[:250])
+            if not bool(get_setting("sandbox_mode", False)) and scan.get("recommendation") != "APPROVE":
+                raise RuntimeError("Security scan requires administrator review. This update was not applied.")
+            from types import SimpleNamespace
+            uploader = SimpleNamespace(id=uid, username=str(db_load().get("users", {}).get(str(uid), {}).get("username", "")))
+            for rel, content in files:
+                stored = store_uploaded_file(uploader, rel, content)
+                new_blobs.append({"key_id": stored["key_id"], "enc_path": stored["path"], "filename": rel, "rel_path": rel})
+            new_dir = str(DIRS["sandbox"] / f"{uid}_{bot_id}_ghsync_{head[:10]}")
+            if was_running:
+                stopped = stop_child(bot_id, manual=False)
+                if not stopped.get("ok"):
+                    raise RuntimeError(stopped.get("error", "Could not stop the running bot safely."))
+            # Keep the previous encrypted version plus the existing rollback
+            # snapshot until the new runtime has started successfully.
+            previous_backup = b.get("gh_sync_backup") or {}
+            b["gh_sync_backup"] = {**old_snapshot, "saved_at": ts_iso()}
+            b["enc_files"] = new_blobs
+            b["dir"] = new_dir
+            b["gh_branch"] = pending["branch"]
+            b["gh_commit_sha"] = head
+            b["security_scan"] = {"verdict": scan.get("verdict", "UNKNOWN"), "risk_score": scan.get("risk_score", 0), "summary": scan.get("summary", ""), "recommendation": scan.get("recommendation", "MANUAL_REVIEW"), "checked": ts_iso()}
+            b["gh_synced_at"] = ts_iso()
+            b.pop("gh_pending_sync", None)
+            save_bot(b)
+            manifest_switched = True
+            if was_running:
+                result = start_child(b, manual=False)
+                if not result.get("ok"):
+                    # Restore prior encrypted sources and keep the bot stopped on the known-good version.
+                    for f in new_blobs:
+                        try: Path(f["enc_path"]).unlink(missing_ok=True)
+                        except Exception: pass
+                        try: KEYRING.remove(f["key_id"])
+                        except Exception: pass
+                    b.update(old_snapshot)
+                    b["gh_sync_backup"] = previous_backup
+                    b.pop("gh_pending_sync", None)
+                    save_bot(b)
+                    manifest_switched = False
+                    rmrf(new_dir)
+                    start_child(b, manual=False)
+                    raise RuntimeError(f"Updated version did not start; restored previous version. {result.get('error', '')}"[:450])
+            for f in previous_backup.get("enc_files", []) if isinstance(previous_backup, dict) else []:
+                try: Path(f.get("enc_path", "")).unlink(missing_ok=True)
+                except Exception: pass
+                try: KEYRING.remove(f.get("key_id", ""))
+                except Exception: pass
+            audit(uid, "gh_sync_apply", f"bot={bot_id} commit={head}")
+            bot.send_message(uid, f"✅ GitHub update applied: <code>{esc(head[:12])}</code>." + (" Bot restarted successfully." if was_running else " Bot remains stopped; the update will be used next time it starts."), parse_mode="HTML")
+        except Exception as exc:
+            if not manifest_switched:
+                for f in new_blobs:
+                    try: Path(f.get("enc_path", "")).unlink(missing_ok=True)
+                    except Exception: pass
+                    try: KEYRING.remove(f.get("key_id", ""))
+                    except Exception: pass
+                failure_text = f"{G['no']} GitHub sync failed; the existing version was kept. <code>{esc(str(exc)[:350])}</code>"
+            else:
+                failure_text = f"GitHub update is applied, but final notification/logging had an issue: <code>{esc(str(exc)[:300])}</code>"
+            bot.send_message(uid, failure_text, parse_mode="HTML")
+        finally:
+            rmrf(temp_dir)
+            with _GH_SYNC_APPLY_LOCK: _GH_SYNC_APPLYING.discard(bot_id)
+    threading.Thread(target=worker, daemon=True, name=f"gh-sync-{bot_id[:8]}").start()
+
+def render_bot_gh_rollback_confirm(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or b.get("owner") != call.from_user.id or not b.get("gh_sync_backup"):
+        ack(call, "No rollback version available", show_alert=True); return
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("↩️ Confirm rollback", callback_data=f"bot_gh_rollback_yes_{bot_id}", style="danger"),
+           Btn("Cancel", callback_data=f"bot_view_{bot_id}", style="primary"))
+    show_text(call.message.chat.id, f"Restore the previous GitHub version (<code>{esc(str((b.get('gh_sync_backup') or {}).get('gh_commit_sha', 'unknown'))[:12])}</code>)? The current version will be kept as the next rollback point.", kb, call=call)
+    ack(call)
+
+def action_bot_gh_rollback(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or b.get("owner") != call.from_user.id or not b.get("gh_sync_backup"):
+        ack(call, "No rollback version available", show_alert=True); return
+    backup = b.get("gh_sync_backup") or {}
+    if not backup.get("enc_files"):
+        ack(call, "Rollback snapshot is incomplete", show_alert=True); return
+    uid = call.from_user.id
+    was_running = _gh_bot_is_running(bot_id)
+    old = {k: b.get(k) for k in ("enc_files", "dir", "gh_commit_sha", "gh_branch", "security_scan")}
+    with _GH_SYNC_APPLY_LOCK:
+        if bot_id in _GH_SYNC_APPLYING:
+            ack(call, "A GitHub sync/rollback is already running", show_alert=True); return
+        _GH_SYNC_APPLYING.add(bot_id)
+    ack(call, "Restoring previous GitHub version…")
+    try:
+        if was_running:
+            stop_child(bot_id, manual=False)
+        b["gh_sync_backup"] = {**old, "saved_at": ts_iso()}
+        for key in ("enc_files", "gh_commit_sha", "gh_branch", "security_scan"):
+            if key in backup: b[key] = backup[key]
+        b["dir"] = str(DIRS["sandbox"] / f"{uid}_{bot_id}_ghrollback_{int(time.time())}")
+        save_bot(b)
+        if was_running:
+            result = start_child(b, manual=False)
+            if not result.get("ok"):
+                b.update(old); b["gh_sync_backup"] = backup; save_bot(b)
+                start_child(b, manual=False)
+                raise RuntimeError("Rollback version failed to start; restored the current version.")
+        audit(uid, "gh_sync_rollback", f"bot={bot_id}")
+        bot.send_message(uid, "↩️ Previous GitHub version restored.")
+    except Exception as exc:
+        bot.send_message(uid, f"Rollback failed: <code>{esc(str(exc)[:300])}</code>", parse_mode="HTML")
+    finally:
+        with _GH_SYNC_APPLY_LOCK: _GH_SYNC_APPLYING.discard(bot_id)
+
+def gh_repo_auto_check_loop() -> None:
+    """Poll opted-in GitHub bots every 15 minutes and notify owners only."""
+    while True:
+        time.sleep(60)
+        try:
+            now = time.time()
+            docs = db_load().get("bots", {})
+            for bot_id, bot_doc in list(docs.items()):
+                if bot_doc.get("source") != "github" or not bot_doc.get("gh_auto_sync"):
+                    continue
+                if now - float(bot_doc.get("gh_auto_last_check", 0) or 0) < 900:
+                    continue
+                bot_doc["gh_auto_last_check"] = now
+                save_bot(bot_doc)
+                try:
+                    result = _gh_find_update(int(bot_doc.get("owner") or 0), bot_doc)
+                    if result.get("status") != "behind" or result.get("head") == bot_doc.get("gh_notified_sha"):
+                        continue
+                    bot_doc["gh_notified_sha"] = result["head"]
+                    bot_doc["gh_pending_sync"] = {k: result[k] for k in ("head", "base", "branch", "repo", "files", "commits")}
+                    save_bot(bot_doc)
+                    kb = types.InlineKeyboardMarkup()
+                    kb.add(Btn("Review GitHub changes", callback_data=f"bot_gh_sync_{bot_id}", style="success"))
+                    bot.send_message(int(bot_doc["owner"]),
+                        f"🔔 GitHub updates are available for <b>{esc(str(bot_doc.get('name', 'bot')))}</b>. No files were changed automatically.",
+                        reply_markup=kb, parse_mode="HTML")
+                except Exception as exc:
+                    print(f"[gh_auto_check] bot={bot_id}: {exc}", flush=True)
+                time.sleep(0.5)
+        except Exception as exc:
+            print(f"[gh_auto_check_loop] {exc}", flush=True)
+
+def render_bot_gh_cancel(call: types.CallbackQuery, bot_id: str) -> None:
+    b = find_bot(bot_id)
+    if not b or b.get("owner") != call.from_user.id: ack(call, "Not yours"); return
+    b.pop("gh_pending_sync", None); save_bot(b)
+    ack(call, "Update discarded")
+    render_bot_view(call, bot_id)
 
 def render_gh_repo_host_menu(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
@@ -20000,6 +20381,12 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("pay_") and data != "pay_proof": render_payment_screen(call, data); return
     if data == "pay_proof": start_proof_flow(call); return
     # Bot actions
+    if data.startswith("bot_gh_rollback_yes_"): action_bot_gh_rollback(call, data[len("bot_gh_rollback_yes_"):]); return
+    if data.startswith("bot_gh_rollback_"): render_bot_gh_rollback_confirm(call, data[len("bot_gh_rollback_"):]); return
+    if data.startswith("bot_gh_apply_"): action_bot_gh_apply(call, data[len("bot_gh_apply_"):]); return
+    if data.startswith("bot_gh_cancel_"): render_bot_gh_cancel(call, data[len("bot_gh_cancel_"):]); return
+    if data.startswith("bot_gh_auto_"): action_bot_gh_auto_toggle(call, data[len("bot_gh_auto_"):]); return
+    if data.startswith("bot_gh_sync_"): action_bot_gh_sync(call, data[len("bot_gh_sync_"):]); return
     if data.startswith("bot_view_"):        render_bot_view(call, data.split("_", 2)[2]); return
     if data.startswith("bot_network_"):     action_bot_sandbox_network_toggle(call, data[len("bot_network_"):]); return
     if data.startswith("bot_node_set_"):
@@ -20075,8 +20462,24 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
         except ValueError: idx = -1
         branches = state.get("ghb_branches", [])
         if idx < 0 or idx >= len(branches): ack(call, "Branch selection expired", show_alert=True); return
-        state["ghb_branch"] = branches[idx]; state["ghb_path"] = ""
+        state["ghb_branch"] = branches[idx]; state["ghb_path"] = ""; state["ghb_commit_sha"] = ""
+        return action_gh_browser_commits(call)
+    if data.startswith("ghb_c_"):
+        uid = call.from_user.id
+        state = USER_STATES.get(uid, {})
+        try: idx = int(data.rsplit("_", 1)[1])
+        except ValueError: idx = -1
+        commits = state.get("ghb_commits", [])
+        if idx < 0 or idx >= len(commits): ack(call, "Commit selection expired", show_alert=True); return
+        state["ghb_commit_sha"] = commits[idx]["sha"]
+        state["ghb_path"] = ""
         return action_gh_browser_files(call)
+    if data == "ghb_tip":
+        state = USER_STATES.get(call.from_user.id, {})
+        commits = state.get("ghb_commits", [])
+        if commits: state["ghb_commit_sha"] = commits[0]["sha"]
+        return action_gh_browser_files(call)
+    if data == "ghb_commits": return action_gh_browser_commits(call)
     if data == "ghb_files": return action_gh_browser_files(call)
     if data == "ghb_up":
         state = USER_STATES.get(call.from_user.id, {})
@@ -20090,10 +20493,11 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
         uid = call.from_user.id
         state = USER_STATES.get(uid, {})
         repo, branch = state.get("ghb_repo", ""), state.get("ghb_branch", "")
+        commit_sha = state.get("ghb_commit_sha", "")
         if not repo or not branch: ack(call, "Choose a branch first", show_alert=True); return
-        USER_STATES[uid] = {"flow": "await_gh_repo_url", "gh_import_repo": repo, "gh_import_branch": branch}
+        USER_STATES[uid] = {"flow": "await_gh_repo_url", "gh_import_repo": repo, "gh_import_branch": branch, "gh_import_commit": commit_sha}
         bot.send_message(call.message.chat.id,
-            f"Import <code>{esc(repo)}</code> from branch <code>{esc(branch)}</code>? Send <code>yes</code> to continue or /cancel.",
+            f"Import <code>{esc(repo)}</code> from <code>{esc(branch)}</code> at commit <code>{esc(commit_sha[:7] or 'branch tip')}</code>? Send <code>yes</code> to continue or /cancel.",
             parse_mode="HTML")
         ack(call)
         return
@@ -20373,6 +20777,7 @@ def main() -> int:
     # Background threads
     threading.Thread(target=gh_auto_loop, daemon=True).start()
     threading.Thread(target=gh_uptime_backup_loop, daemon=True, name="gh-uptime-backup").start()
+    threading.Thread(target=gh_repo_auto_check_loop, daemon=True, name="gh-auto-check").start()
     threading.Thread(target=_cipher_vault_loop, daemon=True, name="cipher-vault-sync").start()
     threading.Thread(target=cron_runner, daemon=True).start()
     threading.Thread(target=_verify_state_janitor, daemon=True, name="verify-janitor").start()
