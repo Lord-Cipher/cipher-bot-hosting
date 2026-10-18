@@ -6812,7 +6812,7 @@ def render_adm_growth_stats(call: types.CallbackQuery) -> None:
     def _count(days: int) -> int:
         since = (now - timedelta(days=days)).strftime("%Y-%m-%d")
         return sum(1 for u in users if str(u.get("joined", "")) >= since)
-    bar = lambda n, mx: "█" * int(n / max(mx, 1) * 10) + "░" * (10 - int(n / max(mx, 1) * 10))
+    bar = lambda n, mx: _colored_progress_bar(float(n) / max(mx, 1) * 100, width=10).rsplit(" ", 1)[0]
     d1, d7, d30, all_ = _count(1), _count(7), _count(30), len(list(users))
     cap = (
         f"<b>📉 {sc('User Growth')}</b>\n"
@@ -6851,7 +6851,7 @@ def render_adm_plan_dist(call: types.CallbackQuery) -> None:
     counts: Dict[str, int] = defaultdict(int)
     for u in users:
         counts[u.get("plan", "free")] += 1
-    bar = lambda n: "█" * int(n / total * 12) + "░" * (12 - int(n / total * 12))
+    bar = lambda n: _colored_progress_bar(float(n) / total * 100, width=12).rsplit(" ", 1)[0]
     rows = "\n".join(
         f"{bullet(PLAN_LIMITS.get(p, {}).get('name', p), f'{n} ({n*100//total}%) {bar(n)}')}"
         for p, n in sorted(counts.items(), key=lambda x: x[1], reverse=True)
@@ -6868,7 +6868,7 @@ def render_adm_bot_activity(call: types.CallbackQuery) -> None:
     stopped = total - running
     crashed = sum(1 for b in bots if b.get("last_exit_code") not in (None, 0, ""))
     never   = sum(1 for b in bots if not b.get("last_started"))
-    bar = lambda n: "█" * int(n / max(total, 1) * 10)
+    bar = lambda n: _colored_progress_bar(float(n) / max(total, 1) * 100, width=10).rsplit(" ", 1)[0]
     cap = (
         f"<b>🤖 {sc('Bot Activity')}</b>\n"
         f"{G['div_eq']}\n"
@@ -9324,9 +9324,7 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
     
     # Progress bar helper for live monitor (Elite 20-block precision)
     def lbar(pct: float) -> str:
-        p = min(100.0, max(0.0, pct))
-        filled = int(p / 5)
-        return '█' * filled + '░' * (20 - filled) + f" {p:.1f}%"
+        return _colored_progress_bar(pct, width=20, decimals=1)
 
     def spark(values: Any) -> str:
         levels = "▁▂▃▄▅▆▇█"
@@ -9447,9 +9445,7 @@ def render_adm_monitor_system(call: types.CallbackQuery) -> None:
     except Exception:
         pass
     def bar(pct: float) -> str:
-        pct = min(100.0, max(0.0, float(pct)))
-        filled = int(pct / 5)
-        return "█" * filled + "░" * (20 - filled) + f" {pct:.1f}%"
+        return _colored_progress_bar(pct, width=20, decimals=1)
     core_rows = "  ".join(f"C{i + 1}:{float(v):.0f}%" for i, v in enumerate(per_core[:12])) or "No core data"
     core_count = len(per_core) or int(SYS_TELEMETRY.get("cpu_count", 0) or 0)
     frequency_display = f"{float(SYS_TELEMETRY.get('cpu_freq', 0.0) or 0.0):.0f} MHz"
@@ -9491,8 +9487,7 @@ def render_adm_rev_goals(call: types.CallbackQuery) -> None:
         if not goal:
             return "— (no goal set)"
         pct = min(100, cur * 100 / goal)
-        filled = int(pct / 5)
-        return "█" * filled + "░" * (20 - filled) + f" {pct:.1f}%"
+        return _colored_progress_bar(pct, width=20, decimals=1)
     cap = (
         f"<b>💎 {sc('Revenue Goals')}</b>\n"
         f"{G['div_eq']}\n"
@@ -12579,7 +12574,7 @@ def _handle_bot_upload(m: types.Message) -> None:
     # Runs BEFORE any file is saved, encrypted, or approved.
     _scan_msg = bot.reply_to(
         m,
-        f"{G['shield']} {sc('Advanced Safety Protocol active')}...\n<code>[░░░░░░░░░░] 0% ({sc('Initializing check')})</code>",
+        f"{G['shield']} {sc('Advanced Safety Protocol active')}...\n<code>[{_colored_progress_bar(0, 10).rsplit(' ', 1)[0]}] 0% ({sc('Initializing check')})</code>",
         parse_mode="HTML",
     )
     _scan_progress_lock = threading.Lock()
@@ -12599,8 +12594,7 @@ def _handle_bot_upload(m: types.Message) -> None:
                 return
             _scan_last_edit[:] = [now, pct]
             _scan_last_status[0] = status
-        filled = pct // 10
-        bar = "█" * filled + "░" * (10 - filled)
+        bar = _colored_progress_bar(pct, width=10).rsplit(" ", 1)[0]
         try:
             bot.edit_message_text(
                 f"{G['shield']} {sc('Advanced Safety Protocol active')}...\n<code>[{bar}] {pct:3d}% ({esc(status)})</code>",
@@ -12772,8 +12766,7 @@ def _handle_bot_upload(m: types.Message) -> None:
     kind, _ = detect_entry(bot_dir)  # speculative — might be encrypted-only
 
     def _make_bar(pct: int, status: str, kind_str: str = "") -> str:
-        filled = int(pct / 5)
-        bar    = "▓" * filled + "░" * (20 - filled)
+        bar = _colored_progress_bar(pct, width=20).rsplit(" ", 1)[0]
         return (
             f"<b>{G['ok']} {sc('Bot stored encrypted')}</b>\n"
             f"{bullet('Name',  name)}\n"
@@ -14067,10 +14060,9 @@ def _monitor_system_stats():
 
 def _progress_bar(current, total=100, width=12):
     if total <= 0:
-        return "░" * width + " 0%"
-    pct    = min(current / total, 1.0)
-    filled = int(pct * width)
-    return "█" * filled + "░" * (width - filled) + f" {pct*100:.1f}%"
+        return _colored_progress_bar(0, width=width, decimals=1)
+    pct = min(100.0, max(0.0, float(current) / total * 100))
+    return _colored_progress_bar(pct, width=width, decimals=1)
 
 def _run_diagnostics():
     import os, shutil
@@ -15030,23 +15022,24 @@ def render_adm_tg_channel_backup(call: types.CallbackQuery) -> None:
 def _gh_clone_progress(repo_url: str, percent: int, stage: str) -> str:
     """Render a compact, escaped progress bar for Telegram clone updates."""
     pct = max(0, min(100, int(percent)))
-    filled = pct // 10
-    bar = "█" * filled + "░" * (10 - filled)
+    bar = _colored_progress_bar(pct, width=10, decimals=0).rsplit(" ", 1)[0]
     return (f"<b>🐙 Cloning GitHub repository</b>\n<code>{esc(repo_url)}</code>\n"
             f"<code>[{bar}] {pct}%</code>\n{esc(stage)}")
 
-def _resource_usage_bar(pct: float, width: int = 10) -> str:
-    """Render use relative to a configured limit with green/yellow/red thresholds."""
+def _colored_progress_bar(pct: float, width: int = 10, decimals: int = 0) -> str:
+    """Render a consistent green/yellow/red bar with safe clamping."""
     p = min(100.0, max(0.0, float(pct)))
     width = max(1, int(width))
     filled = min(width, int(p * width / 100.0))
     green_end = int(width * 0.50)
     yellow_end = int(width * 0.80)
-    parts = []
-    for idx in range(filled):
-        parts.append("🟩" if idx < green_end else "🟨" if idx < yellow_end else "🟥")
+    parts = ["🟩" if i < green_end else "🟨" if i < yellow_end else "🟥" for i in range(filled)]
     parts.extend(["⬜"] * (width - filled))
-    return "".join(parts) + f" {p:.0f}%"
+    return "".join(parts) + f" {p:.{max(0, int(decimals))}f}%"
+
+def _resource_usage_bar(pct: float, width: int = 10) -> str:
+    """Render resource use relative to the configured limit."""
+    return _colored_progress_bar(pct, width=width, decimals=0)
 
 def _user_can_host_gh(u: Dict[str, Any]) -> bool:
     plan = u.get("plan", "free")
@@ -15783,8 +15776,8 @@ def _gen_captcha_image() -> Tuple[Optional[bytes], str, List[str]]:
     return buf.getvalue(), correct_ch, options
 def _progress_bar_text(pct: int) -> str:
     pct = max(0, min(100, pct))
-    filled = pct // 10
-    bar = "\u25b0" * filled + "\u25b1" * (10 - filled)
+    bar = _colored_progress_bar(pct, width=10).rsplit(" ", 1)[0]
+
     return (
         f"<b>{G['shield']} {sc('Verifying you')}\u2026</b>\n"
         f"{G['div']}\n"
@@ -17772,7 +17765,7 @@ def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
     progress_lock = threading.Lock()
     progress_state = [0, 0.0, "Starting upload"]
     try:
-        progress_msg = bot.reply_to(m, "<b>Product upload</b>\n<code>[░░░░░░░░░░] 0% (Starting upload)</code>", parse_mode="HTML")
+        progress_msg = bot.reply_to(m, f"<b>Product upload</b>\n<code>[{_colored_progress_bar(0, 10).rsplit(' ', 1)[0]}] 0% (Starting upload)</code>", parse_mode="HTML")
     except Exception:
         pass
     def _product_progress(pct: int, status: str) -> None:
@@ -17786,8 +17779,7 @@ def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
             if pct < 100 and now - progress_state[1] < 0.35:
                 return
             progress_state[:] = [pct, now, status]
-        filled = pct // 10
-        bar = "█" * filled + "░" * (10 - filled)
+        bar = _colored_progress_bar(pct, width=10).rsplit(" ", 1)[0]
         try:
             bot.edit_message_text(f"<b>Product upload</b>\n<code>[{bar}] {pct:3d}% ({esc(status)})</code>",
                                   m.chat.id, progress_msg.message_id, parse_mode="HTML")
@@ -19324,7 +19316,7 @@ def _handle_pip_install(m: types.Message, st: Dict[str, Any]) -> None:
     USER_STATES.pop(m.from_user.id, None)
     _do_pip_install_live(m.chat.id, m.from_user.id, b, packages)
 def _do_pip_install_live(chat_id: int, uid: int, b: Dict[str, Any], packages: List[str]) -> None:
-    p_msg = bot.send_message(chat_id, f"<b>📦 Package Installer</b>\n{G['div']}\nInitializing installation for: <code>{' '.join(packages[:5])}</code>\n[░░░░░░░░░░] <b>1%</b>", parse_mode="HTML")
+    p_msg = bot.send_message(chat_id, f"<b>📦 Package Installer</b>\n{G['div']}\nInitializing installation for: <code>{' '.join(packages[:5])}</code>\n[{_colored_progress_bar(1, 10).rsplit(' ', 1)[0]}] <b>1%</b>", parse_mode="HTML")
     
     def _bg():
         import subprocess as _sp

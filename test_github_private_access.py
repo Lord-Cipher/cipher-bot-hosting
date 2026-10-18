@@ -120,10 +120,13 @@ finally:
     bot.requests.get = old_get
 
 progress_view = bot._gh_clone_progress("https://github.com/acme/private-repo", 56, "Downloading files")
-assert "[█████░░░░░] 56%" in progress_view
+assert "[🟩🟩🟩🟩🟩⬜⬜⬜⬜⬜] 56%" in progress_view
 assert "Downloading files" in progress_view
 escaped_progress = bot._gh_clone_progress("<bad>", 150, "Done")
 assert "100%" in escaped_progress and "&lt;bad&gt;" in escaped_progress
+shared_bar = bot._colored_progress_bar(70, width=10, decimals=0)
+assert shared_bar == "🟩🟩🟩🟩🟩🟨🟨⬜⬜⬜ 70%"
+assert bot._progress_bar(25, total=100, width=4) == "🟩⬜⬜⬜ 25.0%"
 
 # Resource bars are relative to plan limits: green through the first half,
 # yellow through 79%, then red from 80% to the limit.
