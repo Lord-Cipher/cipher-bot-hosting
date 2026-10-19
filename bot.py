@@ -18,6 +18,7 @@ import subprocess
 import sys
 import importlib
 import logging
+import math
 import tarfile
 import tempfile
 import threading
@@ -16525,6 +16526,158 @@ def start_proof_flow(call: types.CallbackQuery) -> None:
         call.message.chat.id,
         f"{G['plus']} {sc('Send your payment screenshot or transaction id now')}. /cancel {sc('to abort')}.",
     )
+_QUOTA_HISTORY_RETENTION_DAYS = 14
+_QUOTA_HISTORY_SAMPLE_SECONDS = 3600
+
+def _quota_history_path(uid: int) -> Path:
+    return DIRS["data"] / "quota_history" / f"{int(uid)}.json"
+
+def _quota_user_snapshot(uid: int) -> Dict[str, Any]:
+    db = db_load_ro()
+    user = (db.get("users", {}) or {}).get(str(uid), {})
+    bots = [b for b in (db.get("bots", {}) or {}).values() if str(b.get("owner")) == str(uid)]
+    plan = str(user.get("plan") or "free")
+    if plan != "free" and user and not user_plan_active(user):
+        plan = "free"
+    slots = max(1, int(user_max_bots(user))) if user else 1
+    cpu_used = ram_used = storage_bytes = 0.0
+    for b in bots:
+        telemetry = TELEMETRY.get(str(b.get("_id")), {}) or {}
+        try: cpu_used += max(0.0, float(telemetry.get("cpu", 0) or 0))
+        except (TypeError, ValueError): pass
+        try: ram_used += max(0.0, float(telemetry.get("ram", 0) or 0))
+        except (TypeError, ValueError): pass
+        seen_blob_paths = set()
+        manifests = [b.get("enc_files") or []]
+        rollback_manifest = (b.get("gh_sync_backup") or {}).get("enc_files", [])
+        if isinstance(rollback_manifest, list): manifests.append(rollback_manifest)
+        for manifest in manifests:
+            for f in manifest:
+                try:
+                    raw_path = str(f.get("enc_path", ""))
+                    if raw_path in seen_blob_paths: continue
+                    seen_blob_paths.add(raw_path)
+                    path = Path(raw_path)
+                    storage_bytes += float(path.stat().st_size if path.exists() else f.get("size", 0) or 0)
+                except (OSError, TypeError, ValueError): pass
+    return {
+        "ts": time.time(), "cpu_pct": cpu_used,
+        "cpu_limit_pct": float(slots * _plan_cpu_pct(plan)),
+        "ram_bytes": ram_used,
+        "ram_limit_bytes": float(slots * _plan_ram_mb(plan) * 1024 * 1024),
+        "storage_bytes": storage_bytes,
+        "bot_count": len(bots), "bot_limit": slots,
+    }
+
+def _quota_history_load(uid: int) -> List[Dict[str, Any]]:
+    path = _quota_history_path(uid)
+    try:
+        with path.open("r", encoding="utf-8") as fh: data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def _quota_trend(history: List[Dict[str, Any]], key: str, now: Optional[float] = None) -> Dict[str, Any]:
+    """Linear least-squares trend in units/day; intended as a rough estimate, not a guarantee."""
+    points = []
+    for item in history:
+        try:
+            t, value = float(item.get("ts")), float(item.get(key))
+            if math.isfinite(t) and math.isfinite(value): points.append((t, max(0.0, value)))
+        except (TypeError, ValueError, AttributeError): pass
+    points.sort()
+    if not points:
+        return {"ready": False, "count": 0}
+    current = points[-1][1]
+    span_seconds = points[-1][0] - points[0][0]
+    if len(points) < 6 or span_seconds < 6 * 3600:
+        return {"ready": False, "count": len(points), "current": current, "span_hours": max(0.0, span_seconds / 3600)}
+    origin = points[0][0]
+    xs = [(t - origin) / 86400 for t, _ in points]
+    ys = [v for _, v in points]
+    x_bar = sum(xs) / len(xs); y_bar = sum(ys) / len(ys)
+    denom = sum((x - x_bar) ** 2 for x in xs)
+    slope = (sum((x - x_bar) * (y - y_bar) for x, y in zip(xs, ys)) / denom) if denom else 0.0
+    return {"ready": True, "count": len(points), "current": current, "per_day": slope,
+            "span_hours": span_seconds / 3600, "last_ts": points[-1][0]}
+
+def _quota_time_to_limit(trend: Dict[str, Any], limit: float) -> Optional[float]:
+    if not trend.get("ready") or limit <= 0: return None
+    current, slope = float(trend.get("current", 0)), float(trend.get("per_day", 0))
+    if current >= limit: return 0.0
+    if slope <= 0: return None
+    return (limit - current) / slope
+
+def _quota_history_loop() -> None:
+    """Persist hourly aggregate resource/storage samples, retaining the last 14 days."""
+    while True:
+        try:
+            users = db_load_ro().get("users", {}) or {}
+            bots_by_owner: Dict[str, bool] = {}
+            for b in (db_load_ro().get("bots", {}) or {}).values():
+                bots_by_owner[str(b.get("owner"))] = True
+            cutoff = time.time() - _QUOTA_HISTORY_RETENTION_DAYS * 86400
+            for uid in users:
+                if not bots_by_owner.get(str(uid)): continue
+                sample = _quota_user_snapshot(int(uid))
+                path = _quota_history_path(int(uid))
+                history = _quota_history_load(int(uid))
+                history = [x for x in history if isinstance(x, dict) and float(x.get("ts", 0) or 0) >= cutoff]
+                if history and sample["ts"] - float(history[-1].get("ts", 0) or 0) < _QUOTA_HISTORY_SAMPLE_SECONDS:
+                    continue
+                history.append(sample)
+                _atomic_write(path, history[-336:])
+        except Exception as exc:
+            print(f"[quota_history] {exc}", flush=True)
+        time.sleep(_QUOTA_HISTORY_SAMPLE_SECONDS)
+
+def _format_quota_forecast(uid: int) -> str:
+    current = _quota_user_snapshot(uid)
+    history = _quota_history_load(uid)
+    cpu = _quota_trend(history, "cpu_pct")
+    ram = _quota_trend(history, "ram_bytes")
+    storage = _quota_trend(history, "storage_bytes")
+    cpu_days = _quota_time_to_limit(cpu, current["cpu_limit_pct"])
+    ram_days = _quota_time_to_limit(ram, current["ram_limit_bytes"])
+    def forecast_label(days: Optional[float], trend: Dict[str, Any]) -> str:
+        if not trend.get("ready"): return "Collecting history (need 6+ samples spanning 6+ hours)."
+        if days == 0: return "Currently at or above the combined allowance."
+        if days is None or days > 90: return "No limit crossing projected within 90 days at the recent trend."
+        return f"At the recent trend, limit could be reached in about {max(1, int(round(days)))} day(s)."
+    def change_per_day(t: Dict[str, Any], unit: str) -> str:
+        if not t.get("ready"): return "trend unavailable"
+        v = float(t.get("per_day", 0))
+        return f"{v:+.1f} {unit}/day" if unit == "% of one core" else f"{v / (1024*1024):+.1f} MB/day"
+    storage_projection = None
+    if storage.get("ready"):
+        storage_projection = max(0.0, float(storage["current"]) + max(0.0, float(storage["per_day"])) * 30)
+    lines = [
+        f"<b>📈 Quota forecast</b>",
+        f"{G['div_eq']}",
+        f"<b>Bot slots</b>: {current['bot_count']} / {current['bot_limit']} (fixed quota; no trend projection)",
+        f"<b>CPU</b>: {current['cpu_pct']:.1f}% / {current['cpu_limit_pct']:.0f}% of one-core allowance across available slots",
+        f"  {esc(forecast_label(cpu_days, cpu))} · {esc(change_per_day(cpu, '% of one core'))}",
+        f"<b>RAM</b>: {current['ram_bytes'] / (1024*1024):.1f} / {current['ram_limit_bytes'] / (1024*1024):.0f} MB across available slots",
+        f"  {esc(forecast_label(ram_days, ram))} · {esc(change_per_day(ram, 'MB'))}",
+    ]
+    if storage_projection is not None:
+        lines.append(f"<b>Encrypted source storage</b>: {current['storage_bytes'] / (1024*1024):.1f} MB now; about {storage_projection / (1024*1024):.1f} MB in 30 days at the recent growth rate.")
+    else:
+        lines.append(f"<b>Encrypted source storage</b>: {current['storage_bytes'] / (1024*1024):.1f} MB now; collecting history for a 30-day trend.")
+    lines.extend([
+        f"<i>History: {len(history)} hourly samples, retained up to 14 days. CPU/RAM projections are linear trend estimates and can vary; storage has no configured per-user cap.</i>",
+        f"{G['div']}{FOOTER}",
+    ])
+    return "\n".join(lines)
+
+def render_quota_forecast(call: types.CallbackQuery) -> None:
+    uid = call.from_user.id
+    ack(call)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🔄 Refresh", callback_data="quota_forecast", style="primary"),
+           Btn(f"{G['back']} Profile", callback_data="menu_profile", style="danger"))
+    show_text(call.message.chat.id, _format_quota_forecast(uid), kb, call=call)
+
 def render_profile(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
     u = db_load()["users"][str(uid)]
@@ -16545,7 +16698,9 @@ def render_profile(call: types.CallbackQuery) -> None:
         f"{bullet('Referrals', u.get('ref_count', 0))}\n"
         f"{G['div']}{FOOTER}"
     )
-    show_menu(call.message.chat.id, PHOTOS.get("profile", PHOTOS["main"]), cap, back_main_kb(), call=call)
+    kb = back_main_kb()
+    kb.add(Btn("📈 Quota Forecast", callback_data="quota_forecast", style="primary"))
+    show_menu(call.message.chat.id, PHOTOS.get("profile", PHOTOS["main"]), cap, kb, call=call)
 def _referral_redeem(uid: int, mode: str, quantity: int = 1) -> Tuple[bool, str]:
     """Redeem referral credits for one or more configured entitlements."""
     d = db_load()
@@ -20269,6 +20424,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_plans":    render_plans_menu(call); return
     if data == "menu_buy":      render_buy_menu(call); return
     if data == "menu_profile":  render_profile(call); return
+    if data == "quota_forecast": render_quota_forecast(call); return
     if data == "menu_referral": render_referral(call); return
     if data == "ref_leaderboard": render_referral_leaderboard(call); return
     if data == "menu_products": render_products(call); return
@@ -20778,6 +20934,7 @@ def main() -> int:
     threading.Thread(target=gh_auto_loop, daemon=True).start()
     threading.Thread(target=gh_uptime_backup_loop, daemon=True, name="gh-uptime-backup").start()
     threading.Thread(target=gh_repo_auto_check_loop, daemon=True, name="gh-auto-check").start()
+    threading.Thread(target=_quota_history_loop, daemon=True, name="quota-history").start()
     threading.Thread(target=_cipher_vault_loop, daemon=True, name="cipher-vault-sync").start()
     threading.Thread(target=cron_runner, daemon=True).start()
     threading.Thread(target=_verify_state_janitor, daemon=True, name="verify-janitor").start()
