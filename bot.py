@@ -677,8 +677,13 @@ _OMEGATECH_MODELS: Dict[str, Tuple[str, Callable[[str], Dict[str, Any]]]] = {
     "gpt-4o-mini":    ("Gpt-4-mini",        lambda p: {"message": p}),
     "deepseek-cli":   ("Aicli",             lambda p: {"action": "chat", "model": "deepseek_r1", "query": p}),
     "qwen-80b":       ("Qwen-Claude-Haiku", lambda p: {"message": p, "model": "qwen"}),
-    # Docs-confirmed and live-smoke-tested conversational route.
+    # Docs-confirmed and live-smoke-tested conversational routes.
     "chatgpt-v2":     ("Chatgpt-v2",        lambda p: {"action": "chat", "message": p}),
+    "deepai-deepseek-v3-2": ("Deep-ai", lambda p: {"action": "chat", "message": p, "model": "deepseek-v3.2"}),
+    "deepai-gemini-flash-lite": ("Deep-ai", lambda p: {"action": "chat", "message": p, "model": "gemini-2.5-flash-lite"}),
+    "deepai-llama-3-3-70b": ("Deep-ai", lambda p: {"action": "chat", "message": p, "model": "llama-3.3-70b-instruct"}),
+    "deepai-gpt-oss-120b": ("Deep-ai", lambda p: {"action": "chat", "message": p, "model": "gpt-oss-120b"}),
+    "deepai-gpt-5-nano": ("Deep-ai", lambda p: {"action": "chat", "message": p, "model": "gpt-5-nano"}),
 }
 _OMEGATECH_SECRET_MODELS: Dict[str, str] = {
     "claude-fable-5":       "claude-fable-5",
@@ -22540,6 +22545,11 @@ _AI_OPERATIVE_LABELS = {
     "claude-fable-5": "Claude Fable 5",
     "gpt-5-5": "GPT-5.5",
     "chatgpt-v2": "ChatGPT v2",
+    "deepai-deepseek-v3-2": "DeepSeek V3.2",
+    "deepai-gemini-flash-lite": "Gemini 2.5 Flash Lite",
+    "deepai-llama-3-3-70b": "Llama 3.3 70B",
+    "deepai-gpt-oss-120b": "GPT OSS 120B",
+    "deepai-gpt-5-nano": "GPT-5 Nano",
 }
 
 _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
@@ -22557,12 +22567,12 @@ def _public_ai_model_name(model: str) -> str:
     return "Cipher AI"
 
 _AI_PLAN_DEFAULT_MODELS = {
-    "free":       ["gpt-4o-mini", "chatbot", "chatgpt-v2"],
-    "starter":    ["gpt-4o-mini", "chatbot", "qwen-80b", "chatgpt-v2"],
-    "basic":      ["claude", "deepseek-cli", "claude-haiku", "gpt-4o-mini", "chatgpt-v2"],
-    "pro":        ["claude-fable-5", "gpt-5-5", "deepseek-cli", "claude", "qwen-80b", "chatgpt-v2"],
-    "enterprise": ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2"],
-    "lifetime":   ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2"],
+    "free":       ["gpt-4o-mini", "chatbot", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite"],
+    "starter":    ["gpt-4o-mini", "chatbot", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b"],
+    "basic":      ["claude", "deepseek-cli", "claude-haiku", "gpt-4o-mini", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b"],
+    "pro":        ["claude-fable-5", "gpt-5-5", "deepseek-cli", "claude", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b", "deepai-gpt-5-nano"],
+    "enterprise": ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b", "deepai-gpt-5-nano"],
+    "lifetime":   ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b", "deepai-gpt-5-nano"],
 }
 
 def _ai_operative_enabled(key: str) -> bool:

@@ -82,16 +82,31 @@ try:
 finally:
     bot.AI_HTTP.get = original_get
 
-# ChatGPT v2 is the only new candidate integrated after schema review and a
-# live smoke check returned a non-empty answer.
+# OmegaTech's Deep-ai endpoint and ChatGPT v2 returned usable responses in
+# live checks; each Deep-ai variant is independently selectable and pinned to
+# the model name that was tested.
+new_models = {
+    "deepai-deepseek-v3-2": ("deepseek-v3.2", "free"),
+    "deepai-gemini-flash-lite": ("gemini-2.5-flash-lite", "free"),
+    "deepai-llama-3-3-70b": ("llama-3.3-70b-instruct", "starter"),
+    "deepai-gpt-oss-120b": ("gpt-oss-120b", "basic"),
+    "deepai-gpt-5-nano": ("gpt-5-nano", "pro"),
+}
+assert len(set(bot._AI_OPERATIVE_LABELS.values())) == len(bot._AI_OPERATIVE_LABELS)
+for model, (provider_model, plan) in new_models.items():
+    assert model in bot._AI_OPERATIVE_KEYS, model
+    assert model in bot._AI_PLAN_DEFAULT_MODELS[plan], (model, plan)
+    route_path, build_params = bot._OMEGATECH_MODELS[model]
+    assert route_path == "Deep-ai", route_path
+    assert build_params("safe test prompt") == {
+        "action": "chat", "message": "safe test prompt", "model": provider_model
+    }
+
 model = "chatgpt-v2"
-path = "/api/ai/Chatgpt-v2"
-assert model in bot._AI_OPERATIVE_KEYS
 assert model in bot._AI_PLAN_DEFAULT_MODELS["free"]
-route_path, build_params = bot._OMEGATECH_MODELS[model]
-assert f"/api/ai/{route_path}" == path
-params = build_params("safe test prompt")
-assert params == {"action": "chat", "message": "safe test prompt"}, params
+assert bot._OMEGATECH_MODELS[model][1]("safe test prompt") == {
+    "action": "chat", "message": "safe test prompt"
+}
 
 route_calls = []
 def new_route_reply(url, params=None, timeout=None):
@@ -104,11 +119,14 @@ bot.get_setting = lambda key, default=None: default
 bot.AI_MODEL_FAILURE_COUNT.clear()
 bot.AI_MODEL_CIRCUIT_OPEN_UNTIL.clear()
 try:
-    assert bot._call_ai_model(model, "safe test prompt") == "Helpful test response"
-    assert route_calls and route_calls[-1][0].endswith(path), route_calls
-    sent = route_calls[-1][1]
-    assert sent.get("action") == "chat", sent
-    assert "safe test prompt" in str(sent.get("message")), sent
+    for model in [*new_models, "chatgpt-v2"]:
+        route_calls.clear()
+        assert bot._call_ai_model(model, "safe test prompt") == "Helpful test response", model
+        assert route_calls and route_calls[-1][0].endswith(
+            "/api/ai/" + bot._OMEGATECH_MODELS[model][0]
+        ), (model, route_calls)
+        sent = route_calls[-1][1]
+        assert "safe test prompt" in str(sent), (model, sent)
 finally:
     bot.AI_HTTP.get = original_get
     bot.get_setting = original_get_setting
