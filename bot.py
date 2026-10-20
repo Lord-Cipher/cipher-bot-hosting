@@ -2861,11 +2861,14 @@ def safe_env(bot_dir: Path, extra: Optional[Dict[str, str]] = None) -> Dict[str,
     Path(deps_dir).mkdir(parents=True, exist_ok=True)
     if extra:
         for k, v in extra.items():
-            # Never inherit host secrets, but allow an operator-supplied
-            # per-bot token needed by a hosted bot clone.
-            if k in SECRET_ENV_NAMES and k != "BOT_TOKEN":
+            # `extra` is the explicitly configured per-bot environment, not
+            # the host process environment above. Preserve user-provided
+            # credentials (API keys, database URLs, etc.) while never copying
+            # host secrets implicitly. Restrict names to valid env identifiers.
+            name = str(k).strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
                 continue
-            env[str(k)] = str(v)
+            env[name] = str(v)
     return env
 _PYPI_ALIAS: Dict[str, str] = {
     "telebot":       "pyTelegramBotAPI",
@@ -17750,6 +17753,27 @@ def _clone_enc_files(uid: int, files: List[Dict[str, Any]]) -> List[Dict[str, An
         nf["enc_path"] = str(dst)
         out.append(nf)
     return out
+def _clone_env_with_credentials(source_env: Dict[str, Any], new_token: str, chat_id: str) -> Dict[str, str]:
+    """Copy configured variables but replace source bot identity credentials.
+
+    Projects commonly read TOKEN or TELEGRAM_TOKEN rather than BOT_TOKEN;
+    keep aliases already present in their env panel synchronized to the new
+    bot's token/chat instead of silently leaving the source identity behind.
+    """
+    env = {str(k): str(v) for k, v in (source_env or {}).items()}
+    token_keys = {"BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN", "TG_BOT_TOKEN", "TOKEN"}
+    chat_keys = {"CHAT_ID", "TELEGRAM_CHAT_ID", "TG_CHAT_ID", "TARGET_CHAT_ID"}
+    source_token_values = {env[k] for k in token_keys if k in env and env[k]}
+    if new_token in source_token_values:
+        raise ValueError("Use a different Telegram bot token for the clone; the source token cannot run two bot instances.")
+    matched_token_keys = {k for k in env if k.upper() in token_keys}
+    matched_chat_keys = {k for k in env if k.upper() in chat_keys}
+    env["BOT_TOKEN"] = new_token
+    env["CHAT_ID"] = chat_id
+    for key in matched_token_keys: env[key] = new_token
+    for key in matched_chat_keys: env[key] = chat_id
+    return env
+
 def _finish_bot_clone_inner(uid: int, bot_id: str, new_token: str, chat_id: str) -> None:
     """Clone files while assigning fresh credential environment values."""
     _clone_progress(uid, "Validating source bot")
@@ -17778,12 +17802,7 @@ def _finish_bot_clone_inner(uid: int, bot_id: str, new_token: str, chat_id: str)
 
     import copy as _copy
     new_doc = _copy.deepcopy(b)
-    clone_env = dict(new_doc.get("env") or {})
-    # Do not carry the source bot's credentials into the clone.
-    clone_env.pop("BOT_TOKEN", None)
-    clone_env.pop("CHAT_ID", None)
-    clone_env["BOT_TOKEN"] = new_token
-    clone_env["CHAT_ID"] = chat_id
+    clone_env = _clone_env_with_credentials(new_doc.get("env") or {}, new_token, chat_id)
     new_doc.update({
         "_id": new_id,
         "name": f"{b.get('name', 'bot')}_copy",
