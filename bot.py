@@ -677,6 +677,8 @@ _OMEGATECH_MODELS: Dict[str, Tuple[str, Callable[[str], Dict[str, Any]]]] = {
     "gpt-4o-mini":    ("Gpt-4-mini",        lambda p: {"message": p}),
     "deepseek-cli":   ("Aicli",             lambda p: {"action": "chat", "model": "deepseek_r1", "query": p}),
     "qwen-80b":       ("Qwen-Claude-Haiku", lambda p: {"message": p, "model": "qwen"}),
+    # Docs-confirmed and live-smoke-tested conversational route.
+    "chatgpt-v2":     ("Chatgpt-v2",        lambda p: {"action": "chat", "message": p}),
 }
 _OMEGATECH_SECRET_MODELS: Dict[str, str] = {
     "claude-fable-5":       "claude-fable-5",
@@ -22537,6 +22539,7 @@ _AI_OPERATIVE_LABELS = {
     # Each Secret catalog model is a separate user/admin-selectable operative.
     "claude-fable-5": "Claude Fable 5",
     "gpt-5-5": "GPT-5.5",
+    "chatgpt-v2": "ChatGPT v2",
 }
 
 _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
@@ -22554,12 +22557,12 @@ def _public_ai_model_name(model: str) -> str:
     return "Cipher AI"
 
 _AI_PLAN_DEFAULT_MODELS = {
-    "free":       ["gpt-4o-mini", "chatbot"],
-    "starter":    ["gpt-4o-mini", "chatbot", "qwen-80b"],
-    "basic":      ["claude", "deepseek-cli", "claude-haiku", "gpt-4o-mini"],
-    "pro":        ["claude-fable-5", "gpt-5-5", "deepseek-cli", "claude", "qwen-80b"],
-    "enterprise": ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b"],
-    "lifetime":   ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b"],
+    "free":       ["gpt-4o-mini", "chatbot", "chatgpt-v2"],
+    "starter":    ["gpt-4o-mini", "chatbot", "qwen-80b", "chatgpt-v2"],
+    "basic":      ["claude", "deepseek-cli", "claude-haiku", "gpt-4o-mini", "chatgpt-v2"],
+    "pro":        ["claude-fable-5", "gpt-5-5", "deepseek-cli", "claude", "qwen-80b", "chatgpt-v2"],
+    "enterprise": ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2"],
+    "lifetime":   ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2"],
 }
 
 def _ai_operative_enabled(key: str) -> bool:

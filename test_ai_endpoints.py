@@ -82,6 +82,37 @@ try:
 finally:
     bot.AI_HTTP.get = original_get
 
+# ChatGPT v2 is the only new candidate integrated after schema review and a
+# live smoke check returned a non-empty answer.
+model = "chatgpt-v2"
+path = "/api/ai/Chatgpt-v2"
+assert model in bot._AI_OPERATIVE_KEYS
+assert model in bot._AI_PLAN_DEFAULT_MODELS["free"]
+route_path, build_params = bot._OMEGATECH_MODELS[model]
+assert f"/api/ai/{route_path}" == path
+params = build_params("safe test prompt")
+assert params == {"action": "chat", "message": "safe test prompt"}, params
+
+route_calls = []
+def new_route_reply(url, params=None, timeout=None):
+    route_calls.append((url, params or {}))
+    return Response(200, {"statusCode": 200, "success": True,
+                          "data": {"reply": "Helpful test response"}})
+
+bot.AI_HTTP.get = new_route_reply
+bot.get_setting = lambda key, default=None: default
+bot.AI_MODEL_FAILURE_COUNT.clear()
+bot.AI_MODEL_CIRCUIT_OPEN_UNTIL.clear()
+try:
+    assert bot._call_ai_model(model, "safe test prompt") == "Helpful test response"
+    assert route_calls and route_calls[-1][0].endswith(path), route_calls
+    sent = route_calls[-1][1]
+    assert sent.get("action") == "chat", sent
+    assert "safe test prompt" in str(sent.get("message")), sent
+finally:
+    bot.AI_HTTP.get = original_get
+    bot.get_setting = original_get_setting
+
 # Repeated failures quarantine only one operative. A different healthy model
 # remains callable as the ordered fallback for the same user request.
 bot.get_setting = lambda key, default=None: default
