@@ -30,7 +30,6 @@ assert bot._public_ai_model_name("gpt-5-5") == "GPT-5.5"
 assert len(set(bot._AI_OPERATIVE_LABELS.values())) == len(bot._AI_OPERATIVE_LABELS)
 assert bot._OMEGATECH_HOSTS == ("https://api.omegatech.app",)
 assert bot._OMEGATECH_SECRET_MODELS["claude-fable-5"] == "claude-fable-5"
-assert bot._OMEGATECH_SECRET_MODELS["gemini-3-5-flash"] == "gemini-3.5-flash"
 
 original_get = bot.AI_HTTP.get
 original_get_setting = bot.get_setting
@@ -63,18 +62,22 @@ finally:
     bot.AI_HTTP.get = original_get
     bot.get_setting = original_get_setting
 
-# Catalog models currently rejected by the provider are registered for the
-# admin catalog but hidden from user routing until an admin enables them.
+# Models explicitly identified as rejected/timing out in the old catalog
+# have been removed instead of being left as admin-enableable entries.
 assert bot._ai_operative_enabled("claude-fable-5")
-for model in bot._AI_MODELS_DISABLED_BY_DEFAULT:
-    assert not bot._ai_operative_enabled(model), model
-    assert model in bot._AI_OPERATIVE_KEYS
+removed_models = {
+    "claude-sonnet-4-6", "claude-opus-4-7", "gpt-5-4",
+    "gemini-3-5-flash", "deepseek-v4-pro",
+}
+assert not (removed_models & set(bot._AI_OPERATIVE_KEYS))
+assert not (removed_models & set(bot._create_ai_engine().routes))
 
 # Retired provider keys must not silently route to the old Kaalix API.
 calls.clear()
 bot.AI_HTTP.get = lambda *args, **kwargs: calls.append((args, kwargs))
 try:
-    assert bot._call_ai_model("deepseek-v3", "short prompt") is None
+    for retired in removed_models | {"deepseek-v3"}:
+        assert bot._call_ai_model(retired, "short prompt") is None
     assert not calls, calls
 finally:
     bot.AI_HTTP.get = original_get

@@ -81,7 +81,7 @@ bot.set_plan_ai_models("lifetime", all_models)
 assert settings["ai_plan_lifetime_models"] == all_models
 assert bot.get_plan_ai_models("lifetime", include_disabled=True) == all_models
 assert bot.get_plan_ai_models("lifetime") == enabled_models
-assert set(bot._AI_MODELS_DISABLED_BY_DEFAULT).isdisjoint(enabled_models)
+assert set(enabled_models) == set(all_models)
 
 # An explicitly assigned paid plan is respected for an admin/owner too, so
 # the admin can verify the same plan pool that ordinary users see.

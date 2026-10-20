@@ -680,12 +680,7 @@ _OMEGATECH_MODELS: Dict[str, Tuple[str, Callable[[str], Dict[str, Any]]]] = {
 }
 _OMEGATECH_SECRET_MODELS: Dict[str, str] = {
     "claude-fable-5":       "claude-fable-5",
-    "claude-sonnet-4-6":    "claude-sonnet-4.6",
-    "claude-opus-4-7":      "claude-opus-4.7",
     "gpt-5-5":              "gpt-5.5",
-    "gpt-5-4":              "gpt-5.4",
-    "gemini-3-5-flash":     "gemini-3.5-flash",
-    "deepseek-v4-pro":      "deepseek-v4-pro",
 }
 def _extract_ai_reply(data: Any) -> Optional[str]:
     """Compatibility adapter to the standalone engine's response normalizer."""
@@ -22541,22 +22536,10 @@ _AI_OPERATIVE_LABELS = {
     "qwen-80b": "Qwen 80B",
     # Each Secret catalog model is a separate user/admin-selectable operative.
     "claude-fable-5": "Claude Fable 5",
-    "claude-sonnet-4-6": "Claude Sonnet 4.6",
-    "claude-opus-4-7": "Claude Opus 4.7",
     "gpt-5-5": "GPT-5.5",
-    "gpt-5-4": "GPT-5.4",
-    "gemini-3-5-flash": "Gemini 3.5 Flash",
-    "deepseek-v4-pro": "DeepSeek V4 Pro",
 }
 
 _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
-_AI_MODELS_DISABLED_BY_DEFAULT = frozenset({
-    # Advertised in the catalog, but currently rejected or timing out on chat.
-    "claude-sonnet-4-6", "claude-opus-4-7", "gpt-5-4",
-    "gemini-3-5-flash", "deepseek-v4-pro",
-})
-
-
 def _public_ai_model_name(model: str) -> str:
     """Public label for an operative key.
 
@@ -22580,7 +22563,7 @@ _AI_PLAN_DEFAULT_MODELS = {
 }
 
 def _ai_operative_enabled(key: str) -> bool:
-    default_enabled = key not in _AI_MODELS_DISABLED_BY_DEFAULT
+    default_enabled = True
     return key in _AI_OPERATIVE_KEYS and bool(
         get_setting(f"ai_operative_{key}_enabled", default_enabled)
     )
