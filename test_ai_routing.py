@@ -157,8 +157,25 @@ assert bot.get_plan_ai_models("starter") == bot._AI_PLAN_DEFAULT_MODELS["starter
 # The shared response boundary enforces the same relationship for every AI
 # feature, not only the Telegram chat handler. A real first question must reach
 # the model chain rather than being replaced with a generic welcome.
+settings["ai_system_news"] = "Release note A: GitHub browser is available."
 context = bot._build_cipher_ai_context("Qwen 80B")
 assert "Cipher Tech Hosting" in context
+assert "Release note A: GitHub browser is available." in context
+assert "CURRENT PLANS, LIMITS, PRICES, AND AI MODELS" in context
+assert "DeepSeek V3.2" in context
+assert "Gemini 2.5 Flash Lite" in context
+assert "Free (price Free" in context and "AI models:" in context
+# Changing platform news and routing settings must appear immediately on the
+# next context build; the builder must not rely on a stale cached snapshot.
+settings["ai_system_news"] = "Release note B: New model pool is live."
+settings["ai_plan_free_models"] = ["chatgpt-v2", "deepai-gpt-5-nano"]
+updated_context = bot._build_cipher_ai_context("Qwen 80B")
+assert "Release note B: New model pool is live." in updated_context
+assert "Release note A: GitHub browser is available." not in updated_context
+free_plan_context = updated_context.split("Free (price Free", 1)[1].split(" | Starter", 1)[0]
+assert "ChatGPT v2" in free_plan_context and "GPT-5 Nano" in free_plan_context
+assert "DeepSeek V3.2" not in free_plan_context
+settings["ai_plan_free_models"] = bot._AI_PLAN_DEFAULT_MODELS["free"]
 assert "Telegram platform" in context
 assert "Lord Cipher" in context and "master" in context
 assert "tiered hosting" in context.lower() or "plans and prices" in context.lower()
@@ -166,11 +183,12 @@ assert "general-purpose AI" in context
 assert "coding, debugging" in context
 assert "do not redirect unrelated questions to hosting" in context
 assert "ask one concise clarifying question" in context
-assert "do not mention them when unrelated" in context.lower()
+assert "do not mention these facts when unrelated" in context.lower()
 assert "ABSOLUTE STEALTH" not in context
 assert "Military-Grade End-to-End Encryption" not in context
 fable_context = bot._build_cipher_ai_context("claude-fable-5")
 assert "CURRENT OPERATIVE: Claude Fable 5" in fable_context
+assert bot.render_ai_plan_models.__doc__ == "Show current enabled model availability across hosting plans."
 assert "do not guess who trained the underlying model" in fable_context.lower()
 assert bot._is_lord_cipher_identity_request("Who is Lord Cipher to you?")
 assert bot._is_lord_cipher_identity_request("Who is your master and creator?")

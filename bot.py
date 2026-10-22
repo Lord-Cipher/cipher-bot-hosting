@@ -704,10 +704,19 @@ def _build_cipher_ai_context(model_name: str) -> str:
     model_key = str(model_name or "").strip().lower()
     labels = globals().get("_AI_OPERATIVE_LABELS", {})
     operative_label = labels.get(model_key, str(model_name or "AI").strip())
-    plans_info = [
-        f"{details['name']}: " + ("Free" if details["price"] == 0 else f"${details['price']}")
-        for details in PLAN_LIMITS.values()
-    ]
+    plans_info = []
+    for plan_key, details in PLAN_LIMITS.items():
+        pool = get_plan_ai_models(plan_key)
+        model_names = ", ".join(_public_ai_model_name(key) for key in pool) or "No AI models currently enabled"
+        price = "Free" if details.get("price", 0) == 0 else f"{details.get('price')}{cur_sym()}"
+        duration = "Lifetime" if plan_key == "lifetime" else f"{details.get('days', 0)} days"
+        plans_info.append(
+            f"{details.get('name', plan_key.title())} (price {price}; duration {duration}; "
+            f"max bots {get_setting(f'plan_max_bots_{plan_key}', details.get('max_bots', 0))}; "
+            f"RAM per bot {details.get('ram', 0)} MB; CPU allowance {details.get('cpu', 0)}%; "
+            f"auto-restart {'yes' if details.get('auto_restart') else 'no'}; "
+            f"GitHub hosting {'yes' if plan_key != 'free' else 'no'}; AI models: {model_names})"
+        )
     plans_str = " | ".join(plans_info)
     return (
         "[SYSTEM DIRECTIVE: You are the helpful AI assistant integrated into Cipher Tech Hosting, "
@@ -739,9 +748,14 @@ def _build_cipher_ai_context(model_name: str) -> str:
         "user explicitly chooses Yes; choosing No leaves their source unchanged. Users choose from "
         "the AI models allowed by their plan. The platform also has tiered hosting plans, referrals, "
         "and encrypted backups. "
-        f"\nPLANS AND PRICES: {plans_str}. When a user asks about plans or pricing, use these current "
-        "details and do not invent other limits or prices. Do not mention them when unrelated. "
-        f"\nLATEST PLATFORM UPDATE: {system_news}. "
+        f"\nCURRENT PLANS, LIMITS, PRICES, AND AI MODELS: {plans_str}. This list is rebuilt from current "
+        "runtime settings for every answer, including admin-configured AI routing and model enable/disable "
+        "state. When users ask what is available on their plan or another tier, use the exact listed model "
+        "labels and only describe models shown for that plan. Prices and limits are current configured values; "
+        "do not invent other details. Do not mention these facts when unrelated. "
+        f"\nLATEST PLATFORM UPDATE: {system_news}. This update is read from the current saved AI system-news "
+        "setting each time a model request is built. Treat it as a current platform note, not proof of any "
+        "unlisted change. "
         "\nPRIVACY: Never disclose credentials, tokens, encryption keys, backup destinations, snapshot "
         "identifiers, or private storage paths. Do not claim perfect or end-to-end security unless "
         "verified. If a platform detail is not provided here, say you are unsure instead of guessing. "
@@ -2421,6 +2435,7 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f" AI Aɢᴇɴᴛ", callback_data="menu_ai_chat",  style="success"),
         Btn(f" Mʏ Sᴛᴀᴛꜱ",    callback_data="menu_stats",    style="primary"),
     )
+    kb.add(Btn("📋  AI Mᴏᴅᴇʟꜱ Bʏ Pʟᴀɴ", callback_data="menu_ai_plan_models", style="primary"))
     if admin:
         kb.add(Btn(f"Aᴅᴍɪɴ Pᴀɴᴇʟ", callback_data="menu_admin", style="danger"))
 
@@ -20544,6 +20559,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_stats":    render_user_stats(call); return
     if data == "menu_ai_chat":  render_ai_chat(call); return
     if data == "menu_ai_models": render_ai_models(call); return
+    if data == "menu_ai_plan_models": render_ai_plan_models(call); return
     if data.startswith("ai_pick_"): action_ai_pick(call, data[len("ai_pick_"):]); return
     if data.startswith("aifixdoc_"): action_ai_file_fix(call, data[len("aifixdoc_"):]); return
     if data == "menu_admin":    render_admin(call); return
@@ -22708,6 +22724,26 @@ def render_ai_models(call: types.CallbackQuery) -> None:
         kb.add(Btn(f"{'✅ ' if active else '🤖 '}{_public_ai_model_name(model)}",
                    callback_data=f"ai_pick_{model}",
                    style="success" if active else "primary"))
+    kb.add(Btn(f"📋  {sc('Models by plan')}", callback_data="menu_ai_plan_models", style="primary"))
+    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
+
+def render_ai_plan_models(call: types.CallbackQuery) -> None:
+    """Show current enabled model availability across hosting plans."""
+    uid = int(call.from_user.id)
+    current_plan = get_ai_model(uid)
+    cap = (
+        f"<b>📋 {sc('AI Models by Plan')}</b>\n{G['div_eq']}\n"
+        f"{sc('Lists reflect the current AI routing settings. Your plan is marked below.')}\n\n"
+    )
+    for plan_key, details in PLAN_LIMITS.items():
+        models = get_plan_ai_models(plan_key)
+        names = ", ".join(_public_ai_model_name(model) for model in models) or sc("No models currently enabled")
+        marker = " ✅" if plan_key == current_plan else ""
+        cap += f"<b>{esc(details.get('name', plan_key.title()))}{marker}</b> ({len(models)}):\n{esc(names)}\n\n"
+    cap += f"{G['div']}{FOOTER}"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn(f"{G['back']}  {sc('My available models')}", callback_data="menu_ai_models", style="success"))
     kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
 
