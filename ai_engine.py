@@ -23,6 +23,11 @@ class ModelRoute:
     build_params: Callable[[str], Mapping[str, Any]]
     timeout: Tuple[float, float] = (6, 30)
     public_label: Optional[str] = None
+    mode_builders: Optional[Mapping[str, Callable[[str], Mapping[str, Any]]]] = None
+
+    def params_for(self, prompt: str, mode: str = "chat") -> Mapping[str, Any]:
+        builder = (self.mode_builders or {}).get(str(mode or "chat").lower(), self.build_params)
+        return builder(prompt)
 
 
 @dataclass(frozen=True)
@@ -279,11 +284,11 @@ class AIEngine:
         message = str(payload.get("error") or payload.get("message") or "")
         return bool(re.search(r"\bHTTP\s+50[0-4]\b", message, re.IGNORECASE))
 
-    def fit_prompt(self, prefix: str, prompt: str, route: ModelRoute) -> Optional[str]:
+    def fit_prompt(self, prefix: str, prompt: str, route: ModelRoute, mode: str = "chat") -> Optional[str]:
         """Keep platform instructions intact while fitting the encoded GET query."""
         def encoded_size(full_text: str) -> int:
             try:
-                return len(urlencode(route.build_params(full_text)))
+                return len(urlencode(route.params_for(full_text, mode)))
             except Exception:
                 return self.max_encoded_query + 1
 
@@ -338,7 +343,7 @@ class AIEngine:
             except Exception:
                 pass
 
-    def complete(self, model_name: str, prompt: str) -> ModelResult:
+    def complete(self, model_name: str, prompt: str, mode: str = "chat") -> ModelResult:
         """Call one configured operative and return either text or a safe error."""
         model = str(model_name or "").strip().lower()
         route = self.routes.get(model)
@@ -363,10 +368,10 @@ class AIEngine:
 
         try:
             prefix = str(self.context_builder(model) or "") + "USER REQUEST:\n"
-            fitted = self.fit_prompt(prefix, str(prompt or ""), route)
+            fitted = self.fit_prompt(prefix, str(prompt or ""), route, mode)
             if fitted is None:
                 return ModelResult(model, error="prompt exceeds provider URL limit")
-            params = dict(route.build_params(fitted))
+            params = dict(route.params_for(fitted, mode))
         except Exception:
             self._record_failure(model, "request construction failed")
             return ModelResult(model, error="request construction failed")
@@ -428,13 +433,14 @@ class AIEngine:
         models: Sequence[str],
         prompt: str,
         invoke: Optional[Callable[[str, str], Any]] = None,
+        mode: str = "chat",
     ) -> Tuple[ModelResult, ...]:
         """Run operatives in priority order; stop only on a usable answer."""
         attempts = []
         for model in models:
             key = str(model or "").strip().lower()
             if invoke is None:
-                outcome = self.complete(key, prompt)
+                outcome = self.complete(key, prompt, mode=mode)
             else:
                 try:
                     raw = invoke(key, prompt)

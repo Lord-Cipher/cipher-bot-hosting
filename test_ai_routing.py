@@ -82,6 +82,17 @@ assert settings["ai_plan_lifetime_models"] == all_models
 assert bot.get_plan_ai_models("lifetime", include_disabled=True) == all_models
 assert bot.get_plan_ai_models("lifetime") == enabled_models
 assert set(enabled_models) == set(all_models)
+assert bot.get_plan_ai_models("lifetime", mode="coding") == ["qwen-80b"]
+assert bot.get_user_ai_models(42, "lifetime", mode="coding") == ["qwen-80b"]
+catalog_answer = bot._call_ai_api("List AI models by plan", "lifetime", 42)
+assert "Free:" in catalog_answer and "Lifetime:" in catalog_answer
+assert "Chatting:" in catalog_answer and "Coding:" in catalog_answer
+coding_params = bot.AI_ENGINE.routes["qwen-80b"].params_for("write code", "coding")
+assert coding_params["action"] == "code"
+assert coding_params["model"] == "qwen7b"
+settings["ai_coding_pool_enabled"] = False
+assert not bot._ai_pool_enabled("coding")
+settings["ai_coding_pool_enabled"] = True
 
 # An explicitly assigned paid plan is respected for an admin/owner too, so
 # the admin can verify the same plan pool that ordinary users see.
@@ -248,8 +259,19 @@ assert "standard ai chat by deepai" not in bot._sanitize_ai_reply(
 provider_attribution = bot._sanitize_ai_reply(
     "Claude Fable 5 is an underlying model from Anthropic; Lord Cipher configured this platform assistant."
 )
+assert "Claude Fable 5" in provider_attribution
 assert "Anthropic" in provider_attribution
 assert "Cipher AI" not in provider_attribution
+technical_answer = bot._sanitize_ai_reply(
+    "Use Claude Fable 5 with the OpenAI-compatible API at /app/storage/config.json.\n"
+    "```python\nfrom claude_sdk import Client\npath = 'sandbox/main.py'\n```"
+)
+assert "Claude Fable 5" in technical_answer
+assert "OpenAI-compatible API" in technical_answer
+assert "/app/storage/config.json" in technical_answer
+assert "from claude_sdk import Client" in technical_answer
+assert "sandbox/main.py" in technical_answer
+assert "[RESTRICTED PATH]" not in technical_answer
 assert bot._lord_cipher_profile_answer().lower().count("lord cipher") >= 2
 bot.AI_LAST_MODEL_USED[42] = "claude"
 assert bot.ai_model_tag(42, "lifetime") == bot._public_ai_model_name("claude").upper()

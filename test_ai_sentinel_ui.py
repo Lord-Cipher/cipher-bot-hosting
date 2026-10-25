@@ -106,8 +106,9 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     bot.action_bot_rollback_confirm = original_rollback_confirm
     bot.action_bot_rollback_cancel = original_rollback_cancel
 
-    pool = bot.get_plan_ai_models("lifetime")
-    assert len(pool) > 1
+    pool = bot.get_plan_ai_models("lifetime", mode="coding")
+    chat_pool = bot.get_plan_ai_models("lifetime", mode="chat")
+    assert pool
     sentinel_bot["ai_sentinel_backup"] = {"file": "main.py"}
     bot.action_bot_rollback_confirm(owner_call, bot_id)
     _, rollback_text, rollback_markup = shown_texts[-1]
@@ -120,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert bot._extract_ai_diagnosis_patch("Diagnosis\n```javascript\nconsole.log('ok')\n```") == "console.log('ok')"
     assert bot._extract_ai_diagnosis_patch("```javascript\nconsole.log('wrong file type')\n```", ".py") == ""
     assert bot._extract_ai_diagnosis_patch("```\nprint('snippet only')\n```") == ""
-    bot.USER_STATES[9001] = {"ai_model": pool[0]}
+    bot.USER_STATES[9001] = {"ai_model": chat_pool[0]}
 
     # Opening Sentinel shows model choices and does not start the diagnosis.
     bot.render_ai_sentinel_model_picker(owner_call, bot_id)
@@ -145,14 +146,14 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     chosen_model = pool[-1]
     bot.action_bot_ai_model_pick(owner_call, chosen_model, bot_id)
     assert bot.AI_SENTINEL_MODEL_SELECTIONS[9001]["model"] == chosen_model
-    assert bot.USER_STATES[9001]["ai_model"] == pool[0]
+    assert bot.USER_STATES[9001]["ai_model"] == chat_pool[0]
 
     # A stale model button from another open bot cannot change this diagnosis.
     bot.render_ai_sentinel_model_picker(owner_call, other_bot_id)
     other_selection = copy.deepcopy(bot.AI_SENTINEL_MODEL_SELECTIONS[9001])
-    bot.action_bot_ai_model_pick(owner_call, pool[1], bot_id)
+    bot.action_bot_ai_model_pick(owner_call, "not-a-coding-model", bot_id)
     assert bot.AI_SENTINEL_MODEL_SELECTIONS[9001] == other_selection
-    bot.action_bot_ai_model_pick(owner_call, pool[1], "")
+    bot.action_bot_ai_model_pick(owner_call, "not-a-coding-model", "")
     assert bot.AI_SENTINEL_MODEL_SELECTIONS[9001] == other_selection
     bot.render_ai_sentinel_model_picker(owner_call, bot_id)
     bot.action_bot_ai_model_pick(owner_call, chosen_model, bot_id)
@@ -165,8 +166,8 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     reply, used = bot._call_ai_chain(
         "Diagnose this synthetic NameError", "lifetime", 9001, preferred_model=chosen_model
     )
-    assert reply and used == pool[0]
-    assert calls[:2] == [chosen_model, pool[0]]
+    assert reply and used == chat_pool[0]
+    assert calls[:2] == [chosen_model, chat_pool[0]]
     bot._call_kaalix_model = original_caller
 
     # The Start callback hands the selected model to the real diagnosis runner.
@@ -188,7 +189,7 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     original_last_used = bot.AI_LAST_MODEL_USED.get(9001)
     bot.child_status = lambda bid, record: {"logs": ["NameError: x"]}
     bot._bot_source_snapshot = lambda record: [("main.py", "print('original')\n")]
-    bot._call_ai_api = lambda prompt, user_plan, uid, preferred_model=None: (
+    bot._call_ai_api = lambda prompt, user_plan, uid, preferred_model=None, mode="chat": (
         "The crash uses an undefined variable.\n```python\nprint('fixed')\n```"
     )
     bot.save_bot = lambda record: None
@@ -216,7 +217,7 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
 
     # Invalid syntax is shown but never receives a Yes button or a pending
     # patch, and the source remains untouched.
-    bot._call_ai_api = lambda prompt, user_plan, uid, preferred_model=None: (
+    bot._call_ai_api = lambda prompt, user_plan, uid, preferred_model=None, mode="chat": (
         "The syntax is broken.\n```python\nif True print('broken')\n```"
     )
     bot._run_bot_ai_diagnosis(owner_call, bot_id, chosen_model)
@@ -226,7 +227,7 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
     assert not any(b.callback_data == f"bot_applyfix_{bot_id}" for b in invalid_buttons)
     assert "pending_patch" not in sentinel_bot
     assert source_path.read_text(encoding="utf-8") == "print('original')\n"
-    bot._call_ai_api = lambda prompt, user_plan, uid, preferred_model=None: (
+    bot._call_ai_api = lambda prompt, user_plan, uid, preferred_model=None, mode="chat": (
         "The crash uses an undefined variable.\n```python\nprint('fixed')\n```"
     )
 

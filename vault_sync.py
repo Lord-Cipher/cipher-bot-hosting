@@ -12,12 +12,13 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import tarfile
 import tempfile
 import time
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, Iterable, Optional
 from urllib.parse import quote
 
@@ -199,6 +200,113 @@ def sync_vault(base_dir: str | Path, token: str, repo: str, branch: str = "main"
         VAULT_SYNC_LOCK.release()
 
 
+def _restore_safe_support_available() -> bool:
+    """Return whether the platform can safely create archive paths below a dir fd."""
+    return bool(
+        hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and os.open in getattr(os, "supports_dir_fd", ())
+        and os.mkdir in getattr(os, "supports_dir_fd", ())
+    )
+
+
+def _restore_member_parts(member: tarfile.TarInfo) -> tuple[str, ...]:
+    """Validate a tar member name as a strict, relative POSIX path."""
+    name = member.name
+    if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
+        raise ValueError("Unsafe archive path.")
+    windows_name = PureWindowsPath(name)
+    if PurePosixPath(name).is_absolute() or windows_name.drive or windows_name.root:
+        raise ValueError("Unsafe archive path.")
+
+    trailing_separator = name.endswith("/")
+    if trailing_separator:
+        name = name[:-1]
+        if not name or name.endswith("/") or member.type != tarfile.DIRTYPE:
+            raise ValueError("Unsafe archive path.")
+    parts = tuple(name.split("/"))
+    if not parts or any(not part or part in {".", ".."} for part in parts):
+        raise ValueError("Unsafe archive path.")
+    return parts
+
+
+def _restore_destination(stage_root: Path, parts: tuple[str, ...]) -> None:
+    """Confirm the resolved destination remains below the staging directory."""
+    destination = (stage_root.joinpath(*parts)).resolve(strict=False)
+    try:
+        destination.relative_to(stage_root)
+    except ValueError as exc:
+        raise ValueError("Unsafe archive path.") from exc
+
+
+def _restore_open_dir(parent_fd: int, name: str) -> int:
+    """Open one child directory without following a link, creating it if absent."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        return os.open(name, flags, dir_fd=parent_fd)
+
+
+def _restore_open_parent(root_fd: int, parts: tuple[str, ...]) -> int:
+    """Walk parent components with O_NOFOLLOW and return the final directory fd."""
+    current_fd = root_fd
+    try:
+        for part in parts:
+            next_fd = _restore_open_dir(current_fd, part)
+            if current_fd != root_fd:
+                os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except Exception:
+        if current_fd != root_fd:
+            os.close(current_fd)
+        raise
+
+
+def _restore_directory(root_fd: int, parts: tuple[str, ...]) -> None:
+    parent_fd = _restore_open_parent(root_fd, parts[:-1])
+    try:
+        try:
+            os.mkdir(parts[-1], 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            existing_fd = _restore_open_dir(parent_fd, parts[-1])
+            os.close(existing_fd)
+    finally:
+        if parent_fd != root_fd:
+            os.close(parent_fd)
+
+
+def _restore_regular_file(root_fd: int, member: tarfile.TarInfo, archive: tarfile.TarFile, parts: tuple[str, ...]) -> None:
+    if member.size < 0:
+        raise ValueError("Invalid archive member size.")
+    parent_fd = _restore_open_parent(root_fd, parts[:-1])
+    fd: Optional[int] = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        fd = os.open(parts[-1], flags, 0o600, dir_fd=parent_fd)
+        source = archive.extractfile(member)
+        if source is None:
+            raise ValueError("Unable to read regular archive member.")
+        with source:
+            with os.fdopen(fd, "wb") as destination:
+                fd = None
+                shutil.copyfileobj(source, destination, length=1024 * 1024)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if parent_fd != root_fd:
+            os.close(parent_fd)
+
+
 def materialize_snapshot(base_dir: str | Path, encrypted_archive: bytes, key: str, overwrite: bool = False) -> Dict[str, Any]:
     """Validate/decrypt an archive into a staging directory, then replace state."""
     if not key:
@@ -208,20 +316,48 @@ def materialize_snapshot(base_dir: str | Path, encrypted_archive: bytes, key: st
     except Exception as exc:
         return {"ok": False, "error": f"Backup authentication failed: {exc}"}
     base = Path(base_dir)
-    stage = Path(tempfile.mkdtemp(prefix="cipher-vault-restore-", dir=str(base.parent)))
+    if not _restore_safe_support_available():
+        return {"ok": False, "error": "Safe snapshot staging is unsupported on this platform."}
+    stage: Optional[Path] = None
     try:
-        with tarfile.open(fileobj=io.BytesIO(plain), mode="r:gz") as tf:
-            for member in tf.getmembers():
-                target = (stage / member.name).resolve()
-                if stage.resolve() not in target.parents:
-                    return {"ok": False, "error": "Unsafe archive path."}
-            tf.extractall(stage)
+        stage = Path(tempfile.mkdtemp(prefix="cipher-vault-restore-", dir=str(base.parent)))
+        stage_root = stage.resolve()
+        root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            root_flags |= os.O_CLOEXEC
+        root_fd = os.open(stage, root_flags)
+        try:
+            with tarfile.open(fileobj=io.BytesIO(plain), mode="r:gz") as tf:
+                for member in tf.getmembers():
+                    parts = _restore_member_parts(member)
+                    _restore_destination(stage_root, parts)
+                    if member.type == tarfile.DIRTYPE:
+                        _restore_directory(root_fd, parts)
+                    elif member.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                        _restore_regular_file(root_fd, member, tf, parts)
+                    else:
+                        raise ValueError("Archive contains unsupported link or special member.")
+        finally:
+            os.close(root_fd)
         if overwrite:
             backup = base.with_name(base.name + f".pre-restore-{int(time.time())}")
+            moved_base = False
             if base.exists():
                 base.rename(backup)
-            stage.rename(base)
+                moved_base = True
+            try:
+                stage.rename(base)
+            except Exception:
+                if moved_base and not base.exists() and backup.exists():
+                    backup.rename(base)
+                raise
+            stage = None
             return {"ok": True, "restoredFrom": str(backup)}
-        return {"ok": True, "stagedAt": str(stage)}
+        staged_at = str(stage)
+        stage = None
+        return {"ok": True, "stagedAt": staged_at}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)

@@ -1,8 +1,8 @@
 """Authenticated SSH worker operations for verified VPS nodes."""
 from __future__ import annotations
-import base64, os, posixpath, shlex, time
+import base64, errno, os, posixpath, shlex, stat, time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 from sandbox_runtime import limits_for_plan
 from node_manager import load_ssh_private_key
 
@@ -134,6 +134,111 @@ def _cleanup(c, remote: str, container: str) -> None:
     _run(c, f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true; rm -rf -- {shlex.quote(remote)}", timeout=30)
 
 
+_PROJECT_UPLOAD_EXCLUDES = {".git", "__pycache__", ".deps", ".tmp_run", ".cipher-runtime.env"}
+
+
+def _require_safe_project_walk() -> int:
+    """Return flags for descriptor-relative, no-follow filesystem access."""
+    supported = (
+        hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and os.open in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.stat in os.supports_follow_symlinks
+        and os.listdir in os.supports_fd
+    )
+    if not supported:
+        raise OSError(errno.ENOTSUP, "safe no-follow project traversal is unavailable on this platform")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_absolute_directory(path: Path, directory_flags: int) -> int:
+    """Open an absolute directory one component at a time without following links."""
+    fd = os.open(os.sep, directory_flags)
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, directory_flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _iter_project_payloads(local_dir: str | Path) -> Iterator[tuple[str, bytes]]:
+    """Yield safe regular files below the resolved root; skip links and exclusions.
+
+    Every directory and file is opened relative to an already-open directory
+    descriptor with O_NOFOLLOW. A race that changes an entry between lstat and
+    open therefore fails closed instead of reading a link target.
+    """
+    root = Path(local_dir).resolve(strict=True)
+    root_stat = root.stat()
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise NotADirectoryError(str(root))
+    directory_flags = _require_safe_project_walk()
+    root_fd = _open_absolute_directory(root, directory_flags)
+    try:
+        opened_root = os.fstat(root_fd)
+        if (not stat.S_ISDIR(opened_root.st_mode)
+                or (opened_root.st_dev, opened_root.st_ino) != (root_stat.st_dev, root_stat.st_ino)):
+            raise OSError(errno.EIO, "project root changed while opening")
+
+        def walk(directory_fd: int, prefix: tuple[str, ...]) -> Iterator[tuple[str, bytes]]:
+            for name in sorted(os.listdir(directory_fd)):
+                parts = prefix + (name,)
+                if any(part in _PROJECT_UPLOAD_EXCLUDES for part in parts):
+                    continue
+                entry_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if stat.S_ISLNK(entry_stat.st_mode):
+                    continue
+                if stat.S_ISDIR(entry_stat.st_mode):
+                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                    try:
+                        opened = os.fstat(child_fd)
+                        if (not stat.S_ISDIR(opened.st_mode)
+                                or (opened.st_dev, opened.st_ino) != (entry_stat.st_dev, entry_stat.st_ino)):
+                            raise OSError(errno.EIO, "project directory changed while opening")
+                        resolved = root.joinpath(*parts).resolve(strict=True)
+                        if not resolved.is_relative_to(root):
+                            raise ValueError(f"Project directory escapes root: {'/'.join(parts)}")
+                        yield from walk(child_fd, parts)
+                    finally:
+                        os.close(child_fd)
+                    continue
+                if not stat.S_ISREG(entry_stat.st_mode):
+                    continue
+
+                file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                file_fd = os.open(name, file_flags, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(file_fd)
+                    if (not stat.S_ISREG(opened.st_mode)
+                            or (opened.st_dev, opened.st_ino) != (entry_stat.st_dev, entry_stat.st_ino)):
+                        raise OSError(errno.EIO, "project file changed while opening")
+                    resolved = root.joinpath(*parts).resolve(strict=True)
+                    if not resolved.is_relative_to(root):
+                        raise ValueError(f"Project file escapes root: {'/'.join(parts)}")
+                    resolved_stat = resolved.stat()
+                    if (not stat.S_ISREG(resolved_stat.st_mode)
+                            or (resolved_stat.st_dev, resolved_stat.st_ino) != (opened.st_dev, opened.st_ino)):
+                        raise OSError(errno.EIO, "project file path changed while opening")
+                    with os.fdopen(os.dup(file_fd), "rb") as source:
+                        payload = source.read()
+                    after_read = os.fstat(file_fd)
+                    if (not stat.S_ISREG(after_read.st_mode)
+                            or (after_read.st_dev, after_read.st_ino) != (opened.st_dev, opened.st_ino)):
+                        raise OSError(errno.EIO, "project file changed while reading")
+                    yield Path(*parts).as_posix(), payload
+                finally:
+                    os.close(file_fd)
+
+        yield from walk(root_fd, ())
+    finally:
+        os.close(root_fd)
+
+
 def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path, runtime: str, entry: str, plan: str, env: Dict[str, str], network: bool = False) -> Dict[str, Any]:
     if not node.get("enabled") or node.get("status") not in {"ONLINE", "AUTHENTICATED"}:
         return {"ok": False, "error": "Node is disabled or unauthenticated."}
@@ -162,12 +267,9 @@ def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path
         if uid == 0:
             return {"ok": False, "error": "Use a non-root SSH account with Docker access for Sandbox isolation."}
         run_remote(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true; rm -rf -- {shlex.quote(remote)}; mkdir -p {shlex.quote(remote)}/.deps && chmod 700 {shlex.quote(remote)}")
-        root = Path(local_dir).resolve()
-        for src in root.rglob("*"):
-            if not src.is_file() or any(x in src.parts for x in {".git", "__pycache__", ".deps", ".tmp_run", ".cipher-runtime.env"}): continue
-            rel = src.relative_to(root).as_posix(); dst = posixpath.join(remote, rel)
+        for rel, payload in _iter_project_payloads(local_dir):
+            dst = posixpath.join(remote, rel)
             run_remote(f"mkdir -p {shlex.quote(posixpath.dirname(dst))}")
-            payload = src.read_bytes()
             if sftp:
                 sftp.putfo(__import__("io").BytesIO(payload), dst)
             else:

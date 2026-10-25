@@ -676,7 +676,9 @@ _OMEGATECH_MODELS: Dict[str, Tuple[str, Callable[[str], Dict[str, Any]]]] = {
     "chatbot":        ("Chatbot",           lambda p: {"action": "chat", "message": p}),
     "gpt-4o-mini":    ("Gpt-4-mini",        lambda p: {"message": p}),
     "deepseek-cli":   ("Aicli",             lambda p: {"action": "chat", "model": "deepseek_r1", "query": p}),
-    "qwen-80b":       ("Qwen-Claude-Haiku", lambda p: {"message": p, "model": "qwen"}),
+    # The Agents endpoint has separate chat and code actions. qwen7b is the
+    # currently verified coding-capable alias; do not use the legacy route.
+    "qwen-80b":       ("Agents", lambda p: {"action": "chat", "message": p, "model": "qwen7b", "slug": "freeai", "auto_approve": "true", "voice": "kokoro"}),
     # Docs-confirmed and live-smoke-tested conversational routes.
     "chatgpt-v2":     ("Chatgpt-v2",        lambda p: {"action": "chat", "message": p}),
     "deepai-deepseek-v3-2": ("Deep-ai", lambda p: {"action": "chat", "message": p, "model": "deepseek-v3.2"}),
@@ -2435,7 +2437,6 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
         Btn(f" AI Aɢᴇɴᴛ", callback_data="menu_ai_chat",  style="success"),
         Btn(f" Mʏ Sᴛᴀᴛꜱ",    callback_data="menu_stats",    style="primary"),
     )
-    kb.add(Btn("📋  AI Mᴏᴅᴇʟꜱ Bʏ Pʟᴀɴ", callback_data="menu_ai_plan_models", style="primary"))
     if admin:
         kb.add(Btn(f"Aᴅᴍɪɴ Pᴀɴᴇʟ", callback_data="menu_admin", style="danger"))
 
@@ -6143,6 +6144,13 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         set_setting("ai_global_enabled", not cur)
         ack(call, f"Global AI: {'ON' if not cur else 'OFF'}")
         return render_adm_ai_config(call)
+    if data in ("adm_ai_toggle_chat_pool", "adm_ai_toggle_coding_pool"):
+        mode = "coding" if data.endswith("coding_pool") else "chat"
+        cur = _ai_pool_enabled(mode)
+        set_setting(f"ai_{mode}_pool_enabled", not cur)
+        audit(call.from_user.id, f"ai_{mode}_pool", f"now={'off' if cur else 'on'}")
+        ack(call, f"{_AI_MODE_LABELS[mode]} pool: {'ON' if not cur else 'OFF'}")
+        return render_adm_ai_config(call)
     if data.startswith("adm_ai_toggle_"):
         model_key = data[len("adm_ai_toggle_"):]
         cur = bool(get_setting(f"ai_operative_{model_key}_enabled", True))
@@ -6162,36 +6170,41 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return
     if data == "adm_ai_routing_menu":
         return render_adm_ai_routing_menu(call)
+    if data.startswith("adm_ai_routing_mode_"):
+        return render_adm_ai_routing_mode(call, data[len("adm_ai_routing_mode_"):])
     if data.startswith("adm_ai_route_edit_"):
-        return render_adm_ai_route_edit(call, data[len("adm_ai_route_edit_"):])
+        route = data[len("adm_ai_route_edit_"):].split("_", 1)
+        return render_adm_ai_route_edit(call, route[-1], route[0] if len(route) == 2 else "chat")
     if data.startswith("adm_ai_pool_"):
-        parts = data[len("adm_ai_pool_"):].split("_", 1)
-        if len(parts) == 2:
-            plan_key, model = parts
-            if plan_key not in PLAN_LIMITS:
-                ack(call, "Unknown plan"); return
+        parts = data[len("adm_ai_pool_"):].split("_", 2)
+        if len(parts) == 3:
+            mode, plan_key, model = parts
+            if mode not in _AI_MODE_LABELS or plan_key not in PLAN_LIMITS:
+                ack(call, "Unknown AI pool or plan"); return
             if model == "reset":
                 s = settings_load()
-                for k in (f"ai_plan_{plan_key}_models", f"ai_model_{plan_key}_primary", f"ai_model_{plan_key}_fallback"):
-                    s.pop(k, None)
+                s.pop(f"ai_{mode}_plan_{plan_key}_models", None)
+                if mode == "chat":
+                    for k in (f"ai_plan_{plan_key}_models", f"ai_model_{plan_key}_primary", f"ai_model_{plan_key}_fallback"):
+                        s.pop(k, None)
                 settings_save(s)
-                audit(call.from_user.id, f"ai_pool_reset_{plan_key}", "defaults")
-                ack(call, f"{plan_key.upper()} pool reset to defaults")
-                return render_adm_ai_route_edit(call, plan_key)
-            if model not in _AI_OPERATIVE_KEYS:
+                audit(call.from_user.id, f"ai_pool_reset_{mode}_{plan_key}", "defaults")
+                ack(call, f"{mode.upper()} {plan_key.upper()} pool reset to defaults")
+                return render_adm_ai_route_edit(call, plan_key, mode)
+            if model not in _ai_mode_allowed_keys(mode):
                 ack(call, "Unknown AI operative"); return
-            pool = get_plan_ai_models(plan_key, include_disabled=True)
+            pool = get_plan_ai_models(plan_key, include_disabled=True, mode=mode)
             if model in pool:
                 if len(pool) == 1:
-                    ack(call, "A plan needs at least one operative."); return render_adm_ai_route_edit(call, plan_key)
+                    ack(call, "A plan needs at least one operative."); return render_adm_ai_route_edit(call, plan_key, mode)
                 pool.remove(model); verb = "removed from"
             else:
                 pool.append(model); verb = "added to"
-            set_plan_ai_models(plan_key, pool)
-            audit(call.from_user.id, f"ai_pool_{plan_key}", ",".join(pool))
-            ack(call, f"{model.upper()} {verb} {plan_key.upper()} pool")
-            return render_adm_ai_route_edit(call, plan_key)
-    
+            set_plan_ai_models(plan_key, pool, mode=mode)
+            audit(call.from_user.id, f"ai_pool_{mode}_{plan_key}", ",".join(pool))
+            ack(call, f"{model.upper()} {verb} {mode.upper()} {plan_key.upper()} pool")
+            return render_adm_ai_route_edit(call, plan_key, mode)
+
     # Notifications
     if data == "adm_notifications":       return render_adm_notifications(call)
     if data.startswith("adm_note_f_"):
@@ -20558,8 +20571,10 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_coupon":   render_coupon(call); return
     if data == "menu_stats":    render_user_stats(call); return
     if data == "menu_ai_chat":  render_ai_chat(call); return
-    if data == "menu_ai_models": render_ai_models(call); return
+    if data == "menu_ai_models": render_ai_modes(call); return
     if data == "menu_ai_plan_models": render_ai_plan_models(call); return
+    if data.startswith("ai_mode_"):
+        render_ai_models(call, data[len("ai_mode_"):]); return
     if data.startswith("ai_pick_"): action_ai_pick(call, data[len("ai_pick_"):]); return
     if data.startswith("aifixdoc_"): action_ai_file_fix(call, data[len("aifixdoc_"):]); return
     if data == "menu_admin":    render_admin(call); return
@@ -21338,13 +21353,15 @@ def _telemetry_loop():
         
         time.sleep(5)
 
-def _ai_selected_model(uid: int, user_plan: str) -> Optional[str]:
+def _ai_selected_model(uid: int, user_plan: str, mode: str = "chat") -> Optional[str]:
     """The operative the user expects to answer: the session pick, else the first stored choice."""
-    pool = get_plan_ai_models(user_plan)
-    session_pick = str((USER_STATES.get(uid) or {}).get("ai_model") or "").lower()
+    mode = str(mode or "chat").lower()
+    pool = get_plan_ai_models(user_plan, mode=mode)
+    state = USER_STATES.get(uid) or {}
+    session_pick = str(state.get(f"ai_{mode}_model") or (state.get("ai_model") if mode == "chat" else "") or "").lower()
     if session_pick and session_pick in pool:
         return session_pick
-    chain = get_user_ai_models(uid, user_plan)
+    chain = get_user_ai_models(uid, user_plan, mode=mode)
     return chain[0] if chain else None
 
 def ai_model_tag(uid: int, plan: str) -> str:
@@ -21357,6 +21374,7 @@ def _call_ai_chain(
     user_plan: str,
     uid: Optional[int] = None,
     preferred_model: Optional[str] = None,
+    mode: str = "chat",
 ) -> Tuple[Optional[str], Optional[str]]:
     """Try the selected operative first, then eligible fallbacks in order.
 
@@ -21365,13 +21383,15 @@ def _call_ai_chain(
     only after the preferred model cannot produce a usable answer, preserving
     the plan's configured order and returning the model that actually replied.
     """
-    plan_pool = get_plan_ai_models(user_plan)
-    chain = get_user_ai_models(uid, user_plan) if uid is not None else list(plan_pool)
+    mode = str(mode or "chat").lower()
+    plan_pool = get_plan_ai_models(user_plan, mode=mode)
+    chain = get_user_ai_models(uid, user_plan, mode=mode) if uid is not None else list(plan_pool)
     preferred = str(preferred_model or "").strip().lower()
     if preferred and preferred in plan_pool:
         chain = [preferred] + [m for m in chain if m != preferred]
     if uid is not None:
-        session_pick = str((USER_STATES.get(uid) or {}).get("ai_model") or "").lower()
+        state = USER_STATES.get(uid) or {}
+        session_pick = str(state.get(f"ai_{mode}_model") or (state.get("ai_model") if mode == "chat" else "") or "").lower()
         if not preferred and session_pick and session_pick in plan_pool:
             chain = [session_pick] + [m for m in chain if m != session_pick]
         # A user-selected model changes priority; other assigned models remain
@@ -21380,21 +21400,52 @@ def _call_ai_chain(
     unique = [m for m in dict.fromkeys(chain) if m]
     if not unique:
         return None, None
-    attempts = AI_ENGINE.complete_chain(unique, prompt, invoke=_call_kaalix_model)
+    invoke = _call_kaalix_model if mode == "chat" else (
+        lambda model, text: AI_ENGINE.complete(model, text, mode=mode)
+    )
+    attempts = AI_ENGINE.complete_chain(unique, prompt, invoke=invoke, mode=mode)
     for outcome in attempts:
         if outcome.ok:
             return outcome.text, outcome.model
     return None, None
+
+def _is_ai_model_catalog_request(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    if "current user request:" in text:
+        text = text.rsplit("current user request:", 1)[1]
+    if "which model are you" in text or "what model are you" in text:
+        return False
+    return any(phrase in text for phrase in (
+        "models by plan", "models available", "available models", "what models",
+        "which models", "list the models", "list ai models",
+    ))
+
+def _ai_model_catalog_answer() -> str:
+    lines = ["AI models currently available by plan:"]
+    for plan_key, details in PLAN_LIMITS.items():
+        parts = []
+        if _ai_pool_enabled("chat"):
+            chat = get_plan_ai_models(plan_key, mode="chat")
+            parts.append("Chatting: " + (", ".join(_public_ai_model_name(m) for m in chat) or "none"))
+        if _ai_pool_enabled("coding"):
+            coding = get_plan_ai_models(plan_key, mode="coding")
+            parts.append("Coding: " + (", ".join(_public_ai_model_name(m) for m in coding) or "none"))
+        lines.append(f"{details.get('name', plan_key.title())}: " + " | ".join(parts))
+    return "\n".join(lines)
 
 def _call_ai_api(
     prompt: str,
     user_plan: str = "free",
     uid: Optional[int] = None,
     preferred_model: Optional[str] = None,
+    mode: str = "chat",
 ) -> Optional[str]:
     """Tiered AI call system routing through the operatives configured for the plan / chosen by the user."""
     if not get_setting("ai_global_enabled", True):
         return None
+
+    if _is_ai_model_catalog_request(prompt):
+        return _ai_model_catalog_answer()
 
     if "verified active plan:" not in prompt.lower():
         prompt = f"VERIFIED ACTIVE PLAN: {str(user_plan or 'free').lower()}\n{prompt}"
@@ -21402,9 +21453,10 @@ def _call_ai_api(
     if uid is not None:
         # Record the expected operative even for instant local answers so the
         # reply badge always shows the model the user selected.
-        plan_pool = get_plan_ai_models(user_plan)
+        mode = str(mode or "chat").lower()
+        plan_pool = get_plan_ai_models(user_plan, mode=mode)
         preferred = str(preferred_model or "").strip().lower()
-        wanted = preferred if preferred in plan_pool else _ai_selected_model(uid, user_plan)
+        wanted = preferred if preferred in plan_pool else _ai_selected_model(uid, user_plan, mode)
         if wanted:
             AI_LAST_MODEL_USED[uid] = wanted
         AI_LAST_MODEL_FALLBACK.pop(uid, None)
@@ -21425,13 +21477,16 @@ def _call_ai_api(
             "analysis, and Cipher Tech Hosting. What would you like to work on?"
         )
 
-    res, used = _call_ai_chain(prompt, user_plan, uid, preferred_model=preferred_model)
+    if mode == "chat":
+        res, used = _call_ai_chain(prompt, user_plan, uid, preferred_model=preferred_model)
+    else:
+        res, used = _call_ai_chain(prompt, user_plan, uid, preferred_model=preferred_model, mode=mode)
     if uid is not None:
         AI_LAST_MODEL_FALLBACK.pop(uid, None)
         if res and used:
             AI_LAST_MODEL_USED[uid] = used
             preferred = str(preferred_model or "").strip().lower()
-            wanted = preferred if preferred in get_plan_ai_models(user_plan) else _ai_selected_model(uid, user_plan)
+            wanted = preferred if preferred in get_plan_ai_models(user_plan, mode=mode) else _ai_selected_model(uid, user_plan, mode)
             if wanted and wanted != used:
                 AI_LAST_MODEL_FALLBACK[uid] = wanted
     if res:
@@ -21539,9 +21594,9 @@ def render_ai_chat(call: types.CallbackQuery) -> None:
         f"{sc('Just send your message or code below and I will analyze it instantly')}.\n"
         f"{G['div']}{FOOTER}"
     )
-    # The first screen after pressing AI Agent is always the live model list.
-    # This makes admin model-pool updates visible immediately to the user.
-    render_ai_models(call)
+    # The first screen is the pool selector; users choose Chatting or Coding
+    # before seeing the models assigned to that pool.
+    render_ai_modes(call)
 
 _LORD_CIPHER_BRAG_LOCK = threading.Lock()
 
@@ -21630,28 +21685,30 @@ def _lord_cipher_profile_answer() -> str:
     )
 
 def _sanitize_ai_reply(text: str) -> str:
-    """Remove provider banners, leaked prompt delimiters, and hidden reasoning tags."""
+    """Remove provider banners and secrets without rewriting technical answers."""
     clean = re.sub(r"<(think|thought)>.*?</\1>", "", text or "", flags=re.DOTALL | re.IGNORECASE)
     clean = re.sub(r"</?(think|thought)>", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"(?i)\bhotbot(?:\s+chat)?\b", "third-party AI service", clean)
-    clean = re.sub(r"(?i)\b(?:omegatech|kaalix|aicli)\b", "AI API provider", clean)
-    clean = re.sub(r"(?i)\bclaude(?:[-\s]+(?:sonnet|haiku|pro|cli))?\b", "Claude", clean)
-    clean = re.sub(r"(?i)\b(?:gpt[-\s]?(?:4o|5|4))\b", "GPT", clean)
-    clean = re.sub(r"(?i)\bdeepseek(?:[-\s]*(?:v3(?:\.2)?|r1|cli))?\b", "DeepSeek", clean)
-    clean = re.sub(r"(?im)^\s*.*(?:standard\s+ai\s+chat|deepai).*\s*$", "", clean)
-    clean = re.sub(r"(?im)^\s*.*ai\s+operative.*$", "", clean)
-    clean = re.sub(r"(?im)^\s*.*cipher\s+tech\s+hosting\s+v?\d+(?:\.\d+)*.*\s*$", "", clean)
-    clean = re.sub(r"(?im)^\s*.*v\d+(?:\.\d+)+\s*$", "", clean)
+    # Remove branding only when it occupies a banner/attribution line. Do not
+    # rewrite model names in useful prose, API documentation, or code.
+    clean = re.sub(
+        r"(?im)^\s*(?:"
+        r"(?:i['’]?m|i am|this is|powered by|provided by|you are chatting with)\s+"
+        r"(?:standard\s+ai\s+chat|hotbot(?:\s+chat)?|deepai|omegatech|kaalix|aicli)"
+        r"(?:\b.*)?"
+        r"|.*\bai\s+operative\b.*"
+        r"|.*\bcipher\s+tech\s+hosting\s+v?\d+(?:\.\d+)*\b.*"
+        r"|.*\bv\d+(?:\.\d+)+\s*$"
+        r")\s*$",
+        "",
+        clean,
+    )
     clean = re.sub(r"(?im)^\s*[━─═_]{4,}\s*$", "", clean)
     clean = re.sub(r"(?is)\[SYSTEM DIRECTIVE:.*?\]\s*", "", clean)
-    # Cipher Vault privacy: AI replies must never leak backup destinations,
-    # credentials, snapshot paths, or internal storage layout to users.
+    # Redact credentials, but leave ordinary model names, documentation, code,
+    # and filesystem paths intact because they may be the substance of the
+    # user's technical question or the provider's useful answer.
     clean = re.sub(r"(?i)\bCIPHER_VAULT_(?:KEY|TOKEN|REPO|BRANCH|CONFIG)\b", "[RESTRICTED]", clean)
     clean = re.sub(r"(?i)\bgh[pousr]_[A-Za-z0-9_]{16,}\b", "[RESTRICTED]", clean)
-    clean = re.sub(r"(?i)\b(?:lord-cipher|Lord-Cipher)/[\w.-]+", "[RESTRICTED]", clean)
-    clean = re.sub(r"(?i)\b(?:/app/)?(?:storage|sandbox)/[\w./-]+", "[RESTRICTED PATH]", clean)
-    clean = re.sub(r"(?i)\b(?:snapshots|backups)/[\w./-]+", "[RESTRICTED PATH]", clean)
-    clean = re.sub(r"(?i)\b(?:\w+\.(?:tar\.gz\.enc|bin|enc))\b", "[RESTRICTED FILE]", clean)
     return clean.strip()
 
 def _ai_unavailable_reply() -> str:
@@ -21719,8 +21776,12 @@ def handle_ai_chat_message(m: types.Message) -> None:
         if _is_lord_cipher_identity_request(m.text):
             ai_response = _lord_cipher_identity_answer()
         else:
+            mode = str((USER_STATES.get(m.from_user.id) or {}).get("ai_mode") or "chat").lower()
+            if mode not in _AI_MODE_LABELS or not _ai_pool_enabled(mode) or not get_plan_ai_models(plan, mode=mode):
+                mode = "chat"
             ai_response = _call_ai_api(
-                _build_ai_request(m.text, m.from_user.id), user_plan=plan, uid=m.from_user.id
+                _build_ai_request(m.text, m.from_user.id), user_plan=plan, uid=m.from_user.id,
+                preferred_model=_ai_selected_model(m.from_user.id, plan, mode), mode=mode,
             )
         
         if ai_response:
@@ -21751,7 +21812,7 @@ def handle_ai_chat_message(m: types.Message) -> None:
                 del session[:-(AI_MEMORY_TURNS * 2)]
             _remember_ai_turn(m.from_user.id, m.text, clean_res)
             
-            model_key = AI_LAST_MODEL_USED.get(m.from_user.id) or _ai_selected_model(m.from_user.id, plan) or "claude"
+            model_key = AI_LAST_MODEL_USED.get(m.from_user.id) or _ai_selected_model(m.from_user.id, plan, mode) or "claude"
             final_text = (
                 f"🤖 <b>{esc(_public_ai_model_name(model_key))}</b>\n"
                 f"{G['div']}\n"
@@ -21793,9 +21854,9 @@ def render_ai_sentinel_model_picker(call: types.CallbackQuery, bot_id: str) -> N
 
     uid = int(call.from_user.id)
     plan = get_ai_model(uid)
-    pool = get_plan_ai_models(plan)
+    pool = get_plan_ai_models(plan, mode="coding") if _ai_pool_enabled("coding") else []
     if not pool:
-        return _ai_fix_failed(call, bot_id, "No AI models are currently available on your plan.")
+        return _ai_fix_failed(call, bot_id, "No coding AI models are currently available on your plan.")
 
     now = time.time()
     for stale_uid, selection in list(AI_SENTINEL_MODEL_SELECTIONS.items()):
@@ -21810,7 +21871,7 @@ def render_ai_sentinel_model_picker(call: types.CallbackQuery, bot_id: str) -> N
     if (str(selection.get("bot_id") or "") != str(bot_id)
             or selected not in pool
             or now - float(selection.get("updated_at", 0) or 0) > AI_SENTINEL_SELECTION_TTL):
-        selected = _ai_selected_model(uid, plan) or pool[0]
+        selected = _ai_selected_model(uid, plan, "coding") or pool[0]
     AI_SENTINEL_MODEL_SELECTIONS[uid] = {
         "bot_id": str(bot_id), "model": selected, "updated_at": now,
     }
@@ -21863,8 +21924,8 @@ def action_bot_ai_model_pick(
     if not bot_id or not _get_manageable_ai_sentinel_bot(call, bot_id):
         return
     plan = get_ai_model(uid)
-    if model not in get_plan_ai_models(plan):
-        ack(call, "That model is not available on your plan.", show_alert=True)
+    if model not in get_plan_ai_models(plan, mode="coding"):
+        ack(call, "That coding model is not available on your plan.", show_alert=True)
         return
     selection.update({"model": model, "updated_at": time.time()})
     render_ai_sentinel_model_picker(call, bot_id)
@@ -21881,7 +21942,7 @@ def action_bot_ai_diagnosis_start(call: types.CallbackQuery, bot_id: str) -> Non
         return render_ai_sentinel_model_picker(call, bot_id)
     plan = get_ai_model(uid)
     model = str(selection.get("model") or "").lower()
-    if model not in get_plan_ai_models(plan):
+    if model not in get_plan_ai_models(plan, mode="coding"):
         AI_SENTINEL_MODEL_SELECTIONS.pop(uid, None)
         return render_ai_sentinel_model_picker(call, bot_id)
     _run_bot_ai_diagnosis(call, bot_id, model)
@@ -21917,7 +21978,7 @@ def _run_bot_ai_diagnosis(call: types.CallbackQuery, bot_id: str, selected_model
             return
 
         plan = get_ai_model(call.from_user.id)
-        if selected_model not in get_plan_ai_models(plan):
+        if selected_model not in get_plan_ai_models(plan, mode="coding"):
             AI_SENTINEL_MODEL_SELECTIONS.pop(int(call.from_user.id), None)
             return render_ai_sentinel_model_picker(call, bot_id)
         # A fresh diagnosis invalidates any older unaccepted proposal.
@@ -21951,7 +22012,7 @@ def _run_bot_ai_diagnosis(call: types.CallbackQuery, bot_id: str, selected_model
         )
         
         ai_resp = _call_ai_api(
-            prompt, user_plan=plan, uid=call.from_user.id, preferred_model=selected_model,
+            prompt, user_plan=plan, uid=call.from_user.id, preferred_model=selected_model, mode="coding",
         )
         
         if ai_resp:
@@ -22556,7 +22617,7 @@ _AI_OPERATIVE_LABELS = {
     "chatbot": "Claude Chat",
     "gpt-4o-mini": "GPT-4o Mini",
     "deepseek-cli": "DeepSeek R1",
-    "qwen-80b": "Qwen 80B",
+    "qwen-80b": "Qwen7B Coding",
     # Each Secret catalog model is a separate user/admin-selectable operative.
     "claude-fable-5": "Claude Fable 5",
     "gpt-5-5": "GPT-5.5",
@@ -22591,11 +22652,26 @@ _AI_PLAN_DEFAULT_MODELS = {
     "lifetime":   ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b", "deepai-gpt-5-nano"],
 }
 
+_AI_MODE_LABELS = {"chat": "Chatting", "coding": "Coding"}
+# Only this route has been verified against the provider's action=code API.
+_AI_CODING_MODEL_KEYS = ("qwen-80b",)
+_AI_MODE_DEFAULT_MODELS = {
+    "chat": _AI_PLAN_DEFAULT_MODELS,
+    "coding": {plan: ["qwen-80b"] for plan in _AI_PLAN_DEFAULT_MODELS},
+}
+
 def _ai_operative_enabled(key: str) -> bool:
     default_enabled = True
     return key in _AI_OPERATIVE_KEYS and bool(
         get_setting(f"ai_operative_{key}_enabled", default_enabled)
     )
+
+def _ai_pool_enabled(mode: str = "chat") -> bool:
+    mode = str(mode or "chat").lower()
+    return mode in _AI_MODE_LABELS and bool(get_setting(f"ai_{mode}_pool_enabled", True))
+
+def _ai_mode_allowed_keys(mode: str = "chat") -> Tuple[str, ...]:
+    return _AI_CODING_MODEL_KEYS if str(mode or "chat").lower() == "coding" else _AI_OPERATIVE_KEYS
 
 def _create_ai_engine() -> AIEngine:
     """Wire the provider-independent runtime to the current operative catalog."""
@@ -22603,6 +22679,20 @@ def _create_ai_engine() -> AIEngine:
         key: ModelRoute(endpoint, build_params, public_label=_AI_OPERATIVE_LABELS.get(key, key))
         for key, (endpoint, build_params) in _OMEGATECH_MODELS.items()
     }
+    if "qwen-80b" in routes:
+        qwen_route = routes["qwen-80b"]
+        routes["qwen-80b"] = ModelRoute(
+            qwen_route.endpoint,
+            qwen_route.build_params,
+            timeout=qwen_route.timeout,
+            public_label="Qwen7B Coding",
+            mode_builders={
+                "coding": lambda text: {
+                    "action": "code", "message": text, "model": "qwen7b",
+                    "slug": "freeai", "auto_approve": "true", "voice": "kokoro",
+                },
+            },
+        )
     for key, provider_model in _OMEGATECH_SECRET_MODELS.items():
         routes[key] = ModelRoute(
             "Secret",
@@ -22634,97 +22724,151 @@ AI_MODEL_CIRCUIT_OPEN_UNTIL = AI_ENGINE.circuit_open_until
 def ai_label(key: str) -> str:
     return _AI_OPERATIVE_LABELS.get(key, key.upper())
 
-def get_plan_ai_models(plan: str, include_disabled: bool = False) -> List[str]:
-    """Ordered operative pool the admin has made available to a plan tier."""
+def get_plan_ai_models(plan: str, include_disabled: bool = False, mode: str = "chat") -> List[str]:
+    """Return the ordered operative pool for a plan and task mode."""
     plan = (plan or "free").lower()
-    configured = get_setting(f"ai_plan_{plan}_models", None)
+    mode = str(mode or "chat").lower()
+    allowed = set(_ai_mode_allowed_keys(mode))
+    setting_key = f"ai_plan_{plan}_models" if mode == "chat" else f"ai_{mode}_plan_{plan}_models"
+    configured = get_setting(setting_key, None)
     if not isinstance(configured, list):
-        legacy = [get_setting(f"ai_model_{plan}_primary"), get_setting(f"ai_model_{plan}_fallback")]
-        configured = [str(m).lower() for m in legacy if m] + list(_AI_PLAN_DEFAULT_MODELS.get(plan, _AI_PLAN_DEFAULT_MODELS["free"]))
+        if mode == "chat":
+            legacy = [get_setting(f"ai_model_{plan}_primary"), get_setting(f"ai_model_{plan}_fallback")]
+            configured = [str(m).lower() for m in legacy if m] + list(_AI_PLAN_DEFAULT_MODELS.get(plan, _AI_PLAN_DEFAULT_MODELS["free"]))
+        else:
+            configured = list(_AI_MODE_DEFAULT_MODELS[mode].get(plan, _AI_MODE_DEFAULT_MODELS[mode]["free"]))
     elif configured:
-        # If a saved pool consists entirely of retired IDs, move it to the
-        # current plan defaults instead of leaving existing users with no AI.
-        registered = [str(m).strip().lower() for m in configured
-                      if str(m).strip().lower() in _AI_OPERATIVE_KEYS]
+        registered = [str(m).strip().lower() for m in configured if str(m).strip().lower() in allowed]
         if not registered:
-            configured = list(_AI_PLAN_DEFAULT_MODELS.get(plan, _AI_PLAN_DEFAULT_MODELS["free"]))
+            configured = list(_AI_MODE_DEFAULT_MODELS[mode].get(plan, _AI_MODE_DEFAULT_MODELS[mode]["free"]))
     pool: List[str] = []
     for m in configured:
         m = str(m).strip().lower()
-        if m in _AI_OPERATIVE_KEYS and m not in pool and (include_disabled or _ai_operative_enabled(m)):
+        if m in allowed and m not in pool and (include_disabled or _ai_operative_enabled(m)):
             pool.append(m)
     return pool
 
-def set_plan_ai_models(plan: str, models: List[str]) -> None:
+def set_plan_ai_models(plan: str, models: List[str], mode: str = "chat") -> None:
     plan = (plan or "free").lower()
+    mode = str(mode or "chat").lower()
+    allowed = set(_ai_mode_allowed_keys(mode))
     normalized: List[str] = []
     for model in models or []:
         model = str(model).strip().lower()
-        if model in _AI_OPERATIVE_KEYS and model not in normalized:
+        if model in allowed and model not in normalized:
             normalized.append(model)
-    set_setting(f"ai_plan_{plan}_models", normalized)
+    setting_key = f"ai_plan_{plan}_models" if mode == "chat" else f"ai_{mode}_plan_{plan}_models"
+    set_setting(setting_key, normalized)
 
-def get_user_ai_models(uid: Optional[int], plan: Optional[str] = None) -> List[str]:
-    """Return the user's ordered choices, restricted to the complete plan pool.
-
-    There is deliberately no three-model limit. A plan may expose every
-    registered operative, and the complete pool is used as the fallback chain
-    when the user has not saved a specific choice.
-    """
+def get_user_ai_models(uid: Optional[int], plan: Optional[str] = None, mode: str = "chat") -> List[str]:
+    """Return a user's ordered choices restricted to the selected mode pool."""
+    mode = str(mode or "chat").lower()
     plan = plan or (get_ai_model(uid) if uid is not None else "free")
-    pool = get_plan_ai_models(plan)
+    pool = get_plan_ai_models(plan, mode=mode)
     picked: List[str] = []
     if uid is not None:
         u = (db_load_ro().get("users", {}) or {}).get(str(uid), {})
-        for m in (u.get("ai_models") or []):
+        choices = u.get(f"ai_{mode}_models") or (u.get("ai_models") if mode == "chat" else [])
+        for m in choices:
             m = str(m).lower()
             if m in pool and m not in picked:
                 picked.append(m)
     return picked or list(pool)
 
-def set_user_ai_models(uid: int, models: List[str]) -> None:
+def set_user_ai_models(uid: int, models: List[str], mode: str = "chat") -> None:
     d = db_load()
     u = d["users"].setdefault(str(uid), {"id": uid, "plan": "free"})
+    mode = str(mode or "chat").lower()
+    allowed = set(_ai_mode_allowed_keys(mode))
     normalized: List[str] = []
     for model in models or []:
         model = str(model).strip().lower()
-        if model in _AI_OPERATIVE_KEYS and model not in normalized:
+        if model in allowed and model not in normalized:
             normalized.append(model)
-    u["ai_models"] = normalized
+    u[f"ai_{mode}_models"] = normalized
+    if mode == "chat":
+        u["ai_models"] = normalized
     db_save(d)
 
-def render_ai_models(call: types.CallbackQuery) -> None:
-    """Show the current admin-configured model pool as a vertical user picker."""
+def render_ai_modes(call: types.CallbackQuery) -> None:
+    """Let users choose an enabled task pool before choosing a model."""
     uid = call.from_user.id
     plan = get_ai_model(uid)
-    pool = get_plan_ai_models(plan)
-    selected = get_user_ai_models(uid, plan)
+    cap = (
+        f"<b>🤖 {sc('AI Agent')}</b>\n{G['div_eq']}\n"
+        f"<i>{sc('Choose a pool first, then choose a model.')}</i>\n"
+        f"💎 <b>{sc('Plan')}</b>: <code>{esc(PLAN_LIMITS.get(plan, PLAN_LIMITS['free'])['name'])}</code>\n"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    available = False
+    for mode, label in _AI_MODE_LABELS.items():
+        if not _ai_pool_enabled(mode):
+            continue
+        pool = get_plan_ai_models(plan, mode=mode)
+        available = available or bool(pool)
+        kb.add(Btn(f"🤖 {label} models ({len(pool)})", callback_data=f"ai_mode_{mode}", style="success" if pool else "danger"))
+    if not available:
+        cap += f"\n⚠️ {sc('No AI pools are currently enabled for your plan.')}"
+    cap += f"\n{G['div']}{FOOTER}"
+    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
+
+def render_ai_models(call: types.CallbackQuery, mode: str = "chat") -> None:
+    """Show the available models for one enabled task pool."""
+    mode = str(mode or "chat").lower()
+    if mode not in _AI_MODE_LABELS or not _ai_pool_enabled(mode):
+        return render_ai_modes(call)
+    uid = call.from_user.id
+    plan = get_ai_model(uid)
+    pool = get_plan_ai_models(plan, mode=mode)
+    selected = get_user_ai_models(uid, plan, mode=mode)
     plan_name = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])["name"]
     cap = (
-        f"<b>🤖 {sc('AI Agent')}</b>\n"
-        f"{G['div_eq']}\n"
-        f"💎 <b>{sc('Plan')}</b>: <code>{esc(plan_name)}</code>\n\n"
-        f"<i>{sc('Choose an AI family to start chatting. The selected family is tried first and the remaining choices are automatic fallbacks')}.</i>\n"
-        f"<b>{sc('Available AI families')}</b>: <code>{len(pool)}</code>\n"
+        f"<b>🤖 {sc('AI Agent')}</b>\n{G['div_eq']}\n"
+        f"💎 <b>{sc('Plan')}</b>: <code>{esc(plan_name)}</code>\n"
+        f"<b>{esc(_AI_MODE_LABELS[mode])} models</b>: <code>{len(pool)}</code>\n"
+        f"<i>{sc('Choose a model for this pool. The selected model is tried first and the remaining models in this pool are fallbacks')}.</i>\n"
     )
     if not pool:
-        cap += f"\n⚠️ {sc('No models are currently assigned to this plan')}."
+        cap += f"\n⚠️ {sc('No models are currently assigned to this pool.')}"
     cap += f"\n{G['div']}{FOOTER}"
-    # Keep text input routed to the AI while the picker is visible. Previously
-    # this screen cleared USER_STATES, so a message sent before tapping a
-    # model button was silently ignored despite the screen saying to send a
-    # message or code below.
     if pool:
-        USER_STATES[uid] = {"flow": "ai_chat", "ai_model": selected[0], "ai_plan": plan}
+        chosen = selected[0] if selected else pool[0]
+        USER_STATES[uid] = {"flow": "ai_chat", "ai_mode": mode, f"ai_{mode}_model": chosen, "ai_model": chosen, "ai_plan": plan}
     else:
         USER_STATES.pop(uid, None)
     kb = types.InlineKeyboardMarkup(row_width=1)
     for model in pool:
         active = model == (selected[0] if selected else None)
-        kb.add(Btn(f"{'✅ ' if active else '🤖 '}{_public_ai_model_name(model)}",
-                   callback_data=f"ai_pick_{model}",
-                   style="success" if active else "primary"))
-    kb.add(Btn(f"📋  {sc('Models by plan')}", callback_data="menu_ai_plan_models", style="primary"))
+        kb.add(Btn(f"{'✅ ' if active else '🤖 '}{_public_ai_model_name(model)}", callback_data=f"ai_pick_{mode}_{model}", style="success" if active else "primary"))
+    kb.add(Btn("↩️  Choose another pool", callback_data="menu_ai_models", style="primary"))
+    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
+
+def action_ai_pick(call: types.CallbackQuery, selection: str) -> None:
+    """Select a model within the chosen task pool."""
+    try:
+        mode, model = selection.split("_", 1)
+    except ValueError:
+        mode, model = "chat", selection
+    if mode not in _AI_MODE_LABELS:
+        mode = "chat"
+    uid = call.from_user.id
+    plan = get_ai_model(uid)
+    pool = get_plan_ai_models(plan, mode=mode) if _ai_pool_enabled(mode) else []
+    if model not in pool:
+        ack(call, "That model is not available in this pool.")
+        return render_ai_modes(call)
+    set_user_ai_models(uid, [model], mode=mode)
+    USER_STATES[uid] = {"flow": "ai_chat", "ai_mode": mode, f"ai_{mode}_model": model, "ai_model": model, "ai_plan": plan}
+    ack(call, f"Selected {_public_ai_model_name(model)}")
+    cap = (
+        f"<b>🤖 {sc('AI Agent')}</b>\n{G['div_eq']}\n"
+        f"<i>{esc(_AI_MODE_LABELS[mode])} model:</i> <b>{esc(_public_ai_model_name(model))}</b>\n\n"
+        f"{sc('Send a message or code below to start')} .\n\n{G['div']}{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🔁  Cʜᴏᴏsᴇ Aɴᴏᴛʜᴇʀ Mᴏᴅᴇʟ", callback_data=f"ai_mode_{mode}", style="primary"))
     kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
 
@@ -22792,6 +22936,12 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     kb.add(Btn(f"{'🟢' if global_on else '🔴'}  Global AI: {'ON' if global_on else 'OFF'}", 
                callback_data="adm_ai_toggle_global", 
                style="success" if global_on else "danger"))
+    for mode, label in _AI_MODE_LABELS.items():
+        enabled = _ai_pool_enabled(mode)
+        cap += f"{label} pool: {'🟢 ON' if enabled else '🔴 OFF'}\n"
+        kb.add(Btn(f"{'🟢' if enabled else '🔴'} {label} pool: {'ON' if enabled else 'OFF'}",
+                   callback_data=f"adm_ai_toggle_{mode}_pool",
+                   style="success" if enabled else "danger"))
                
     for key, name in operatives.items():
         is_on = _ai_operative_enabled(key)
@@ -22840,51 +22990,61 @@ def render_adm_ai_scanner_model(call: types.CallbackQuery) -> None:
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
 def render_adm_ai_routing_menu(call: types.CallbackQuery) -> None:
-    """Sub-menu to assign specific AI models to different plan tiers."""
+    """Show the admin's pool-first, mode-second routing sequence."""
     cap = (
-        f"<b>🧠 {sc('AI Plan-Model Routing')}</b>\n"
-        f"{G['div_eq']}\n"
-        f"<i>{sc('Assign specific AI operatives to each hosting plan tier')}.</i>\n\n"
+        f"<b>🧠 {sc('AI Pool Routing')}</b>\n{G['div_eq']}\n"
+        f"<i>{sc('First choose Chatting or Coding, then configure each plan pool and its model order.')}</i>\n\n"
     )
-    
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for plan_key, plan_data in PLAN_LIMITS.items():
-        pool = get_plan_ai_models(plan_key, include_disabled=True)
-        pool_str = ", ".join(m.upper() for m in pool) or "—"
-        cap += f"• <b>{plan_data['name']}</b> ({len(pool)}): <code>{esc(pool_str)}</code>\n"
-        kb.add(Btn(f"⚙️ Configure {plan_data['name']}", callback_data=f"adm_ai_route_edit_{plan_key}", style="primary"))
-    cap += f"\n<i>{sc('Every operative assigned to a plan is available to its users; the selected model is primary and the rest are tried as fallbacks')}.</i>\n"
-        
+    for mode, label in _AI_MODE_LABELS.items():
+        enabled = _ai_pool_enabled(mode)
+        cap += f"<b>{label}</b>: {'🟢 ON' if enabled else '🔴 OFF'}\n"
+        kb.add(Btn(f"⚙️ Configure {label} models", callback_data=f"adm_ai_routing_mode_{mode}", style="success" if enabled else "danger"))
+    cap += f"\n{G['div']}{FOOTER}"
     kb.add(Btn(f"{G['back']}  AI Cᴏɴꜰɪɢ", callback_data="adm_ai_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
-def render_adm_ai_route_edit(call: types.CallbackQuery, plan_key: str) -> None:
-    """Editor for a specific plan's AI model assignment."""
-    if plan_key not in PLAN_LIMITS: return
+def render_adm_ai_routing_mode(call: types.CallbackQuery, mode: str) -> None:
+    """Select a plan for one task pool."""
+    mode = str(mode or "chat").lower()
+    if mode not in _AI_MODE_LABELS:
+        return render_adm_ai_routing_menu(call)
+    label = _AI_MODE_LABELS[mode]
+    cap = f"<b>🧠 {label} Model Pools</b>\n{G['div_eq']}\n"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for plan_key, plan_data in PLAN_LIMITS.items():
+        pool = get_plan_ai_models(plan_key, include_disabled=True, mode=mode)
+        names = ", ".join(ai_label(m) for m in pool) or "—"
+        cap += f"• <b>{plan_data['name']}</b> ({len(pool)}): <code>{esc(names)}</code>\n"
+        kb.add(Btn(f"⚙️ Configure {plan_data['name']}", callback_data=f"adm_ai_route_edit_{mode}_{plan_key}", style="primary"))
+    cap += f"\n{G['div']}{FOOTER}"
+    kb.add(Btn("↩️  Choose Chatting/Coding", callback_data="adm_ai_routing_menu", style="primary"))
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
+def render_adm_ai_route_edit(call: types.CallbackQuery, plan_key: str, mode: str = "chat") -> None:
+    """Edit one plan's ordered model pool for a selected task mode."""
+    mode = str(mode or "chat").lower()
+    if plan_key not in PLAN_LIMITS or mode not in _AI_MODE_LABELS:
+        return
     plan_name = PLAN_LIMITS[plan_key]["name"]
-    
-    pool = get_plan_ai_models(plan_key, include_disabled=True)
-    
+    pool = get_plan_ai_models(plan_key, include_disabled=True, mode=mode)
+    label = _AI_MODE_LABELS[mode]
     cap = (
-        f"<b>⚙️ {sc('AI Routing')}: {plan_name}</b>\n"
-        f"{G['div_eq']}\n"
-        f"{sc('Toggle the operatives available to the')} <b>{plan_name}</b> {sc('tier')}. "
-        f"{sc('Order = default priority; all assigned operatives are available to users')}.\n\n"
-        f"<b>{sc('Pool')}</b> ({len(pool)}):\n"
+        f"<b>⚙️ {label} Routing: {plan_name}</b>\n{G['div_eq']}\n"
+        f"{sc('Toggle the models available to this plan. Order is fallback priority.')}\n\n"
+        f"<b>Pool</b> ({len(pool)}):\n"
     )
     for i, m in enumerate(pool, 1):
         state = "" if _ai_operative_enabled(m) else " 🔴"
         cap += f"{i}. <code>{esc(ai_label(m))}</code>{state}\n"
     cap += FOOTER
-    
     kb = types.InlineKeyboardMarkup(row_width=2)
-    for op in _AI_OPERATIVE_KEYS:
+    for op in _ai_mode_allowed_keys(mode):
         is_sel = op in pool
         idx = f"#{pool.index(op) + 1} " if is_sel else ""
-        kb.add(Btn(f"{'✅ ' if is_sel else ''}{idx}{ai_label(op)[:30]}", callback_data=f"adm_ai_pool_{plan_key}_{op}",
-                   style="success" if is_sel else "primary"))
-    kb.add(Btn("↺  Reset to defaults", callback_data=f"adm_ai_pool_{plan_key}_reset", style="primary"))
-    kb.add(Btn(f"{G['back']}  Rᴏᴜᴛɪɴɢ Mᴇɴᴜ", callback_data="adm_ai_routing_menu", style="danger"))
+        kb.add(Btn(f"{'✅ ' if is_sel else ''}{idx}{ai_label(op)[:30]}", callback_data=f"adm_ai_pool_{mode}_{plan_key}_{op}", style="success" if is_sel else "primary"))
+    kb.add(Btn("↺  Reset to defaults", callback_data=f"adm_ai_pool_{mode}_{plan_key}_reset", style="primary"))
+    kb.add(Btn(f"{G['back']}  {label} Pᴏᴏʟs", callback_data=f"adm_ai_routing_mode_{mode}", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
 def _save_ai_system_news(m: types.Message) -> None:
@@ -23029,7 +23189,7 @@ def action_ai_file_fix(call: types.CallbackQuery, token: str) -> None:
     )
     plan = get_ai_model(uid)
     try:
-        resp, used = _call_ai_chain(_ai_file_edit_prompt(fname, content), plan, uid)
+        resp, used = _call_ai_chain(_ai_file_edit_prompt(fname, content), plan, uid, mode="coding")
         code = _sanitize_ai_code(_extract_code_block(resp or ""))
         if not code or len(code) < 30:
             bot.edit_message_text(
@@ -23125,7 +23285,7 @@ def _handle_ai_chat_document(m: types.Message) -> None:
     
     try:
         plan = get_ai_model(m.from_user.id)
-        ai_response = _call_ai_api(prompt, user_plan=plan, uid=m.from_user.id)
+        ai_response = _call_ai_api(prompt, user_plan=plan, uid=m.from_user.id, mode="coding")
         
         if ai_response:
             primary_model = ai_model_tag(m.from_user.id, plan)
