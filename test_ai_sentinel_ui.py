@@ -143,7 +143,7 @@ with tempfile.TemporaryDirectory(prefix="ai-sentinel-test-") as tmp:
 
     # A choice is temporary to Sentinel; Start tries that model first without
     # rewriting the user's normal chat-model selection.
-    chosen_model = pool[-1]
+    chosen_model = next(model for model in reversed(pool) if model in chat_pool)
     bot.action_bot_ai_model_pick(owner_call, chosen_model, bot_id)
     assert bot.AI_SENTINEL_MODEL_SELECTIONS[9001]["model"] == chosen_model
     assert bot.USER_STATES[9001]["ai_model"] == chat_pool[0]

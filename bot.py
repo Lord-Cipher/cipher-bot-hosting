@@ -691,6 +691,41 @@ _OMEGATECH_SECRET_MODELS: Dict[str, str] = {
     "claude-fable-5":       "claude-fable-5",
     "gpt-5-5":              "gpt-5.5",
 }
+
+# The Agents catalog is the provider's editable LLM catalog. Keep these as
+# separate internal keys so they can coexist with the legacy routes above and
+# be assigned independently to Chatting and Coding pools.
+_AGENTS_CHAT_MODELS: Dict[str, str] = {
+    "qwen7b": "Qwen 3.6 35B",
+    "deepseek-r1": "DeepSeek R1 (Agents)",
+    "mistral": "Mistral (Agents)",
+    "qwen3-8b": "Qwen3 8B",
+    "deepseek-r1-7b": "DeepSeek R1 7B",
+    "qwen-coder": "Qwen Coder",
+    "qwen3-coder": "Qwen3 Coder",
+    "qwen-vl": "Qwen VL",
+    "qwen25-vl": "Qwen2.5 VL",
+    "moondream2": "Moondream2",
+}
+_AGENTS_CODER_MODELS: Dict[str, str] = {
+    "qwen-coder-32b": "Qwen Coder 32B",
+    "deepseek-coder": "DeepSeek Coder",
+    "claude-sonnet-4": "Claude Sonnet 4",
+    "claude-opus-4": "Claude Opus 4",
+    "gpt-4o": "GPT-4o Coding",
+    "gemini-2.5-pro": "Gemini 2.5 Pro Coding",
+}
+_AGENTS_MODEL_IDS = tuple(dict.fromkeys((*_AGENTS_CHAT_MODELS, *_AGENTS_CODER_MODELS)))
+_AGENTS_INTERNAL_KEYS = {model_id: f"agents-{model_id}" for model_id in _AGENTS_MODEL_IDS}
+for _agent_id, _agent_key in _AGENTS_INTERNAL_KEYS.items():
+    _OMEGATECH_MODELS[_agent_key] = (
+        "Agents",
+        lambda text, selected_model=_agent_id: {
+            "action": "chat", "message": text, "model": selected_model,
+            "slug": "freeai", "auto_approve": "true", "voice": "kokoro",
+        },
+    )
+
 def _extract_ai_reply(data: Any) -> Optional[str]:
     """Compatibility adapter to the standalone engine's response normalizer."""
     text = AIEngine.extract_reply(data)
@@ -708,8 +743,15 @@ def _build_cipher_ai_context(model_name: str) -> str:
     operative_label = labels.get(model_key, str(model_name or "AI").strip())
     plans_info = []
     for plan_key, details in PLAN_LIMITS.items():
-        pool = get_plan_ai_models(plan_key)
-        model_names = ", ".join(_public_ai_model_name(key) for key in pool) or "No AI models currently enabled"
+        pool_parts = []
+        for pool_mode, pool_label in (("chat", "Chatting"), ("coding", "Coding")):
+            if not _ai_pool_enabled(pool_mode):
+                pool_parts.append(f"{pool_label}: OFF")
+                continue
+            pool = get_plan_ai_models(plan_key, mode=pool_mode) or []
+            names = ", ".join(_public_ai_model_name(key) for key in pool) or "none"
+            pool_parts.append(f"{pool_label}: {names}")
+        model_names = " | ".join(pool_parts)
         price = "Free" if details.get("price", 0) == 0 else f"{details.get('price')}{cur_sym()}"
         duration = "Lifetime" if plan_key == "lifetime" else f"{details.get('days', 0)} days"
         plans_info.append(
@@ -1391,11 +1433,13 @@ def db_save(d: Dict[str, Any]) -> None:
         _cache_invalidate(DB_FILE)
 def settings_load() -> Dict[str, Any]:
     with _db_lock:
-        return _cached_load(SETTINGS_FILE, {})
+        value = _cached_load(SETTINGS_FILE, {})
+    return value if isinstance(value, dict) else {}
 def settings_load_ro() -> Dict[str, Any]:
     """Read-only fast path — DO NOT mutate."""
     with _db_lock:
-        return _cached_load_ro(SETTINGS_FILE, {})
+        value = _cached_load_ro(SETTINGS_FILE, {})
+    return value if isinstance(value, dict) else {}
 def settings_save(d: Dict[str, Any]) -> None:
     with _db_lock:
         _atomic_write(SETTINGS_FILE, d)
@@ -1404,6 +1448,8 @@ def get_setting(key: str, default: Any = None) -> Any:
     # Hot path. Use the no-copy reader because we only `.get()` —
     # we never mutate the dict.
     settings = settings_load_ro()
+    if not isinstance(settings, dict):
+        return default
     if key in settings:
         return settings[key]
     nested = settings.get("settings")
@@ -21726,12 +21772,12 @@ def _build_ai_request(user_request: str, uid: Optional[int] = None) -> str:
     if uid is None and not special_request:
         return user_request
     profile_doc = ((db_load_ro().get("users", {}) or {}).get(str(uid), {})
-                   if uid is not None else {})
+                   if uid is not None else {}) or {}
     profile = _ai_user_context(uid, profile_doc)
     with AI_CHAT_SESSION_LOCK:
         live_history = (list(AI_CHAT_SESSIONS.get(int(uid), []))[-(AI_MEMORY_TURNS * 2):]
                         if uid is not None else [])
-    history = list(profile_doc.get("ai_memory", []) or [])[-(AI_MEMORY_TURNS * 2):] or live_history
+    history = list(profile_doc.get("ai_memory", []) or [])[-(AI_MEMORY_TURNS * 2):] or (live_history or [])
     history_text = "\n".join(f"{item['role'].upper()}: {item['text']}" for item in history)
     context = (f"{profile}\n"
                "This is the same verified account that has used this platform before. "
@@ -21770,13 +21816,13 @@ def handle_ai_chat_message(m: types.Message) -> None:
                                   m.chat.id, loading_msg.message_id, parse_mode="HTML")
             return
             
-        profile = _sync_ai_user_profile(m.from_user)
+        profile = _sync_ai_user_profile(m.from_user) or {}
+        mode = str((USER_STATES.get(m.from_user.id) or {}).get("ai_mode") or "chat").lower()
         # Tiered Model Selection
         plan = get_ai_model(m.from_user.id)
         if _is_lord_cipher_identity_request(m.text):
             ai_response = _lord_cipher_identity_answer()
         else:
-            mode = str((USER_STATES.get(m.from_user.id) or {}).get("ai_mode") or "chat").lower()
             if mode not in _AI_MODE_LABELS or not _ai_pool_enabled(mode) or not get_plan_ai_models(plan, mode=mode):
                 mode = "chat"
             ai_response = _call_ai_api(
@@ -22628,6 +22674,8 @@ _AI_OPERATIVE_LABELS = {
     "deepai-gpt-oss-120b": "GPT OSS 120B",
     "deepai-gpt-5-nano": "GPT-5 Nano",
 }
+for _agent_id, _agent_label in {**_AGENTS_CHAT_MODELS, **_AGENTS_CODER_MODELS}.items():
+    _AI_OPERATIVE_LABELS[_AGENTS_INTERNAL_KEYS[_agent_id]] = _agent_label
 
 _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
 def _public_ai_model_name(model: str) -> str:
@@ -22651,13 +22699,35 @@ _AI_PLAN_DEFAULT_MODELS = {
     "enterprise": ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b", "deepai-gpt-5-nano"],
     "lifetime":   ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b", "deepai-gpt-5-nano"],
 }
+# Moondream is retained in the auditable catalog for admin assignment, but the
+# provider currently returns HTTP 500 for text-only action=chat requests, so it
+# must not be inserted into default conversational fallback chains.
+_AI_AGENTS_CHAT_DEFAULT_KEYS = [
+    _AGENTS_INTERNAL_KEYS[model_id]
+    for model_id in _AGENTS_CHAT_MODELS
+    if model_id != "moondream2"
+]
+for _plan_models in _AI_PLAN_DEFAULT_MODELS.values():
+    _plan_models.extend(key for key in _AI_AGENTS_CHAT_DEFAULT_KEYS if key not in _plan_models)
 
 _AI_MODE_LABELS = {"chat": "Chatting", "coding": "Coding"}
-# Only this route has been verified against the provider's action=code API.
-_AI_CODING_MODEL_KEYS = ("qwen-80b",)
+# Every registered operative is assignable to either pool. Defaults are
+# categorized for convenience, but the admin can move any model between them.
+_AI_CODING_DEFAULT_MODELS = [
+    key for key in _AI_OPERATIVE_KEYS
+    if key not in {"chatbot", "chatgpt-v2", "deepai-gemini-flash-lite"}
+]
+_AI_CODING_DEFAULT_MODELS.extend(_AGENTS_INTERNAL_KEYS[model_id] for model_id in _AGENTS_CODER_MODELS)
+_AI_CODING_DEFAULT_MODELS.extend(
+    _AGENTS_INTERNAL_KEYS[model_id]
+    for model_id in _AGENTS_CHAT_MODELS
+    if "coder" in model_id
+)
+_AI_CODING_DEFAULT_MODELS = list(dict.fromkeys(_AI_CODING_DEFAULT_MODELS))
+_AI_CODING_MODEL_KEYS = _AI_OPERATIVE_KEYS
 _AI_MODE_DEFAULT_MODELS = {
     "chat": _AI_PLAN_DEFAULT_MODELS,
-    "coding": {plan: ["qwen-80b"] for plan in _AI_PLAN_DEFAULT_MODELS},
+    "coding": {plan: list(_AI_CODING_DEFAULT_MODELS) for plan in _AI_PLAN_DEFAULT_MODELS},
 }
 
 def _ai_operative_enabled(key: str) -> bool:
@@ -22689,6 +22759,22 @@ def _create_ai_engine() -> AIEngine:
             mode_builders={
                 "coding": lambda text: {
                     "action": "code", "message": text, "model": "qwen7b",
+                    "slug": "freeai", "auto_approve": "true", "voice": "kokoro",
+                },
+            },
+        )
+    for _agent_id, _agent_key in _AGENTS_INTERNAL_KEYS.items():
+        _agent_route = routes.get(_agent_key)
+        if not _agent_route:
+            continue
+        routes[_agent_key] = ModelRoute(
+            _agent_route.endpoint,
+            _agent_route.build_params,
+            timeout=_agent_route.timeout,
+            public_label=_AI_OPERATIVE_LABELS.get(_agent_key, _agent_key),
+            mode_builders={
+                "coding": lambda text, selected_model=_agent_id: {
+                    "action": "code", "message": text, "model": selected_model,
                     "slug": "freeai", "auto_approve": "true", "voice": "kokoro",
                 },
             },
@@ -22728,6 +22814,8 @@ def get_plan_ai_models(plan: str, include_disabled: bool = False, mode: str = "c
     """Return the ordered operative pool for a plan and task mode."""
     plan = (plan or "free").lower()
     mode = str(mode or "chat").lower()
+    if mode not in _AI_MODE_LABELS:
+        mode = "chat"
     allowed = set(_ai_mode_allowed_keys(mode))
     setting_key = f"ai_plan_{plan}_models" if mode == "chat" else f"ai_{mode}_plan_{plan}_models"
     configured = get_setting(setting_key, None)
@@ -22739,10 +22827,15 @@ def get_plan_ai_models(plan: str, include_disabled: bool = False, mode: str = "c
             configured = list(_AI_MODE_DEFAULT_MODELS[mode].get(plan, _AI_MODE_DEFAULT_MODELS[mode]["free"]))
     elif configured:
         registered = [str(m).strip().lower() for m in configured if str(m).strip().lower() in allowed]
-        if not registered:
+        # The first mode implementation stored only qwen-80b as the coding
+        # default. Treat that exact legacy value as a migration, not as a
+        # deliberate admin restriction; subsequent edits remain auditable.
+        if mode == "coding" and set(registered) == {"qwen-80b"}:
+            configured = list(_AI_MODE_DEFAULT_MODELS[mode].get(plan, _AI_MODE_DEFAULT_MODELS[mode]["free"]))
+        elif not registered:
             configured = list(_AI_MODE_DEFAULT_MODELS[mode].get(plan, _AI_MODE_DEFAULT_MODELS[mode]["free"]))
     pool: List[str] = []
-    for m in configured:
+    for m in (configured or []):
         m = str(m).strip().lower()
         if m in allowed and m not in pool and (include_disabled or _ai_operative_enabled(m)):
             pool.append(m)
@@ -22751,6 +22844,8 @@ def get_plan_ai_models(plan: str, include_disabled: bool = False, mode: str = "c
 def set_plan_ai_models(plan: str, models: List[str], mode: str = "chat") -> None:
     plan = (plan or "free").lower()
     mode = str(mode or "chat").lower()
+    if mode not in _AI_MODE_LABELS:
+        mode = "chat"
     allowed = set(_ai_mode_allowed_keys(mode))
     normalized: List[str] = []
     for model in models or []:
@@ -22763,12 +22858,14 @@ def set_plan_ai_models(plan: str, models: List[str], mode: str = "chat") -> None
 def get_user_ai_models(uid: Optional[int], plan: Optional[str] = None, mode: str = "chat") -> List[str]:
     """Return a user's ordered choices restricted to the selected mode pool."""
     mode = str(mode or "chat").lower()
+    if mode not in _AI_MODE_LABELS:
+        mode = "chat"
     plan = plan or (get_ai_model(uid) if uid is not None else "free")
     pool = get_plan_ai_models(plan, mode=mode)
     picked: List[str] = []
     if uid is not None:
-        u = (db_load_ro().get("users", {}) or {}).get(str(uid), {})
-        choices = u.get(f"ai_{mode}_models") or (u.get("ai_models") if mode == "chat" else [])
+        u = (db_load_ro().get("users", {}) or {}).get(str(uid), {}) or {}
+        choices = u.get(f"ai_{mode}_models") or (u.get("ai_models") if mode == "chat" else []) or []
         for m in choices:
             m = str(m).lower()
             if m in pool and m not in picked:
@@ -22779,6 +22876,8 @@ def set_user_ai_models(uid: int, models: List[str], mode: str = "chat") -> None:
     d = db_load()
     u = d["users"].setdefault(str(uid), {"id": uid, "plan": "free"})
     mode = str(mode or "chat").lower()
+    if mode not in _AI_MODE_LABELS:
+        mode = "chat"
     allowed = set(_ai_mode_allowed_keys(mode))
     normalized: List[str] = []
     for model in models or []:
@@ -23032,6 +23131,7 @@ def render_adm_ai_route_edit(call: types.CallbackQuery, plan_key: str, mode: str
     cap = (
         f"<b>⚙️ {label} Routing: {plan_name}</b>\n{G['div_eq']}\n"
         f"{sc('Toggle the models available to this plan. Order is fallback priority.')}\n\n"
+        f"{sc('Auditable catalog')}: <code>{len(_ai_mode_allowed_keys(mode))}</code> {sc('registered models')}\n"
         f"<b>Pool</b> ({len(pool)}):\n"
     )
     for i, m in enumerate(pool, 1):

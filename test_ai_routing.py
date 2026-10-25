@@ -82,17 +82,42 @@ assert settings["ai_plan_lifetime_models"] == all_models
 assert bot.get_plan_ai_models("lifetime", include_disabled=True) == all_models
 assert bot.get_plan_ai_models("lifetime") == enabled_models
 assert set(enabled_models) == set(all_models)
-assert bot.get_plan_ai_models("lifetime", mode="coding") == ["qwen-80b"]
-assert bot.get_user_ai_models(42, "lifetime", mode="coding") == ["qwen-80b"]
+coding_pool = bot.get_plan_ai_models("lifetime", mode="coding")
+assert "qwen-80b" in coding_pool
+assert "agents-claude-sonnet-4" in coding_pool
+assert set(coding_pool) == set(bot._AI_CODING_DEFAULT_MODELS)
+assert set(bot.get_user_ai_models(42, "lifetime", mode="coding")) == set(coding_pool)
+settings["ai_coding_plan_free_models"] = None
+users["42"]["ai_coding_models"] = None
+assert bot.get_plan_ai_models("free", mode="coding")
+assert bot.get_user_ai_models(42, "free", mode="coding")
+settings.pop("ai_coding_plan_free_models", None)
+users["42"].pop("ai_coding_models", None)
 catalog_answer = bot._call_ai_api("List AI models by plan", "lifetime", 42)
 assert "Free:" in catalog_answer and "Lifetime:" in catalog_answer
 assert "Chatting:" in catalog_answer and "Coding:" in catalog_answer
 coding_params = bot.AI_ENGINE.routes["qwen-80b"].params_for("write code", "coding")
 assert coding_params["action"] == "code"
 assert coding_params["model"] == "qwen7b"
+for agent_id in (*bot._AGENTS_CHAT_MODELS, *bot._AGENTS_CODER_MODELS):
+    agent_key = bot._AGENTS_INTERNAL_KEYS[agent_id]
+    assert agent_key in bot._AI_OPERATIVE_KEYS
+    assert bot.AI_ENGINE.routes[agent_key].params_for("write code", "coding")["action"] == "code"
 settings["ai_coding_pool_enabled"] = False
 assert not bot._ai_pool_enabled("coding")
 settings["ai_coding_pool_enabled"] = True
+
+# Null persisted settings/user selections must not break the Chatting path.
+original_settings_ro = bot.settings_load_ro
+bot.settings_load_ro = lambda: None
+assert bot.get_setting("ai_chat_pool_enabled", True) is True
+bot.settings_load_ro = original_settings_ro
+settings["ai_plan_free_models"] = None
+users["7"]["ai_models"] = None
+assert bot.get_plan_ai_models("free", mode="chat")
+assert bot.get_user_ai_models(7, "free", mode="chat")
+settings.pop("ai_plan_free_models", None)
+users["7"]["ai_models"] = []
 
 # An explicitly assigned paid plan is respected for an admin/owner too, so
 # the admin can verify the same plan pool that ordinary users see.
@@ -184,8 +209,9 @@ updated_context = bot._build_cipher_ai_context("Qwen 80B")
 assert "Release note B: New model pool is live." in updated_context
 assert "Release note A: GitHub browser is available." not in updated_context
 free_plan_context = updated_context.split("Free (price Free", 1)[1].split(" | Starter", 1)[0]
-assert "ChatGPT v2" in free_plan_context and "GPT-5 Nano" in free_plan_context
-assert "DeepSeek V3.2" not in free_plan_context
+free_chat_context = free_plan_context.split("Chatting:", 1)[1].split(" | Coding:", 1)[0]
+assert "ChatGPT v2" in free_chat_context and "GPT-5 Nano" in free_chat_context
+assert "DeepSeek V3.2" not in free_chat_context
 settings["ai_plan_free_models"] = bot._AI_PLAN_DEFAULT_MODELS["free"]
 assert "Telegram platform" in context
 assert "Lord Cipher" in context and "master" in context
