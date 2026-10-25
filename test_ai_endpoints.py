@@ -25,11 +25,12 @@ assert bot._extract_ai_reply({"data": {"reply": "Secret route answer"}}) == "Sec
 assert bot._extract_ai_reply({"response": "Nested response"}) == "Nested response"
 assert bot._extract_ai_reply({"content": [{"text": "Nested content answer"}]}) == "Nested content answer"
 assert bot._extract_ai_reply({"success": True, "result": "  "}) is None
-assert bot._public_ai_model_name("claude-fable-5") == "Claude Fable 5"
-assert bot._public_ai_model_name("gpt-5-5") == "GPT-5.5"
+assert bot._public_ai_model_name("claude") == "Claude"
+assert bot._public_ai_model_name("gpt-4o-mini") == "GPT-4o Mini"
 assert len(set(bot._AI_OPERATIVE_LABELS.values())) == len(bot._AI_OPERATIVE_LABELS)
 assert bot._OMEGATECH_HOSTS == ("https://api.omegatech.app",)
-assert bot._OMEGATECH_SECRET_MODELS["claude-fable-5"] == "claude-fable-5"
+assert "claude-fable-5" not in bot._AI_OPERATIVE_KEYS
+assert "gpt-5-5" not in bot._AI_OPERATIVE_KEYS
 
 original_get = bot.AI_HTTP.get
 original_get_setting = bot.get_setting
@@ -37,38 +38,37 @@ original_log_notification = bot.log_notification
 calls = []
 
 
-def secret_model_reply(url, params=None, timeout=None):
+def claude_model_reply(url, params=None, timeout=None):
     calls.append((url, params, timeout))
     return Response(200, {
         "statusCode": 200,
         "success": True,
-        "data": {"model": "claude-fable-5", "reply": "usable Secret model answer"},
+        "data": {"reply": "usable Claude model answer"},
     })
 
 
-bot.AI_HTTP.get = secret_model_reply
 bot.get_setting = lambda key, default=None: default
 bot.AI_MODEL_FAILURE_COUNT.clear()
 bot.AI_MODEL_CIRCUIT_OPEN_UNTIL.clear()
 try:
-    assert bot._call_ai_model("claude-fable-5", "Reply with a short answer") == "usable Secret model answer"
+    bot.AI_HTTP.get = claude_model_reply
+    assert bot._call_ai_model("claude", "Reply with a short answer") == "usable Claude model answer"
     assert len(calls) == 1, calls
     url, params, timeout = calls[0]
-    assert url == "https://api.omegatech.app/api/ai/Secret", url
-    assert params["action"] == "chat", params
-    assert params["model"] == "claude-fable-5", params
-    assert params["message"].endswith("USER REQUEST:\nReply with a short answer"), params
+    assert url == "https://api.omegatech.app/api/ai/Claude", url
+    assert params["text"].endswith("USER REQUEST:\nReply with a short answer"), params
 finally:
     bot.AI_HTTP.get = original_get
     bot.get_setting = original_get_setting
 
 # Models explicitly identified as rejected/timing out in the old catalog
 # have been removed instead of being left as admin-enableable entries.
-assert bot._ai_operative_enabled("claude-fable-5")
+assert bot._ai_operative_enabled("claude")
 removed_models = {
     "claude-sonnet-4-6", "claude-opus-4-7", "gpt-5-4",
     "gemini-3-5-flash", "deepseek-v4-pro", "deepai-llama-3-3-70b",
-    "agents-mistral", "agents-qwen-vl", "agents-qwen25-vl", "agents-moondream2",
+    "claude-haiku", "agents-mistral", "agents-qwen-vl", "agents-qwen25-vl",
+    "agents-moondream2",
 }
 assert not (removed_models & set(bot._AI_OPERATIVE_KEYS))
 assert not (removed_models & set(bot._create_ai_engine().routes))

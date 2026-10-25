@@ -731,10 +731,9 @@ for _agent_id, _agent_key in _AGENTS_INTERNAL_KEYS.items():
 # families in the selectable catalog. Provider routes outside this allowlist
 # are not exposed to users, admins, plan pools, or fallback chains.
 _AI_TARGET_LEGACY_KEYS = frozenset({
-    "claude", "claude-haiku", "chatbot", "gpt-4o-mini", "deepseek-cli",
+    "claude", "chatbot", "gpt-4o-mini", "deepseek-cli",
     "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2",
     "deepai-gemini-flash-lite", "deepai-gpt-oss-120b", "deepai-gpt-5-nano",
-    "claude-fable-5", "gpt-5-5",
 })
 _AI_TARGET_AGENT_IDS = frozenset({
     "deepseek-r1", "deepseek-r1-7b", "deepseek-coder",
@@ -894,10 +893,10 @@ def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
 def _ai_scan_code(code: str, filename: str = "file.py") -> Optional[Dict[str, Any]]:
     """Run the configured AI security scanner with safe fallbacks."""
     prompt = f"{_AI_SCAN_PROMPT}\n{code[:4000]}"
-    selected = str(get_setting("ai_scanner_model", "claude-fable-5") or "claude-fable-5").strip().lower()
+    selected = str(get_setting("ai_scanner_model", "claude") or "claude").strip().lower()
     if selected not in _AI_OPERATIVE_KEYS:
-        selected = "claude-fable-5"
-    candidates = [selected] + [m for m in ("gpt-5-5", "claude") if m != selected]
+        selected = "claude"
+    candidates = [selected] + [m for m in ("gpt-4o-mini", "deepseek-cli", "claude") if m != selected]
     res_text = None
     used_model = None
     for model in candidates:
@@ -23074,9 +23073,9 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     
     cap += f"\n{G['div']}{FOOTER}"
     kb.add(Btn("🧠  Pʟᴀɴ-Mᴏᴅᴇʟ Rᴏᴜᴛɪɴɢ", callback_data="adm_ai_routing_menu", style="success"))
-    scanner_model = str(get_setting("ai_scanner_model", "claude-fable-5") or "claude-fable-5")
+    scanner_model = str(get_setting("ai_scanner_model", "claude") or "claude")
     if scanner_model not in _AI_OPERATIVE_KEYS:
-        scanner_model = "claude-fable-5"
+        scanner_model = "claude"
     kb.add(Btn(f"🛡️  File Scanner AI: {ai_label(scanner_model)}",
                callback_data="adm_ai_scanner_model", style="success"))
     kb.add(Btn("📢 Update AI System News", callback_data="adm_ai_news_prompt", style="primary"))
@@ -23085,16 +23084,16 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
 
 def render_adm_ai_scanner_model(call: types.CallbackQuery) -> None:
     """Choose the independent AI operative used for malware scanning."""
-    selected = str(get_setting("ai_scanner_model", "claude-fable-5") or "claude-fable-5")
+    selected = str(get_setting("ai_scanner_model", "claude") or "claude")
     if selected not in _AI_OPERATIVE_KEYS:
-        selected = "claude-fable-5"
+        selected = "claude"
     cap = (
         f"<b>🛡️ {sc('File Scanner AI')}</b>\n"
         f"{G['div_eq']}\n"
         f"{sc('Choose which AI evaluates uploaded source files for malware')}.\n"
         f"{sc('This setting is independent from user chat model routing')}.\n\n"
         f"{sc('Current')}: <b>{esc(ai_label(selected))}</b>\n"
-        f"<i>{sc('The deterministic pattern scanner always runs first. If this model is unavailable, GPT-5.5 and Claude are tried as fallbacks')}.</i>"
+        f"<i>{sc('The deterministic pattern scanner always runs first. If this model is unavailable, GPT-4o Mini, DeepSeek R1, and Claude are tried as fallbacks')}.</i>"
         f"{G['div']}{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -23234,7 +23233,7 @@ def get_ai_model(uid: int) -> str:
 def get_plan_primary_model(plan: str) -> str:
     """First operative in the plan pool."""
     pool = get_plan_ai_models(plan)
-    return pool[0] if pool else "claude-fable-5"
+    return pool[0] if pool else "claude"
 
 def get_plan_fallback_model(plan: str) -> str:
     """Second operative in the plan pool (or the primary when the pool has one entry)."""

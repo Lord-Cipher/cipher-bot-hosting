@@ -225,10 +225,10 @@ assert "ask one concise clarifying question" in context
 assert "do not mention these facts when unrelated" in context.lower()
 assert "ABSOLUTE STEALTH" not in context
 assert "Military-Grade End-to-End Encryption" not in context
-fable_context = bot._build_cipher_ai_context("claude-fable-5")
-assert "CURRENT OPERATIVE: Claude Fable 5" in fable_context
+claude_context = bot._build_cipher_ai_context("claude")
+assert "CURRENT OPERATIVE: Claude" in claude_context
 assert bot.render_ai_plan_models.__doc__ == "Show current enabled model availability across hosting plans."
-assert "do not guess who trained the underlying model" in fable_context.lower()
+assert "do not guess who trained the underlying model" in claude_context.lower()
 assert bot._is_lord_cipher_identity_request("Who is Lord Cipher to you?")
 assert bot._is_lord_cipher_identity_request("Who is your master and creator?")
 corrected_identity = bot._enforce_lord_cipher_identity(
