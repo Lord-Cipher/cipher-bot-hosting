@@ -67,7 +67,8 @@ finally:
 assert bot._ai_operative_enabled("claude-fable-5")
 removed_models = {
     "claude-sonnet-4-6", "claude-opus-4-7", "gpt-5-4",
-    "gemini-3-5-flash", "deepseek-v4-pro",
+    "gemini-3-5-flash", "deepseek-v4-pro", "deepai-llama-3-3-70b",
+    "agents-mistral", "agents-qwen-vl", "agents-qwen25-vl", "agents-moondream2",
 }
 assert not (removed_models & set(bot._AI_OPERATIVE_KEYS))
 assert not (removed_models & set(bot._create_ai_engine().routes))
@@ -88,7 +89,6 @@ finally:
 new_models = {
     "deepai-deepseek-v3-2": ("deepseek-v3.2", "free"),
     "deepai-gemini-flash-lite": ("gemini-2.5-flash-lite", "free"),
-    "deepai-llama-3-3-70b": ("llama-3.3-70b-instruct", "starter"),
     "deepai-gpt-oss-120b": ("gpt-oss-120b", "basic"),
     "deepai-gpt-5-nano": ("gpt-5-nano", "pro"),
 }
@@ -107,6 +107,18 @@ assert model in bot._AI_PLAN_DEFAULT_MODELS["free"]
 assert bot._OMEGATECH_MODELS[model][1]("safe test prompt") == {
     "action": "chat", "message": "safe test prompt"
 }
+
+target_agent_ids = {
+    "deepseek-r1", "deepseek-r1-7b", "deepseek-coder",
+    "claude-sonnet-4", "claude-opus-4", "gpt-4o", "qwen7b",
+    "qwen3-8b", "qwen-coder", "qwen3-coder", "qwen-coder-32b",
+    "gemini-2.5-pro",
+}
+assert set(bot._AGENTS_MODEL_IDS) == target_agent_ids
+for agent_id in target_agent_ids:
+    agent_key = bot._AGENTS_INTERNAL_KEYS[agent_id]
+    assert agent_key in bot._AI_OPERATIVE_KEYS
+    assert bot.AI_ENGINE.routes[agent_key].params_for("safe test prompt", "coding")["action"] == "code"
 
 route_calls = []
 def new_route_reply(url, params=None, timeout=None):

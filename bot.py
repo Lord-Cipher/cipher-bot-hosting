@@ -726,6 +726,45 @@ for _agent_id, _agent_key in _AGENTS_INTERNAL_KEYS.items():
         },
     )
 
+# This bot is intentionally a coding/reasoning assistant, not a general
+# media-model browser. Keep only the requested GPT, DeepSeek, and Claude
+# families in the selectable catalog. Provider routes outside this allowlist
+# are not exposed to users, admins, plan pools, or fallback chains.
+_AI_TARGET_LEGACY_KEYS = frozenset({
+    "claude", "claude-haiku", "chatbot", "gpt-4o-mini", "deepseek-cli",
+    "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2",
+    "deepai-gemini-flash-lite", "deepai-gpt-oss-120b", "deepai-gpt-5-nano",
+    "claude-fable-5", "gpt-5-5",
+})
+_AI_TARGET_AGENT_IDS = frozenset({
+    "deepseek-r1", "deepseek-r1-7b", "deepseek-coder",
+    "claude-sonnet-4", "claude-opus-4", "gpt-4o", "qwen7b",
+    "qwen3-8b", "qwen-coder", "qwen3-coder", "qwen-coder-32b",
+    "gemini-2.5-pro",
+})
+_OMEGATECH_MODELS = {
+    key: route for key, route in _OMEGATECH_MODELS.items()
+    if key in _AI_TARGET_LEGACY_KEYS or key in {
+        _AGENTS_INTERNAL_KEYS[agent_id] for agent_id in _AI_TARGET_AGENT_IDS
+    }
+}
+_OMEGATECH_SECRET_MODELS = {
+    key: model for key, model in _OMEGATECH_SECRET_MODELS.items()
+    if key in _AI_TARGET_LEGACY_KEYS
+}
+_AGENTS_CHAT_MODELS = {
+    model_id: label for model_id, label in _AGENTS_CHAT_MODELS.items()
+    if model_id in _AI_TARGET_AGENT_IDS
+}
+_AGENTS_CODER_MODELS = {
+    model_id: label for model_id, label in _AGENTS_CODER_MODELS.items()
+    if model_id in _AI_TARGET_AGENT_IDS
+}
+_AGENTS_MODEL_IDS = tuple(dict.fromkeys((*_AGENTS_CHAT_MODELS, *_AGENTS_CODER_MODELS)))
+_AGENTS_INTERNAL_KEYS = {
+    model_id: f"agents-{model_id}" for model_id in _AGENTS_MODEL_IDS
+}
+
 def _extract_ai_reply(data: Any) -> Optional[str]:
     """Compatibility adapter to the standalone engine's response normalizer."""
     text = AIEngine.extract_reply(data)
@@ -22674,6 +22713,10 @@ _AI_OPERATIVE_LABELS = {
     "deepai-gpt-oss-120b": "GPT OSS 120B",
     "deepai-gpt-5-nano": "GPT-5 Nano",
 }
+_AI_OPERATIVE_LABELS = {
+    key: label for key, label in _AI_OPERATIVE_LABELS.items()
+    if key in _OMEGATECH_MODELS or key in _OMEGATECH_SECRET_MODELS
+}
 for _agent_id, _agent_label in {**_AGENTS_CHAT_MODELS, **_AGENTS_CODER_MODELS}.items():
     _AI_OPERATIVE_LABELS[_AGENTS_INTERNAL_KEYS[_agent_id]] = _agent_label
 
@@ -22708,15 +22751,13 @@ _AI_AGENTS_CHAT_DEFAULT_KEYS = [
     if model_id != "moondream2"
 ]
 for _plan_models in _AI_PLAN_DEFAULT_MODELS.values():
+    _plan_models[:] = [key for key in _plan_models if key in _AI_OPERATIVE_KEYS]
     _plan_models.extend(key for key in _AI_AGENTS_CHAT_DEFAULT_KEYS if key not in _plan_models)
 
 _AI_MODE_LABELS = {"chat": "Chatting", "coding": "Coding"}
 # Every registered operative is assignable to either pool. Defaults are
 # categorized for convenience, but the admin can move any model between them.
-_AI_CODING_DEFAULT_MODELS = [
-    key for key in _AI_OPERATIVE_KEYS
-    if key not in {"chatbot", "chatgpt-v2", "deepai-gemini-flash-lite"}
-]
+_AI_CODING_DEFAULT_MODELS = list(_AI_OPERATIVE_KEYS)
 _AI_CODING_DEFAULT_MODELS.extend(_AGENTS_INTERNAL_KEYS[model_id] for model_id in _AGENTS_CODER_MODELS)
 _AI_CODING_DEFAULT_MODELS.extend(
     _AGENTS_INTERNAL_KEYS[model_id]
