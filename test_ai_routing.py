@@ -15,6 +15,8 @@ os.environ.setdefault("OWNER_ID", "9001")
 
 import bot  # noqa: E402
 
+assert open(bot.__file__, encoding="utf-8").read().count("def action_ai_pick(") == 1
+
 
 settings = {}
 users = {

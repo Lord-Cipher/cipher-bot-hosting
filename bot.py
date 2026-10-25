@@ -22990,33 +22990,6 @@ def render_ai_plan_models(call: types.CallbackQuery) -> None:
     kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
 
-def action_ai_pick(call: types.CallbackQuery, model: str) -> None:
-    """Select one live plan-eligible model and open the chat session.
-
-    The selection only changes priority. It never truncates the plan's
-    unlimited fallback pool.
-    """
-    uid = call.from_user.id
-    plan = get_ai_model(uid)
-    pool = get_plan_ai_models(plan)
-    if model not in pool:
-        ack(call, "That model is not available on your current plan.")
-        return render_ai_models(call)
-    set_user_ai_models(uid, [model])
-    USER_STATES[uid] = {"flow": "ai_chat", "ai_model": model, "ai_plan": plan}
-    ack(call, f"Selected {_public_ai_model_name(model)}")
-    cap = (
-        f"<b>🤖 {sc('AI Agent')}</b>\n"
-        f"{G['div_eq']}\n"
-        f"<i>{sc('Active AI family')}:</i> <b>{esc(_public_ai_model_name(model))}</b>\n\n"
-        f"{sc('Send a message or code below to start chatting')} ."
-        f"\n\n{G['div']}{FOOTER}"
-    )
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(Btn("🔁  Cʜᴏᴏsᴇ Aɴᴏᴛʜᴇʀ Mᴏᴅᴇʟ", callback_data="menu_ai_models", style="primary"))
-    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
-    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
-
 def render_adm_ai_config(call: types.CallbackQuery) -> None:
     """Admin UI to manage AI Command Center and Operatives."""
     global_on = bool(get_setting("ai_global_enabled", True))
