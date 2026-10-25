@@ -199,9 +199,7 @@ settings["ai_system_news"] = "Release note A: GitHub browser is available."
 context = bot._build_cipher_ai_context("Qwen 80B")
 assert "Cipher Tech Hosting" in context
 assert "Release note A: GitHub browser is available." in context
-assert "CURRENT PLANS, LIMITS, PRICES, AND AI MODELS" in context
-assert "DeepSeek V3.2" in context
-assert "Gemini 2.5 Flash Lite" in context
+assert "CURRENT PLANS, LIMITS, PRICES, AND AI POOL COUNTS" in context
 assert "Free (price Free" in context and "AI models:" in context
 # Changing platform news and routing settings must appear immediately on the
 # next context build; the builder must not rely on a stale cached snapshot.
@@ -212,8 +210,7 @@ assert "Release note B: New model pool is live." in updated_context
 assert "Release note A: GitHub browser is available." not in updated_context
 free_plan_context = updated_context.split("Free (price Free", 1)[1].split(" | Starter", 1)[0]
 free_chat_context = free_plan_context.split("Chatting:", 1)[1].split(" | Coding:", 1)[0]
-assert "ChatGPT v2" in free_chat_context and "GPT-5 Nano" in free_chat_context
-assert "DeepSeek V3.2" not in free_chat_context
+assert "2 enabled" in free_chat_context
 settings["ai_plan_free_models"] = bot._AI_PLAN_DEFAULT_MODELS["free"]
 assert "Telegram platform" in context
 assert "Lord Cipher" in context and "master" in context

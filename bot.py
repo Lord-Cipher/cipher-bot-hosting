@@ -787,8 +787,11 @@ def _build_cipher_ai_context(model_name: str) -> str:
                 pool_parts.append(f"{pool_label}: OFF")
                 continue
             pool = get_plan_ai_models(plan_key, mode=pool_mode) or []
-            names = ", ".join(_public_ai_model_name(key) for key in pool) or "none"
-            pool_parts.append(f"{pool_label}: {names}")
+            # The exact model catalog is returned locally by
+            # _ai_model_catalog_answer(). Do not duplicate every model name in
+            # every provider prompt: the resulting GET URL can be rejected by
+            # the provider gateway before the model sees the user request.
+            pool_parts.append(f"{pool_label}: {len(pool)} enabled")
         model_names = " | ".join(pool_parts)
         price = "Free" if details.get("price", 0) == 0 else f"{details.get('price')}{cur_sym()}"
         duration = "Lifetime" if plan_key == "lifetime" else f"{details.get('days', 0)} days"
@@ -830,10 +833,10 @@ def _build_cipher_ai_context(model_name: str) -> str:
         "user explicitly chooses Yes; choosing No leaves their source unchanged. Users choose from "
         "the AI models allowed by their plan. The platform also has tiered hosting plans, referrals, "
         "and encrypted backups. "
-        f"\nCURRENT PLANS, LIMITS, PRICES, AND AI MODELS: {plans_str}. This list is rebuilt from current "
+        f"\nCURRENT PLANS, LIMITS, PRICES, AND AI POOL COUNTS: {plans_str}. This summary is rebuilt from current "
         "runtime settings for every answer, including admin-configured AI routing and model enable/disable "
-        "state. When users ask what is available on their plan or another tier, use the exact listed model "
-        "labels and only describe models shown for that plan. Prices and limits are current configured values; "
+        "state. When users ask what models are available, the platform supplies the exact model catalog "
+        "locally; do not invent model names. Prices and limits are current configured values; "
         "do not invent other details. Do not mention these facts when unrelated. "
         f"\nLATEST PLATFORM UPDATE: {system_news}. This update is read from the current saved AI system-news "
         "setting each time a model request is built. Treat it as a current platform note, not proof of any "
