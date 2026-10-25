@@ -104,6 +104,21 @@ assert attempts[0].text is None and attempts[0].error == "provider returned a no
 assert attempts[1].text == "Here is the requested explanation with useful steps."
 assert [call[0].rsplit("/", 1)[-1] for call in fallback_session.calls] == ["primary", "backup"]
 
+# A stalled model must release the prompt to the next model within the
+# bounded provider timeout window.
+def timeout_then_backup(url, _params):
+    if url.endswith("/primary"):
+        raise TimeoutError("provider read timed out")
+    return FakeResponse(200, {"result": "backup answered after primary timeout"})
+
+timeout_session = FakeSession(timeout_then_backup)
+timeout_engine = engine(timeout_session, {"primary": route("primary"), "backup": route("backup")})
+timeout_attempts = timeout_engine.complete_chain(["primary", "backup"], "Answer the user")
+assert timeout_attempts[0].error == "request timeout"
+assert timeout_attempts[1].text == "backup answered after primary timeout"
+assert [call[0].rsplit("/", 1)[-1] for call in timeout_session.calls] == ["primary", "backup"]
+assert timeout_session.calls[0][2] == (5, 12)
+
 # Keep the matching public operative identity but reject a different product
 # persona even when the response later contains useful-looking content.
 persona_session = FakeSession(lambda *_: FakeResponse(200, {

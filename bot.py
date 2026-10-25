@@ -22838,6 +22838,9 @@ def _create_ai_engine() -> AIEngine:
         on_circuit_open=lambda model, seconds: log_notification(
             "SYSTEM", f"AI operative {model} is unstable. Its circuit breaker opened for {seconds} seconds."
         ),
+        # Fallback is the retry strategy for user prompts. A second request to
+        # the same stalled provider would delay the next model unnecessarily.
+        transient_retries=0,
         failure_counts=AI_MODEL_FAILURE_COUNT,
         circuit_open_until=AI_MODEL_CIRCUIT_OPEN_UNTIL,
     )

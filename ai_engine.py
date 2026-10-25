@@ -21,7 +21,10 @@ class ModelRoute:
 
     endpoint: str
     build_params: Callable[[str], Mapping[str, Any]]
-    timeout: Tuple[float, float] = (6, 30)
+    # Keep a stalled provider from blocking the ordered fallback chain. The
+    # connect timeout is short; the read timeout is deliberately 12 seconds,
+    # within the requested 10-15 second fallback window.
+    timeout: Tuple[float, float] = (5, 12)
     public_label: Optional[str] = None
     mode_builders: Optional[Mapping[str, Callable[[str], Mapping[str, Any]]]] = None
 
