@@ -35,6 +35,19 @@ finally:
     bot.bot.get_chat_member = original_get_chat_member
     bot._GROUP_MEMBERSHIP_CACHE.clear()
 
+# Configured groups must not block users when the admin has turned force-join
+# off; this is the callback-root loop that previously bypassed the toggle.
+original_get_setting = bot.get_setting
+try:
+    bot.REQUIRED_GROUPS = [{"id": -100123, "name": "Test", "link": "https://t.me/test"}]
+    bot.get_setting = lambda key, default=None: False if key == "group_verify_enabled" else default
+    assert bot.require_group_membership(7, 7) is True
+    source = open(bot.__file__, encoding="utf-8").read()
+    assert 'if bool(get_setting("group_verify_enabled", False)):' in source
+finally:
+    bot.get_setting = original_get_setting
+    bot.REQUIRED_GROUPS = original_groups
+
 plain = bot._product_description_markup(SimpleNamespace(html_text=""), "> First quoted line\n> Second quoted line\nNormal text")
 assert "<blockquote>First quoted line\nSecond quoted line</blockquote>" in plain
 assert "Normal text" in plain

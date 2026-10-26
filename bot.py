@@ -5453,16 +5453,20 @@ def cb_root(call: types.CallbackQuery) -> None:
             ack(call, "Please solve the captcha first — send /start.")
             return
         
-        # Enforce force-join on every callback interaction
-        not_joined = _check_group_membership(uid)
-        if not_joined:
-            ack(call, "Join required channels first!")
-            try:
-                bot.delete_message(call.message.chat.id, call.message.message_id)
-            except Exception:
-                pass
-            _send_join_verification(call.message.chat.id, uid, not_joined)
-            return
+        # Enforce force-join on callbacks only while the admin switch is ON.
+        # Previously this branch ignored group_verify_enabled, so configured
+        # groups continued blocking every callback after force-join was turned
+        # off and users appeared trapped in a join loop.
+        if bool(get_setting("group_verify_enabled", False)):
+            not_joined = _check_group_membership(uid)
+            if not_joined:
+                ack(call, "Join required channels first!")
+                try:
+                    bot.delete_message(call.message.chat.id, call.message.message_id)
+                except Exception:
+                    pass
+                _send_join_verification(call.message.chat.id, uid, not_joined)
+                return
 
         data = call.data or ""
         _route_callback(call, data)
