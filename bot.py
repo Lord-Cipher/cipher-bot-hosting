@@ -5575,7 +5575,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         pid = data[len("adm_product_save_"):]; state = USER_STATES.get(call.from_user.id, {}); db = db_load(); product = db.get("product_files", {}).get(pid)
         if product and state.get("spec"):
             old_slots = int(product.get("slot_limit", 0) or 0)
-            allowed = {"filename", "plan", "referral_cost", "price", "slots", "access_days", "description"}
+            allowed = {"filename", "plan", "referral_cost", "price", "slots", "access_days", "description", "description_html"}
             product.update({k: v for k, v in state["spec"].items() if k in allowed})
             if "filename" in state["spec"]:
                 product["filename"] = safe_product_label(state["spec"]["filename"])
@@ -10722,6 +10722,8 @@ def on_text(m: types.Message) -> None:
                 bot.reply_to(m, f"{G['no']} Invalid value: {esc(exc)}", parse_mode="HTML"); return
             if field == "plan":
                 spec["category"] = value
+            if field == "description":
+                spec["description_html"] = _product_description_markup(m, text)
             spec[field] = value; state.update({"flow": "adm_product_builder", "spec": spec}); USER_STATES[uid] = state
             # Re-render the existing builder message rather than creating a
             # second message for every price/field edit.
@@ -16185,9 +16187,13 @@ _CAPTCHA_FONT_PATHS = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 )
 REQUIRED_GROUPS: List[Dict[str, Any]] = []
+_GROUP_MEMBERSHIP_CACHE: Dict[int, Tuple[float, Tuple[str, ...]]] = {}
+_GROUP_MEMBERSHIP_CACHE_TTL = 30.0
 def _load_required_groups() -> None:
     global REQUIRED_GROUPS
     REQUIRED_GROUPS = list(get_setting("required_groups", []) or [])
+    with _verify_lock:
+        _GROUP_MEMBERSHIP_CACHE.clear()
 def _captcha_font(size: int):
     if not _PIL_OK:
         return None
@@ -16354,11 +16360,19 @@ def _verify_state_janitor() -> None:
 def _check_group_membership(uid: int) -> List[Dict[str, Any]]:
     if not REQUIRED_GROUPS:
         return []
+    signature = tuple(str(group.get("id", "")) for group in REQUIRED_GROUPS)
+    now = time.monotonic()
+    with _verify_lock:
+        cached = _GROUP_MEMBERSHIP_CACHE.get(uid)
+        if cached and cached[1] == signature and now - cached[0] < _GROUP_MEMBERSHIP_CACHE_TTL:
+            return []
     not_joined = []
     for grp in REQUIRED_GROUPS:
         try:
             member = bot.get_chat_member(grp["id"], uid)
-            if member.status in ("left", "kicked", "banned"):
+            status = str(getattr(member, "status", "")).lower()
+            is_member = getattr(member, "is_member", True)
+            if status in ("left", "kicked", "banned") or (status == "restricted" and not is_member):
                 not_joined.append(grp)
         except Exception as e:
             # If the bot cannot check membership (e.g. user not in chat or bot lacking rights),
@@ -16369,6 +16383,11 @@ def _check_group_membership(uid: int) -> List[Dict[str, Any]]:
             else:
                 # For safety under strict force-join enforcement, prompt join on unknown lookup errors
                 not_joined.append(grp)
+    with _verify_lock:
+        if not not_joined:
+            _GROUP_MEMBERSHIP_CACHE[uid] = (now, signature)
+        else:
+            _GROUP_MEMBERSHIP_CACHE.pop(uid, None)
     return not_joined
 def _send_join_verification(chat_id: int, uid: int, not_joined: List[Dict[str, Any]]) -> None:
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -18223,6 +18242,26 @@ def render_products(call: types.CallbackQuery, category: str = "") -> None:
         kb.add(Btn(f"{_product_file_icon(p)} {p.get('filename','file')[:35]}", callback_data=f"product_view_{p['id']}", style="primary"))
     kb.add(Btn(f"{G['back']} Plan Categories", callback_data="menu_products", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["main"], cap, kb, call=call)
+def _product_description_markup(message: Any, text: str) -> str:
+    """Preserve Telegram quote entities while keeping plain descriptions safe."""
+    plain = str(text or "")[:1000]
+    telegram_html = str(getattr(message, "html_text", "") or "").strip()
+    if telegram_html and "<blockquote" in telegram_html.lower():
+        return telegram_html[:2000]
+    lines = plain.splitlines()
+    rendered: List[str] = []
+    quoted: List[str] = []
+    def flush_quote() -> None:
+        if quoted:
+            rendered.append(f"<blockquote>{esc(chr(10).join(quoted))}</blockquote>")
+            quoted.clear()
+    for line in lines:
+        if line.lstrip().startswith(">"):
+            quoted.append(line.lstrip()[1:].lstrip())
+        else:
+            flush_quote(); rendered.append(esc(line))
+    flush_quote()
+    return "\n".join(rendered) or esc("No description")
 def render_product_view(call: types.CallbackQuery, product_id: str) -> None:
     if not _ff_get("file_catalog"):
         ack(call, "The file catalog is currently unavailable.", show_alert=True)
@@ -18231,10 +18270,11 @@ def render_product_view(call: types.CallbackQuery, product_id: str) -> None:
     if not p or not p.get("active"):
         ack(call, "Product unavailable"); return
     purchase_display = f"{p.get('price', 0)}{cur_sym()}"
+    description = p.get("description_html") or esc(p.get("description", "No description"))
     cap = (f"<b>{_product_file_icon(p)} {esc(p.get('filename','file'))} v{int(p.get('version', 1) or 1)}</b>\n{G['div_eq']}\n"
            f"{bullet('Category', p.get('plan','free'))}\n{bullet('Plan', p.get('plan','free'))}\n"
            f"{bullet('Referral unlock', p.get('referral_cost', 0))}\n{bullet('Purchase', purchase_display)}\n"
-           f"{bullet('Remaining slots', p.get('slots_remaining', 0))}\n{G['div']}\n{esc(p.get('description','No description'))}{FOOTER}")
+           f"{bullet('Remaining slots', p.get('slots_remaining', 0))}\n{G['div']}\n{description}{FOOTER}")
     kb = types.InlineKeyboardMarkup(row_width=1)
     if int(p.get("slots_remaining", 0) or 0) > 0:
         kb.add(Btn("🔓 Unlock with referrals", callback_data=f"product_ref_{product_id}", style="success"))
@@ -18479,12 +18519,15 @@ def _handle_adm_product_file(m: types.Message, st: Dict[str, Any]) -> None:
         product_dir = DIRS["uploads"] / "products"; product_dir.mkdir(parents=True, exist_ok=True)
         product_spec = dict(st["spec"])
         product_spec.pop("filename", None)
+        description_html = product_spec.pop("description_html", None)
         existing_versions = [p for p in db_load().get("product_files", {}).values()
                              if str(p.get("filename", "")).lower() == filename.lower()
                              and str(p.get("plan", "free")) == str(product_spec.get("plan", "free"))]
         product = create_product(db_load(), path="", filename=filename, **product_spec)
         product.update({"source_filename": original_filename[:128], "storage_filename": storage_filename,
                         "file_type": file_type, "mime_type": getattr(m.document, "mime_type", "") or ""})
+        if description_html:
+            product["description_html"] = description_html
         product["version"] = max([int(p.get("version", 1) or 1) for p in existing_versions] or [0]) + 1
         path = product_dir / f"{product['id']}_{storage_filename}"; path.write_bytes(raw); product["path"] = str(path)
         db = db_load(); db.setdefault("product_files", {})[product["id"]] = product
