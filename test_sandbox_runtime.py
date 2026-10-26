@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+import sandbox_runtime
 
 from sandbox_runtime import build_run_command, install_dependencies_command
 
@@ -10,6 +11,20 @@ from sandbox_runtime import build_run_command, install_dependencies_command
 bot_source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
 assert 'sandbox_test = sandbox_on and bool(get_setting("sandbox_test_mode", False))' in bot_source
 assert 'Sandbox hosting requires Docker locally or an authenticated Docker VPS node.' in bot_source
+assert 'capabilities") or {}).get("docker") is True' in bot_source
+assert 'if requested_node or not docker_available():' in bot_source
+
+old_which = sandbox_runtime.shutil.which
+old_run = sandbox_runtime.subprocess.run
+try:
+    sandbox_runtime.shutil.which = lambda name: "/usr/bin/docker"
+    sandbox_runtime.subprocess.run = lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "26.0\n"})()
+    assert sandbox_runtime.docker_available() is True
+    sandbox_runtime.subprocess.run = lambda *args, **kwargs: type("Result", (), {"returncode": 1, "stdout": ""})()
+    assert sandbox_runtime.docker_available() is False
+finally:
+    sandbox_runtime.shutil.which = old_which
+    sandbox_runtime.subprocess.run = old_run
 
 
 with tempfile.TemporaryDirectory(prefix="sandbox-runtime-test-") as tmp:

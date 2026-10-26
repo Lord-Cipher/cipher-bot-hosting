@@ -3495,11 +3495,20 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
     extra_env = b.get("env") or {}
     sandbox_on = bool(get_setting("sandbox_mode", False))
     if sandbox_on:
-        preflight = run_preflight(bot_dir, kind, entry)
-        b["preflight"] = {"verdict": preflight.get("verdict"), "reason": preflight.get("reason", ""), "checked": ts_iso()}
-        save_bot(b)
-        if not preflight.get("ok"):
-            return _start_failure(b, f"Preflight {preflight.get('verdict')}: {preflight.get('reason', 'source rejected')}")
+        # The control plane may not have Docker when Sandbox workloads are
+        # hosted on a verified remote VPS. Do not reject a remote deployment
+        # during a local-only preflight; the worker performs the actual
+        # constrained Docker install/run. Local Docker deployments still get
+        # the full preflight gate.
+        if docker_available():
+            preflight = run_preflight(bot_dir, kind, entry)
+            b["preflight"] = {"verdict": preflight.get("verdict"), "reason": preflight.get("reason", ""), "checked": ts_iso()}
+            save_bot(b)
+            if not preflight.get("ok"):
+                return _start_failure(b, f"Preflight {preflight.get('verdict')}: {preflight.get('reason', 'source rejected')}")
+        else:
+            b["preflight"] = {"verdict": "DEFERRED", "reason": "Control plane has no Docker; remote worker preflight is authoritative.", "checked": ts_iso()}
+            save_bot(b)
     # A clean scanner verdict or explicit admin approval is the trust decision
     # required for the intentionally less-isolated non-sandbox path.
     try:
@@ -3524,7 +3533,13 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
         nodes = _nodes_load()
         requested_node = b.get("node_id") or b.get("assigned_node")
         candidates = [nodes.get(requested_node)] if requested_node and nodes.get(requested_node) else list(nodes.values())
-        selected_node = next((n for n in candidates if n and n.get("enabled") and n.get("status") in {"ONLINE", "AUTHENTICATED"} and n.get("connection_type") == "ssh"), None)
+        ready_candidates = [n for n in candidates if n and n.get("enabled") and n.get("status") in {"ONLINE", "AUTHENTICATED"} and n.get("connection_type") == "ssh" and (n.get("capabilities") or {}).get("docker") is True]
+        selected_node = next(iter(ready_candidates), None)
+        # A specifically assigned node is authoritative even when its older
+        # record has no cached capabilities. remote_deploy performs the live
+        # Docker check; this keeps pre-health-check nodes usable.
+        if selected_node is None and requested_node:
+            selected_node = next((n for n in candidates if n and n.get("enabled") and n.get("status") in {"ONLINE", "AUTHENTICATED"} and n.get("connection_type") == "ssh"), None)
         if selected_node:
             secret = _node_secret(selected_node.get("id", ""))
             if not secret:
@@ -3538,24 +3553,34 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             except Exception as exc:
                 remote_result = {"ok": False, "error": str(exc)[:240]}
             if not remote_result.get("ok"):
-                return _start_failure(b, f"Remote deployment failed: {remote_result.get('error', 'unknown error')}")
-            b["remote_node_id"] = selected_node.get("id"); b["remote_container_id"] = remote_result.get("container_id", ""); b["status"] = "running"; save_bot(b)
-            with _runner_lock:
-                RUNNING[bid] = {"proc": RemoteHandle(selected_node, secret, bid, remote_result.get("container_id", "")), "remote": True, "sandbox": True, "node_id": selected_node.get("id"), "dir": str(bot_dir), "log_ring": deque(maxlen=200), "started": time.time(), "manual_stop": False}
-                if sandbox_test:
-                    RUNNING[bid]["sandbox_expires_at"] = time.time() + SANDBOX_TEST_TTL_SECONDS
-                    RUNNING[bid]["sandbox_timer"] = threading.Timer(SANDBOX_TEST_TTL_SECONDS, _expire_sandbox_run, args=(bid,))
-                    RUNNING[bid]["sandbox_timer"].daemon = True
-                    RUNNING[bid]["sandbox_timer"].start()
-            if sandbox_test:
-                b["sandbox_expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=SANDBOX_TEST_TTL_SECONDS)).isoformat()
+                # A healthy local Docker daemon is a valid fallback when an
+                # auto-selected VPS becomes unavailable during deployment.
+                # An explicitly assigned node remains authoritative so a
+                # configuration error is not hidden by silently switching
+                # infrastructure.
+                if requested_node or not docker_available():
+                    return _start_failure(b, f"Remote deployment failed: {remote_result.get('error', 'unknown error')}")
+                selected_node = None
+            if selected_node is None:
+                pass
             else:
-                b.pop("sandbox_expires_at", None)
-            save_bot(b)
-            result = {"ok": True, "pid": 0, "kind": kind, "remote": True, "node_id": selected_node.get("id")}
-            if sandbox_test:
-                result["expires_in"] = SANDBOX_TEST_TTL_SECONDS
-            return result
+                b["remote_node_id"] = selected_node.get("id"); b["remote_container_id"] = remote_result.get("container_id", ""); b["status"] = "running"; save_bot(b)
+                with _runner_lock:
+                    RUNNING[bid] = {"proc": RemoteHandle(selected_node, secret, bid, remote_result.get("container_id", "")), "remote": True, "sandbox": True, "node_id": selected_node.get("id"), "dir": str(bot_dir), "log_ring": deque(maxlen=200), "started": time.time(), "manual_stop": False}
+                    if sandbox_test:
+                        RUNNING[bid]["sandbox_expires_at"] = time.time() + SANDBOX_TEST_TTL_SECONDS
+                        RUNNING[bid]["sandbox_timer"] = threading.Timer(SANDBOX_TEST_TTL_SECONDS, _expire_sandbox_run, args=(bid,))
+                        RUNNING[bid]["sandbox_timer"].daemon = True
+                        RUNNING[bid]["sandbox_timer"].start()
+                if sandbox_test:
+                    b["sandbox_expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=SANDBOX_TEST_TTL_SECONDS)).isoformat()
+                else:
+                    b.pop("sandbox_expires_at", None)
+                save_bot(b)
+                result = {"ok": True, "pid": 0, "kind": kind, "remote": True, "node_id": selected_node.get("id")}
+                if sandbox_test:
+                    result["expires_in"] = SANDBOX_TEST_TTL_SECONDS
+                return result
     if sandbox_on:
         if not docker_available():
             return _start_failure(b, "Sandbox hosting requires Docker locally or an authenticated Docker VPS node.")

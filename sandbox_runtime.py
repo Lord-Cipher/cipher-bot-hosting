@@ -20,7 +20,25 @@ PLAN_LIMITS = {
 
 
 def docker_available() -> bool:
-    return shutil.which("docker") is not None
+    """Return whether the local Docker CLI can reach a daemon.
+
+    A Docker executable alone is not enough for Sandbox hosting: preflight,
+    dependency installation, and the bot container all need a working daemon.
+    Keep this probe short because it runs on user-facing start paths.
+    """
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def limits_for_plan(plan: str) -> Dict[str, Any]:

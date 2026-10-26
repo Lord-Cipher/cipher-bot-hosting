@@ -110,7 +110,7 @@ def local_capabilities() -> Dict[str, Any]:
         "cpuCores": os.cpu_count() or 1,
         "ramBytes": _ram_bytes(),
         "diskBytes": {"total": usage.total, "free": usage.free},
-        "docker": shutil.which("docker") is not None,
+        "docker": _docker_daemon_available(),
         "python": platform.python_version(),
     }
 
@@ -123,6 +123,23 @@ def _ram_bytes() -> Optional[int]:
     except Exception:
         return None
     return None
+
+
+def _docker_daemon_available() -> bool:
+    """Return true only when the local Docker CLI can reach its daemon."""
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def test_ssh_node(node: Dict[str, Any], secret: str, timeout: int = 8) -> Dict[str, Any]:
