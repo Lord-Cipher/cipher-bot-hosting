@@ -3433,6 +3433,7 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
         save_bot(b)
 
     sandbox_on = bool(get_setting("sandbox_mode", False))
+    sandbox_test = sandbox_on and bool(get_setting("sandbox_test_mode", False))
     bot_dir = Path(b["dir"])
     # Encrypted uploads remain in storage; the plain runtime workspace may be
     # deleted after a sandbox test and is recreated on the next start.
@@ -3541,16 +3542,23 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             b["remote_node_id"] = selected_node.get("id"); b["remote_container_id"] = remote_result.get("container_id", ""); b["status"] = "running"; save_bot(b)
             with _runner_lock:
                 RUNNING[bid] = {"proc": RemoteHandle(selected_node, secret, bid, remote_result.get("container_id", "")), "remote": True, "sandbox": True, "node_id": selected_node.get("id"), "dir": str(bot_dir), "log_ring": deque(maxlen=200), "started": time.time(), "manual_stop": False}
-                RUNNING[bid]["sandbox_expires_at"] = time.time() + SANDBOX_TEST_TTL_SECONDS
-                RUNNING[bid]["sandbox_timer"] = threading.Timer(SANDBOX_TEST_TTL_SECONDS, _expire_sandbox_run, args=(bid,))
-                RUNNING[bid]["sandbox_timer"].daemon = True
-                RUNNING[bid]["sandbox_timer"].start()
-            b["sandbox_expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=SANDBOX_TEST_TTL_SECONDS)).isoformat()
+                if sandbox_test:
+                    RUNNING[bid]["sandbox_expires_at"] = time.time() + SANDBOX_TEST_TTL_SECONDS
+                    RUNNING[bid]["sandbox_timer"] = threading.Timer(SANDBOX_TEST_TTL_SECONDS, _expire_sandbox_run, args=(bid,))
+                    RUNNING[bid]["sandbox_timer"].daemon = True
+                    RUNNING[bid]["sandbox_timer"].start()
+            if sandbox_test:
+                b["sandbox_expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=SANDBOX_TEST_TTL_SECONDS)).isoformat()
+            else:
+                b.pop("sandbox_expires_at", None)
             save_bot(b)
-            return {"ok": True, "pid": 0, "kind": kind, "remote": True, "node_id": selected_node.get("id"), "expires_in": SANDBOX_TEST_TTL_SECONDS}
+            result = {"ok": True, "pid": 0, "kind": kind, "remote": True, "node_id": selected_node.get("id")}
+            if sandbox_test:
+                result["expires_in"] = SANDBOX_TEST_TTL_SECONDS
+            return result
     if sandbox_on:
         if not docker_available():
-            return _start_failure(b, "Sandbox mode requires Docker on the selected node.")
+            return _start_failure(b, "Sandbox hosting requires Docker locally or an authenticated Docker VPS node.")
         plan_key = str((owner or {}).get("plan", "free")).lower()
         runtime_env_file = bot_dir / ".cipher-runtime.env"
         try:
@@ -3589,7 +3597,7 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
     }
     with _runner_lock:
         RUNNING[bid] = info
-        if sandbox_on:
+        if sandbox_test:
             info["sandbox_expires_at"] = time.time() + SANDBOX_TEST_TTL_SECONDS
             info["sandbox_timer"] = threading.Timer(SANDBOX_TEST_TTL_SECONDS, _expire_sandbox_run, args=(bid,))
             info["sandbox_timer"].daemon = True
@@ -3620,7 +3628,7 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
 
     # update doc — clear any prior crash so bot view shows clean state
     b["status"] = "running"
-    if sandbox_on:
+    if sandbox_test:
         b["sandbox_expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=SANDBOX_TEST_TTL_SECONDS)).isoformat()
     else:
         b.pop("sandbox_expires_at", None)
@@ -3629,7 +3637,7 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
     b["last_exit_code"] = None
     save_bot(b)
     result = {"ok": True, "pid": proc.pid, "kind": kind}
-    if sandbox_on:
+    if sandbox_test:
         result["expires_in"] = SANDBOX_TEST_TTL_SECONDS
     return result
 def stop_child(bot_id: str, manual: bool = True) -> Dict[str, Any]:

@@ -7,6 +7,11 @@ from pathlib import Path
 from sandbox_runtime import build_run_command, install_dependencies_command
 
 
+bot_source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+assert 'sandbox_test = sandbox_on and bool(get_setting("sandbox_test_mode", False))' in bot_source
+assert 'Sandbox hosting requires Docker locally or an authenticated Docker VPS node.' in bot_source
+
+
 with tempfile.TemporaryDirectory(prefix="sandbox-runtime-test-") as tmp:
     root = Path(tmp)
     (root / "bot.py").write_text("print('ok')\n", encoding="utf-8")
