@@ -5255,6 +5255,16 @@ _CAPTCHA_FONT_PATHS = (
 def cb_group_verify(call: types.CallbackQuery) -> None:
     uid = call.from_user.id
     chat_id = call.message.chat.id
+    if not _force_join_enabled():
+        ack(call, "Group verification is disabled.")
+        try:
+            bot.delete_message(chat_id, call.message.message_id)
+        except Exception:
+            pass
+        if not require_verified(chat_id, uid):
+            return
+        render_main_menu(chat_id, uid)
+        return
     not_joined = _check_group_membership(uid)
     if not_joined:
         ack(call, "You have not joined all groups yet!")
@@ -5490,7 +5500,7 @@ def cb_root(call: types.CallbackQuery) -> None:
         # Previously this branch ignored group_verify_enabled, so configured
         # groups continued blocking every callback after force-join was turned
         # off and users appeared trapped in a join loop.
-        if bool(get_setting("group_verify_enabled", False)):
+        if _force_join_enabled():
             not_joined = _check_group_membership(uid)
             if not_joined:
                 ack(call, "Join required channels first!")
@@ -16138,7 +16148,7 @@ def _action_gh_file_run(call: types.CallbackQuery, path: str) -> None:
 def render_adm_approval_group(call: types.CallbackQuery) -> None:
     if not is_owner(call.from_user.id):
         ack(call, "Owner only"); return
-    grp_on = bool(get_setting("group_verify_enabled", False))
+    grp_on = _force_join_enabled()
     groups = list(get_setting("required_groups", []) or [])
     rows = "\n".join(
         f"{G['bullet']} {esc(g.get('name','?'))} \u2014 "
@@ -16226,6 +16236,14 @@ _CAPTCHA_FONT_PATHS = (
 REQUIRED_GROUPS: List[Dict[str, Any]] = []
 _GROUP_MEMBERSHIP_CACHE: Dict[int, Tuple[float, Tuple[str, ...]]] = {}
 _GROUP_MEMBERSHIP_CACHE_TTL = 30.0
+def _force_join_enabled() -> bool:
+    """Read the force-join switch safely from old and new settings formats."""
+    value = get_setting("group_verify_enabled", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
 def _load_required_groups() -> None:
     global REQUIRED_GROUPS
     REQUIRED_GROUPS = list(get_setting("required_groups", []) or [])
@@ -16496,7 +16514,7 @@ def require_group_membership(chat_id: int, uid: int) -> bool:
         return True
     if is_admin(uid):
         return True
-    if not bool(get_setting("group_verify_enabled", False)):
+    if not _force_join_enabled():
         return True
     not_joined = _check_group_membership(uid)
     if not not_joined:

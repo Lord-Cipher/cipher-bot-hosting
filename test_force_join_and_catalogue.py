@@ -43,10 +43,22 @@ try:
     bot.get_setting = lambda key, default=None: False if key == "group_verify_enabled" else default
     assert bot.require_group_membership(7, 7) is True
     source = open(bot.__file__, encoding="utf-8").read()
-    assert 'if bool(get_setting("group_verify_enabled", False)):' in source
+    assert "def _force_join_enabled()" in source
+    assert "if _force_join_enabled():" in source
 finally:
     bot.get_setting = original_get_setting
     bot.REQUIRED_GROUPS = original_groups
+
+# Legacy settings files may contain string booleans. They must not leave the
+# gate permanently enabled because bool("false") is True in Python.
+original_get_setting = bot.get_setting
+try:
+    bot.get_setting = lambda key, default=None: "false" if key == "group_verify_enabled" else default
+    assert bot._force_join_enabled() is False
+    bot.get_setting = lambda key, default=None: "true" if key == "group_verify_enabled" else default
+    assert bot._force_join_enabled() is True
+finally:
+    bot.get_setting = original_get_setting
 
 plain = bot._product_description_markup(SimpleNamespace(html_text=""), "> First quoted line\n> Second quoted line\nNormal text")
 assert "<blockquote>First quoted line\nSecond quoted line</blockquote>" in plain
