@@ -22,9 +22,15 @@ try:
     assert bot._check_group_membership(7) == []
     assert bot._check_group_membership(7) == []
     assert len(calls) == 1
+    assert bot._check_group_membership(7, refresh=True) == []
+    assert len(calls) == 2
 
     bot._GROUP_MEMBERSHIP_CACHE.clear()
     bot.bot.get_chat_member = lambda _group_id, _uid: SimpleNamespace(status="restricted", is_member=False)
+    assert bot._check_group_membership(7)
+
+    bot._GROUP_MEMBERSHIP_CACHE.clear()
+    bot.bot.get_chat_member = lambda _group_id, _uid: SimpleNamespace(status="restricted", is_member="false")
     assert bot._check_group_membership(7)
 
     bot._GROUP_MEMBERSHIP_CACHE.clear()

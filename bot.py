@@ -5265,7 +5265,9 @@ def cb_group_verify(call: types.CallbackQuery) -> None:
             return
         render_main_menu(chat_id, uid)
         return
-    not_joined = _check_group_membership(uid)
+    # The user may have joined a channel immediately before pressing Verify.
+    # Do not reuse a previous membership result for this explicit action.
+    not_joined = _check_group_membership(uid, refresh=True)
     if not_joined:
         ack(call, "You have not joined all groups yet!")
         try:
@@ -16412,22 +16414,28 @@ def _verify_state_janitor() -> None:
                     VERIFY_STATES.pop(u, None)
         except Exception as e:
             print(f"[verify] janitor error: {e}", flush=True)
-def _check_group_membership(uid: int) -> List[Dict[str, Any]]:
+def _check_group_membership(uid: int, refresh: bool = False) -> List[Dict[str, Any]]:
     if not REQUIRED_GROUPS:
         return []
     signature = tuple(str(group.get("id", "")) for group in REQUIRED_GROUPS)
     now = time.monotonic()
     with _verify_lock:
         cached = _GROUP_MEMBERSHIP_CACHE.get(uid)
-        if cached and cached[1] == signature and now - cached[0] < _GROUP_MEMBERSHIP_CACHE_TTL:
+        if (not refresh and cached and cached[1] == signature
+                and now - cached[0] < _GROUP_MEMBERSHIP_CACHE_TTL):
             return []
     not_joined = []
     for grp in REQUIRED_GROUPS:
         try:
             member = bot.get_chat_member(grp["id"], uid)
-            status = str(getattr(member, "status", "")).lower()
-            is_member = getattr(member, "is_member", True)
-            if status in ("left", "kicked", "banned") or (status == "restricted" and not is_member):
+            status = str(getattr(member, "status", "")).strip().lower()
+            is_member = getattr(member, "is_member", None)
+            if isinstance(is_member, str):
+                is_member = is_member.strip().lower() in {"1", "true", "yes", "on"}
+            not_a_member = status in ("left", "kicked", "banned")
+            if status == "restricted" and is_member is False:
+                not_a_member = True
+            if not_a_member:
                 not_joined.append(grp)
         except Exception as e:
             # If the bot cannot check membership (e.g. user not in chat or bot lacking rights),
@@ -19296,7 +19304,7 @@ def _render_admin_subroute_extras(call: types.CallbackQuery, data: str) -> None:
     # Approval group callbacks
     if data == "adm_grpv_toggle":
         if not is_owner(uid): ack(call, "Owner only"); return
-        cur = bool(get_setting("group_verify_enabled", False))
+        cur = _force_join_enabled()
         set_setting("group_verify_enabled", not cur)
         _load_required_groups()
         ack(call, f"Group verify: {'ON' if not cur else 'OFF'}")
