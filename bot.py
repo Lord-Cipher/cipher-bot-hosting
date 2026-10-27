@@ -5666,6 +5666,17 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         bot.send_message(call.message.chat.id, "Send the GitHub token for the configured private vault repository. Classic and fine-grained tokens are accepted. It will be validated, encrypted, and never displayed or logged.", protect_content=True)
         ack(call)
         return
+    if data == "adm_vault_repo":
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_vault_repo"}
+        bot.send_message(
+            call.message.chat.id,
+            "Send the vault GitHub repository as <code>owner/repository</code> or a GitHub URL. "
+            "The saved vault token will be checked before the repository is changed.",
+            parse_mode="HTML",
+        )
+        ack(call)
+        return
     if data == "adm_nodes":
         return render_adm_nodes(call)
     if data == "adm_node_wizard":
@@ -11044,6 +11055,28 @@ def on_text(m: types.Message) -> None:
                 detail = str(exc).splitlines()[0][:180] or "Unknown secure-storage error."
                 bot.send_message(m.chat.id, f"{G['no']} Could not save the vault token securely: {sc(detail)}")
             return
+        if flow == "await_vault_repo":
+            USER_STATES.pop(uid, None)
+            repo = _normalize_github_repo(text)
+            if not repo:
+                bot.reply_to(m, f"{G['no']} Send a valid GitHub repository as <code>owner/repository</code>.", parse_mode="HTML")
+                return
+            try:
+                cfg = _vault_config()
+                if not cfg.get("token"):
+                    bot.reply_to(m, f"{G['no']} Set and save the vault token first.")
+                    return
+                ok, error = _validate_vault_token(cfg["token"], repo)
+                if not ok:
+                    bot.reply_to(m, f"{G['no']} {sc(error)}")
+                    return
+                set_setting("vault_repo", repo)
+                audit(uid, "vault_repo_set", repo)
+                bot.reply_to(m, f"{G['ok']} Vault repository changed to <code>{esc(repo)}</code>.", parse_mode="HTML")
+            except Exception as exc:
+                detail = str(exc).splitlines()[0][:180] or "Unknown repository-save error."
+                bot.reply_to(m, f"{G['no']} Could not save the vault repository: {sc(detail)}")
+            return
         if flow in ("await_gh_token", "await_gh_repo"):
             USER_STATES.pop(uid, None)
             if not is_owner(uid):
@@ -15025,7 +15058,8 @@ def _vault_config() -> Dict[str, str]:
     def value(name: str, default: str = "") -> str:
         return (os.getenv(name) or str(file_config.get(name, default) or "")).strip()
 
-    repo = value("CIPHER_VAULT_REPO", "Lord-Cipher/cipher-vault")
+    configured_repo = get_setting("vault_repo", "")
+    repo = value("CIPHER_VAULT_REPO", configured_repo or "Lord-Cipher/cipher-vault")
     repo = re.sub(r"^https?://github\.com/", "", repo, flags=re.IGNORECASE).strip().strip("/")
     if repo.endswith(".git"):
         repo = repo[:-4]
@@ -19908,6 +19942,7 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
            "Encrypted snapshots contain platform state and bot infrastructure." + FOOTER)
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn("Set GitHub Token", callback_data="adm_vault_token", style="primary"),
+           Btn("Change Repository", callback_data="adm_vault_repo", style="primary"),
            Btn("Force Sync to Vault", callback_data="adm_vault_force", style="success"),
            Btn("Vault History", callback_data="adm_vault_history", style="primary"))
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
