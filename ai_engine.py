@@ -7,6 +7,7 @@ answer quality checks, safe diagnostics, and per-model circuit breakers.
 from __future__ import annotations
 
 import json
+import inspect
 import re
 import threading
 import time
@@ -317,6 +318,21 @@ class AIEngine:
                 high = mid - 1
         return shrink(low)
 
+    def _context_for(self, model: str, prompt: str) -> str:
+        """Build context with optional prompt awareness for general chat."""
+        builder = self.context_builder
+        try:
+            parameters = inspect.signature(builder).parameters.values()
+            accepts_prompt = any(
+                parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+                for parameter in parameters
+            ) or len(parameters) >= 2
+        except (TypeError, ValueError):
+            accepts_prompt = False
+        if accepts_prompt:
+            return str(builder(model, prompt) or "")
+        return str(builder(model) or "")
+
     @staticmethod
     def _safe_exception(error: Exception) -> str:
         # Never log exception URLs; requests exceptions may include query strings.
@@ -370,7 +386,7 @@ class AIEngine:
                 self.failure_counts.pop(model, None)
 
         try:
-            prefix = str(self.context_builder(model) or "") + "USER REQUEST:\n"
+            prefix = self._context_for(model, str(prompt or "")) + "USER REQUEST:\n"
             fitted = self.fit_prompt(prefix, str(prompt or ""), route, mode)
             if fitted is None:
                 return ModelResult(model, error="prompt exceeds provider URL limit")

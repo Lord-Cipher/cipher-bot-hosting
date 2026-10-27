@@ -90,6 +90,20 @@ assert fitted is not None and fitted.startswith("SYS CONTEXT\n")
 assert "LATEST-TAIL" in fitted
 assert len(urlencode({"message": fitted})) <= 190
 
+# Prompt-aware context builders let the application keep ordinary questions
+# general while adding product facts only for platform-related requests.
+context_seen = []
+aware_session = FakeSession(lambda *_: FakeResponse(200, {"reply": "A useful answer."}))
+aware_engine = AIEngine(
+    session=aware_session,
+    base_urls=("https://provider.invalid",),
+    routes={"aware": route("aware")},
+    context_builder=lambda model, prompt: context_seen.append((model, prompt)) or "GENERAL CONTEXT\n",
+    enabled=lambda _model: True,
+)
+assert aware_engine.complete("aware", "Explain gravity simply").ok
+assert context_seen == [("aware", "Explain gravity simply")]
+
 # A welcome from the selected operative must continue to the next configured model.
 def fallback_response(url, _params):
     if url.endswith("/primary"):

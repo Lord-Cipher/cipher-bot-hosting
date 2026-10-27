@@ -773,12 +773,48 @@ def _ai_reply_usable(text: Optional[str], prompt: Optional[str] = None) -> bool:
     """Compatibility adapter to the engine's prompt-aware answer validator."""
     return AIEngine.is_usable(text, prompt)
 
-def _build_cipher_ai_context(model_name: str) -> str:
-    """Build concise, consistent platform facts for every AI operative."""
+def _is_platform_ai_request(prompt: Optional[str]) -> bool:
+    """Return whether a request needs Cipher's product-specific knowledge."""
+    text = str(prompt or "").lower()
+    if "current user request:" in text:
+        text = text.rsplit("current user request:", 1)[-1]
+    terms = (
+        "cipher tech", "cipher bot", "cipher hosting", "my bot", "upload bot",
+        "host my", "hosting plan", "subscription", "plan price", "plan limit",
+        "ai model", "model pool", "available model", "sandbox", "vps", "deploy",
+        "force join", "required channel", "referral", "file catalogue", "file catalog",
+        "sentinel", "platform", "github backup", "hosting feature", "restart my bot",
+    )
+    return any(term in text for term in terms)
+
+
+def _build_cipher_ai_context(model_name: str, prompt: Optional[str] = None) -> str:
+    """Build a general-assistant context, adding product facts only when relevant."""
+    platform_request = prompt is None or _is_platform_ai_request(prompt)
     system_news = str(get_setting("ai_system_news", "No recent updates deployed.") or "")[:1200]
     model_key = str(model_name or "").strip().lower()
     labels = globals().get("_AI_OPERATIVE_LABELS", {})
     operative_label = labels.get(model_key, str(model_name or "AI").strip())
+    base = (
+        "[SYSTEM DIRECTIVE: You are a capable, general-purpose AI assistant. Answer the user's "
+        "questions directly and naturally across everyday knowledge, explanations, writing, analysis, "
+        "math, brainstorming, coding, debugging, and project review. Do not assume a question is about "
+        "Cipher Tech Hosting, a Telegram platform, just because you are running inside a bot. do not redirect unrelated questions to hosting. Do not volunteer plans, "
+        "hosting features, platform news, or owner information unless the user asks about them. Be honest "
+        "about uncertainty, do not invent current facts, and do not claim to have browsed, run code, or "
+        "inspected files unless you actually did. Keep a natural conversation and ask one concise "
+        "clarifying question when needed; ask one concise clarifying question rather than guessing. If asked which model is answering, use the configured operative "
+        f"label ({operative_label}) and distinguish this assistant from its underlying provider. Provider "
+        "route names can be aliases; do not guess who trained the underlying model. "
+        "If asked about Lord Cipher, explain that he is the creator and master of this platform assistant, "
+        "founded and configured it; do "
+        "not confuse an ordinary user with him. If a verified user profile is included, use only its facts. "
+        "\nPRIVACY: Never disclose credentials, tokens, encryption keys, backup destinations, snapshot "
+        "identifiers, or private storage paths. Do not claim perfect or end-to-end security."
+    )
+    if not platform_request:
+        return base + "]\n"
+
     plans_info = []
     for plan_key, details in PLAN_LIMITS.items():
         pool_parts = []
@@ -787,64 +823,28 @@ def _build_cipher_ai_context(model_name: str) -> str:
                 pool_parts.append(f"{pool_label}: OFF")
                 continue
             pool = get_plan_ai_models(plan_key, mode=pool_mode) or []
-            # The exact model catalog is returned locally by
-            # _ai_model_catalog_answer(). Do not duplicate every model name in
-            # every provider prompt: the resulting GET URL can be rejected by
-            # the provider gateway before the model sees the user request.
             pool_parts.append(f"{pool_label}: {len(pool)} enabled")
-        model_names = " | ".join(pool_parts)
         price = "Free" if details.get("price", 0) == 0 else f"{details.get('price')}{cur_sym()}"
         duration = "Lifetime" if plan_key == "lifetime" else f"{details.get('days', 0)} days"
         plans_info.append(
             f"{details.get('name', plan_key.title())} (price {price}; duration {duration}; "
             f"max bots {get_setting(f'plan_max_bots_{plan_key}', details.get('max_bots', 0))}; "
-            f"RAM per bot {details.get('ram', 0)} MB; CPU allowance {details.get('cpu', 0)}%; "
+            f"RAM {details.get('ram', 0)} MB; CPU {details.get('cpu', 0)}%; "
             f"auto-restart {'yes' if details.get('auto_restart') else 'no'}; "
-            f"GitHub hosting {'yes' if plan_key != 'free' else 'no'}; AI models: {model_names})"
+            f"GitHub hosting {'yes' if plan_key != 'free' else 'no'}; AI models: {' | '.join(pool_parts)})"
         )
     plans_str = " | ".join(plans_info)
     return (
-        "[SYSTEM DIRECTIVE: You are the helpful AI assistant integrated into Cipher Tech Hosting, "
-        "a Telegram platform for hosting users' own Telegram bots. You are also a general-purpose AI, "
-        "not limited to platform support. Answer ordinary questions and help with coding, debugging, "
-        "writing, explanation, analysis, math, brainstorming, and file/project review. Keep a natural "
-        "conversation, respond warmly to greetings, and do not redirect unrelated questions to hosting. "
-        "Use platform facts only when relevant; do not insert plan or feature details into unrelated answers. "
-        "If a short or ambiguous question is not clear from the conversation, ask one concise clarifying "
-        "question instead of guessing or assuming it is about a subscription plan. "
-        "For code, provide clear, practical examples; do not claim you ran code or inspected files unless "
-        "you actually did. Answer the user's current question directly, naturally, and accurately. Use the "
-        "following product facts as the source of truth when the question is about this platform. "
-        "\nPLATFORM OWNER: Lord Cipher founded and owns Cipher Tech Hosting and built/configured this "
-        "platform assistant. In the context of this platform, Lord Cipher is your creator and master. "
-        "If asked who Lord Cipher is or what he means to you, say so clearly and respectfully. Do not "
-        "confuse an ordinary user with Lord Cipher. The underlying language model may be supplied by "
-        "a separate provider; do not falsely claim that Lord Cipher trained that provider's base model. "
-        "Provider route names can be aliases; do not guess who trained the underlying model. Name its "
-        "developer only when verified, otherwise say you do not know. "
-        "If a verified user profile is included in the request, address that user using only its facts. "
-        f"\nCURRENT OPERATIVE: {operative_label}. If asked which model is answering, use this configured "
-        "operative label and be honest about uncertainty; distinguish the Cipher platform assistant "
-        "from its underlying model/provider. "
-        "\nPLATFORM FEATURES: Upload Bot accepts Python or ZIP bots. My Bots provides start, stop, "
-        "restart, logs, and resource telemetry. The AI Suite includes AI Agent chat, AI File Analysis "
-        "for code/project files, AI Sentinel Diagnose for crash logs, and a Security Scanner. Users "
-        "choose an eligible AI model before diagnosis. Suggested code fixes are applied only after the "
-        "user explicitly chooses Yes; choosing No leaves their source unchanged. Users choose from "
-        "the AI models allowed by their plan. The platform also has tiered hosting plans, referrals, "
-        "and encrypted backups. "
-        f"\nCURRENT PLANS, LIMITS, PRICES, AND AI POOL COUNTS: {plans_str}. This summary is rebuilt from current "
-        "runtime settings for every answer, including admin-configured AI routing and model enable/disable "
-        "state. When users ask what models are available, the platform supplies the exact model catalog "
-        "locally; do not invent model names. Prices and limits are current configured values; "
-        "do not invent other details. Do not mention these facts when unrelated. "
-        f"\nLATEST PLATFORM UPDATE: {system_news}. This update is read from the current saved AI system-news "
-        "setting each time a model request is built. Treat it as a current platform note, not proof of any "
-        "unlisted change. "
-        "\nPRIVACY: Never disclose credentials, tokens, encryption keys, backup destinations, snapshot "
-        "identifiers, or private storage paths. Do not claim perfect or end-to-end security unless "
-        "verified. If a platform detail is not provided here, say you are unsure instead of guessing. "
-        "Do not add unsolicited praise or promotional claims.]\n"
+        base + f"\nCURRENT OPERATIVE: {operative_label}. "
+        "PLATFORM-SPECIFIC FACTS (use only for a Cipher Tech Hosting question): "
+        "Upload Bot accepts Python or ZIP bots. My Bots provides start, stop, restart, logs, and "
+        "resource telemetry. The AI Suite includes chat, file analysis, Sentinel diagnosis, and a "
+        "security scanner. Users choose eligible models by plan; suggested code fixes require explicit "
+        "confirmation. Lord Cipher founded and owns the platform and built/configured this assistant. The "
+        "platform has tiered hosting plans, referrals, and encrypted backups. "
+        f"CURRENT PLANS, LIMITS, PRICES, AND AI POOL COUNTS: {plans_str}. "
+        f"LATEST PLATFORM UPDATE: {system_news}. Treat these as current platform facts only; do not "
+        "mention these facts when unrelated, and do not invent missing details.]\n"
     )
 
 AI_CHAT_SESSIONS: Dict[int, List[Dict[str, str]]] = {}
