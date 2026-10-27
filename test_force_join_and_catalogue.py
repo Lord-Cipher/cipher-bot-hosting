@@ -34,6 +34,12 @@ try:
     assert bot._check_group_membership(7)
 
     bot._GROUP_MEMBERSHIP_CACHE.clear()
+    bot.bot.get_chat_member = lambda _group_id, _uid: (_ for _ in ()).throw(
+        RuntimeError("Bad Request: administrator rights are required")
+    )
+    assert bot._check_group_membership(7) == []
+
+    bot._GROUP_MEMBERSHIP_CACHE.clear()
     bot.bot.get_chat_member = lambda _group_id, _uid: SimpleNamespace(status="administrator")
     assert bot._check_group_membership(7) == []
 finally:

@@ -16438,14 +16438,21 @@ def _check_group_membership(uid: int, refresh: bool = False) -> List[Dict[str, A
             if not_a_member:
                 not_joined.append(grp)
         except Exception as e:
-            # If the bot cannot check membership (e.g. user not in chat or bot lacking rights),
-            # treat them as not joined so they are prompted correctly.
+            # Only a definitive user-membership error should block the user.
+            # Telegram also raises here when the bot is not an administrator,
+            # the channel is inaccessible, or the API is temporarily failing.
+            # Treating those configuration/API errors as "not joined" creates
+            # an endless Verify Membership loop for users who already joined.
             s = str(e).lower()
-            if "chat not found" in s or "user not found" in s or "member list is inaccessible" in s or "not a member" in s:
+            if ("user not found" in s or "not a member" in s
+                    or "user is not a member" in s):
                 not_joined.append(grp)
             else:
-                # For safety under strict force-join enforcement, prompt join on unknown lookup errors
-                not_joined.append(grp)
+                print(
+                    f"[group_verify] membership lookup unavailable for {grp.get('id')}: {e}",
+                    flush=True,
+                )
+                continue
     with _verify_lock:
         if not not_joined:
             _GROUP_MEMBERSHIP_CACHE[uid] = (now, signature)
