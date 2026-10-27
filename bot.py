@@ -14984,44 +14984,44 @@ def _vault_runtime_key() -> str:
         return ""
 
 
-    def _ensure_vault_runtime_key() -> str:
-      """Create a persistent encrypted vault key when the panel manages the vault."""
-      current = _vault_runtime_key()
-      if current:
-          return current
-      raw_key = Fernet.generate_key().decode("ascii")
-      key_id, key, cipher = encrypt_file(raw_key.encode("ascii"))
-      KEYRING.store(key_id, key, {"purpose": "cipher_vault_key"})
-      set_setting("vault_key_key_id", key_id)
-      set_setting("vault_key_cipher", base64.b64encode(cipher).decode("ascii"))
-      return raw_key
+def _ensure_vault_runtime_key() -> str:
+  """Create a persistent encrypted vault key when the panel manages the vault."""
+  current = _vault_runtime_key()
+  if current:
+      return current
+  raw_key = Fernet.generate_key().decode("ascii")
+  key_id, key, cipher = encrypt_file(raw_key.encode("ascii"))
+  KEYRING.store(key_id, key, {"purpose": "cipher_vault_key"})
+  set_setting("vault_key_key_id", key_id)
+  set_setting("vault_key_cipher", base64.b64encode(cipher).decode("ascii"))
+  return raw_key
 
 
-    def _validate_vault_token(token: str, repo: str) -> Tuple[bool, str]:
-      """Validate token access without logging or returning the token."""
-      if not token or not re.fullmatch(r"[^/\s]+/[^/\s]+", repo or ""):
-          return False, "Vault repository must use owner/name format."
-      try:
-          response = requests.get(
-              f"https://api.github.com/repos/{repo}",
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "Authorization": f"Bearer {token}",
-                  "X-GitHub-Api-Version": "2022-11-28",
-                  "User-Agent": "cipher-bot-hosting",
-              }, timeout=15,
-          )
-      except Exception:
-          return False, "GitHub validation request failed."
-      if response.status_code == 200:
-          return True, ""
-      if response.status_code in {401, 403, 404}:
-          if response.status_code == 401:
-              return False, "GitHub rejected the vault token (HTTP 401). Check that the token is active and copied completely."
-          if response.status_code == 403:
-              return False, "Vault token is valid but lacks repository access (HTTP 403). Grant Contents read/write access."
-          return False, "Vault repository was not found or is not accessible to this token (HTTP 404)."
-      return False, "GitHub validation returned an unexpected response."
+def _validate_vault_token(token: str, repo: str) -> Tuple[bool, str]:
+  """Validate token access without logging or returning the token."""
+  if not token or not re.fullmatch(r"[^/\s]+/[^/\s]+", repo or ""):
+      return False, "Vault repository must use owner/name format."
+  try:
+      response = requests.get(
+          f"https://api.github.com/repos/{repo}",
+          headers={
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "cipher-bot-hosting",
+          }, timeout=15,
+      )
+  except Exception:
+      return False, "GitHub validation request failed."
+  if response.status_code == 200:
+      return True, ""
+  if response.status_code in {401, 403, 404}:
+      if response.status_code == 401:
+          return False, "GitHub rejected the vault token (HTTP 401). Check that the token is active and copied completely."
+      if response.status_code == 403:
+          return False, "Vault token is valid but lacks repository access (HTTP 403). Grant Contents read/write access."
+      return False, "Vault repository was not found or is not accessible to this token (HTTP 404)."
+  return False, "GitHub validation returned an unexpected response."
 
 
 def _store_vault_runtime_token(token: str) -> None:
