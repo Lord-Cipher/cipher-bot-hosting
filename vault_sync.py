@@ -76,6 +76,13 @@ def _github(session: requests.Session, method: str, url: str, **kwargs: Any) -> 
             response.raise_for_status()
             return response
         except (requests.RequestException, KeyError, ValueError) as exc:
+            if isinstance(exc, requests.HTTPError) and exc.response is not None:
+                try:
+                    detail = exc.response.json().get("message")
+                except Exception:
+                    detail = None
+                if detail:
+                    exc = requests.HTTPError(f"{exc} ({detail})", response=exc.response)
             last_exc = exc
             if attempt < 2:
                 time.sleep(2 ** attempt)

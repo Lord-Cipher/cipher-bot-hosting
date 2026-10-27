@@ -15014,6 +15014,12 @@ def _validate_vault_token(token: str, repo: str) -> Tuple[bool, str]:
   except Exception:
       return False, "GitHub validation request failed."
   if response.status_code == 200:
+      try:
+          permissions = response.json().get("permissions") or {}
+      except Exception:
+          permissions = {}
+      if permissions.get("push") is False:
+          return False, "Vault token can read this repository but cannot write to it. Grant Contents: Read and write for this exact repository."
       return True, ""
   if response.status_code in {401, 403, 404}:
       if response.status_code == 401:
@@ -15090,6 +15096,9 @@ def cipher_vault_sync_now() -> Dict[str, Any]:
         return {"ok": False, "error": "Vault sync already running."}
     try:
         cfg = _vault_config()
+        access_ok, access_error = _validate_vault_token(cfg["token"], cfg["repo"])
+        if not access_ok:
+            return {"ok": False, "error": access_error}
         result = sync_vault(BASE_DIR, cfg["token"], cfg["repo"], cfg["branch"], cfg["key"])
         if result.get("ok"):
             _VAULT_LAST_SYNC = time.time()
