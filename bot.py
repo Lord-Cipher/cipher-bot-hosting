@@ -810,7 +810,8 @@ def _build_cipher_ai_context(model_name: str, prompt: Optional[str] = None) -> s
         "founded and configured it; do "
         "not confuse an ordinary user with him. If a verified user profile is included, use only its facts. "
         "\nPRIVACY: Never disclose credentials, tokens, encryption keys, backup destinations, snapshot "
-        "identifiers, or private storage paths. Do not claim perfect or end-to-end security."
+        "identifiers, or private storage paths. Do not claim perfect or end-to-end security. "
+        "Do not add unsolicited praise or promotional claims."
     )
     if not platform_request:
         return base + "]\n"
@@ -1746,8 +1747,7 @@ class KeyRing:
             # memory only — write a tiny encrypted local cache so a panel
             # restart does not lose access. The cache is encrypted with a
             # key derived from BOT_TOKEN+OWNER_ID, never plain text.
-            self._cache_local(key_id, key)
-            return True
+            return self._cache_local(key_id, key)
 
         gh_path = f"keys/{key_id}.json"
         sha: Optional[str] = None
@@ -1766,9 +1766,11 @@ class KeyRing:
         r2 = self._gh_request("PUT", f"contents/{gh_path}", json=put_body)
         ok = r2 is not None and r2.status_code in (200, 201)
         if not ok:
-            # last-ditch local encrypted cache so we don't lose access
-            self._cache_local(key_id, key)
-        return ok
+            # The regular GitHub backup token may intentionally be scoped to
+            # another repository. Keep key storage reliable by falling back
+            # to the encrypted local cache; never write plaintext key data.
+            return self._cache_local(key_id, key)
+        return True
 
     def fetch(self, key_id: str) -> Optional[bytes]:
         with self._lock:
@@ -1823,14 +1825,15 @@ class KeyRing:
         digest = hashlib.sha256(material).digest()
         return base64.urlsafe_b64encode(digest)
 
-    def _cache_local(self, key_id: str, key: bytes) -> None:
+    def _cache_local(self, key_id: str, key: bytes) -> bool:
         try:
             d = DIRS["data"] / "keycache"
             d.mkdir(parents=True, exist_ok=True)
             f = Fernet(self._local_master())
             (d / f"{key_id}.bin").write_bytes(f.encrypt(key))
+            return True
         except Exception:
-            pass
+            return False
 
     def _uncache_local(self, key_id: str) -> Optional[bytes]:
         p = DIRS["data"] / "keycache" / f"{key_id}.bin"
@@ -11037,8 +11040,9 @@ def on_text(m: types.Message) -> None:
                 _store_vault_runtime_token(token)
                 audit(uid, "vault_token_set", "validated and encrypted")
                 bot.send_message(m.chat.id, f"{G['ok']} GitHub vault token validated and saved securely.")
-            except Exception:
-                bot.send_message(m.chat.id, f"{G['no']} Could not save the vault token securely.")
+            except Exception as exc:
+                detail = str(exc).splitlines()[0][:180] or "Unknown secure-storage error."
+                bot.send_message(m.chat.id, f"{G['no']} Could not save the vault token securely: {sc(detail)}")
             return
         if flow in ("await_gh_token", "await_gh_repo"):
             USER_STATES.pop(uid, None)
@@ -14987,16 +14991,19 @@ def _vault_runtime_key() -> str:
       return False, "GitHub validation returned an unexpected response."
 
 
-    def _store_vault_runtime_token(token: str) -> None:
+def _store_vault_runtime_token(token: str) -> None:
       """Encrypt and atomically replace the panel-configured vault token."""
       token = token.strip()
       if not token:
           raise ValueError("Token cannot be empty.")
       key_id, key, cipher = encrypt_file(token.encode("utf-8"))
-      KEYRING.store(key_id, key, {"purpose": "cipher_vault_token"})
+      if not KEYRING.store(key_id, key, {"purpose": "cipher_vault_token"}):
+          raise RuntimeError("Encrypted key storage is unavailable. Check the bot data directory permissions.")
       old_key_id = str(get_setting("vault_token_key_id", "") or "")
       set_setting("vault_token_key_id", key_id)
       set_setting("vault_token_cipher", base64.b64encode(cipher).decode("ascii"))
+      if _vault_runtime_token() != token:
+          raise RuntimeError("Vault token verification failed after encrypted storage.")
       if old_key_id and old_key_id != key_id:
           try:
               KEYRING.wipe(old_key_id)
