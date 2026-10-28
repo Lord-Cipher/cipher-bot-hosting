@@ -1110,6 +1110,12 @@ def _save_plan_override(key: str, field: str, value: Any) -> None:
     overrides[key][field] = value
     set_setting("plan_overrides", overrides)
     PLAN_LIMITS[key][field] = value  # live-apply immediately, no restart needed
+def _parse_plan_price(value: Any) -> float:
+    """Parse a plan price in currency units, allowing values such as 2.5."""
+    price = float(str(value).strip())
+    if not math.isfinite(price) or price < 0:
+        raise ValueError("Price must be a non-negative number, for example 2.5.")
+    return round(price, 2)
 def _plan_ram_mb(plan_key: str) -> int:
     """Return the live per-bot RAM allowance for a plan in megabytes."""
     plan = PLAN_LIMITS.get(plan_key, PLAN_LIMITS["free"])
@@ -11941,9 +11947,9 @@ def on_text(m: types.Message) -> None:
             val = text.strip()
             if pfield == "price":
                 try:
-                    val_store: Any = max(0, int(val))
+                    val_store: Any = _parse_plan_price(val)
                 except ValueError:
-                    bot.reply_to(m, f"{G['no']} {sc('Price must be a whole number')}." ); return
+                    bot.reply_to(m, f"{G['no']} {sc('Price must be a non-negative number, for example 2.5.')}" ); return
             elif pfield == "ram":
                 try:
                     val_store = min(262144, max(16, int(val)))
