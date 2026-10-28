@@ -44,9 +44,14 @@ try:
         'if data == "adm_monitor_system":',
         'def _is_running(info: Dict[str, Any]) -> bool:',
         "memory_total_display =",
-        "C{i + 1} {core_bar(max(0.0, float(v)))}",
+        "C{i + 1}: {core_bar(max(0.0, float(v)))}",
+        "_resource_metric('System CPU'",
+        "_resource_metric('Panel RAM'",
+        "_resource_metric('CPU Usage'",
     ):
         assert marker in source, marker
+    assert "'<code>' + system_bar + '</code>'" not in source
+    assert "'<code>' + cpu_bar + '</code>'" not in source
 finally:
     bot.RUNNING = old_running
     bot.LIVE_UI_SESSIONS = old_sessions

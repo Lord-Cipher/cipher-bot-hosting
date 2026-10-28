@@ -7706,17 +7706,21 @@ def render_adm_sys_health(call: types.CallbackQuery) -> None:
             except Exception:
                 pass
     up_secs = int(time.time() - START_TIME) if "START_TIME" in globals() else 0
+    host_mem_total = psutil.virtual_memory().total if psutil else 1
+    panel_ram_pct = (rss / host_mem_total) * 100 if host_mem_total > 0 else 0
+    child_ram_pct = (child_rss / host_mem_total) * 100 if host_mem_total > 0 else 0
+    disk_pct = (disk_used / disk_total * 100) if disk_total > 0 else 0
     cap = (
         f"<b>🖥️ {sc('System Health')}</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Uptime',          fmt_dur(up_secs * 1000))}\n"
-        f"{bullet('Panel RAM (RSS)', fmt_bytes(int(rss)))}\n"
+        f"{_resource_metric('Panel RAM (RSS)', _colored_progress_bar(panel_ram_pct, width=12, decimals=1), fmt_bytes(int(rss)))}\n"
         f"{bullet('Panel RAM (VMS)', fmt_bytes(int(vms)))}\n"
-        f"{bullet('Panel CPU',       f'{cpu_p:.1f}%')}\n"
+        f"{_resource_metric('Panel CPU', _colored_progress_bar(cpu_p, width=12, decimals=1), f'{cpu_p:.1f}%')}\n"
         f"{bullet('Child bots',      f'{child_n} running')}\n"
-        f"{bullet('Child RAM total', fmt_bytes(child_rss))}\n"
+        f"{_resource_metric('Child RAM total', _colored_progress_bar(child_ram_pct, width=12, decimals=1), fmt_bytes(child_rss))}\n"
         f"{bullet('Disk total',      fmt_bytes(disk_total))}\n"
-        f"{bullet('Disk used',       fmt_bytes(disk_used))}\n"
+        f"{_resource_metric('Disk used', _colored_progress_bar(disk_pct, width=12, decimals=1), fmt_bytes(disk_used))}\n"
         f"{bullet('Disk free',       fmt_bytes(disk_free))}\n"
         f"{bullet('PID',             os.getpid())}\n"
         f"{G['div']}{FOOTER}"
@@ -9554,34 +9558,34 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
     mem_total = psutil.virtual_memory().total if psutil else 1
     mem_pct = (panel_ram / mem_total) * 100 if mem_total > 0 else 0
     ram_bar = lbar(mem_pct)
-    panel_ram_display = f"{fmt_bytes(panel_ram)} <code>{ram_bar}</code>"
     peak_load_display = f"{cpu_peak:.1f}%  |  {load1:.2f} / {load5:.2f} / {load15:.2f}"
-    core_display = f"{core_count}  <code>{esc(core_line)}</code>"
-    child_cpu_display = f"<code>{lbar(total_child_cpu)}</code> {total_child_cpu:.1f}%"
     child_ram_pct = (total_child_ram / mem_total) * 100 if mem_total > 0 else 0
-    child_ram_display = f"{fmt_bytes(total_child_ram)} <code>{lbar(child_ram_pct)}</code>"
+    core_rows = "\n".join(
+        f"  C{i + 1}: {core_bar(max(0.0, float(v)))}"
+        for i, v in enumerate(per_core[:8])
+    ) or "  No core data"
 
     cap = (
         f"<b>📡 {sc('Live Monitor')} (5s Live Feed)</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Panel Uptime',   fmt_dur(up_s * 1000))}\n"
-        f"{bullet('Panel RAM',      panel_ram_display)}\n"
+        f"{_resource_metric('Panel RAM', ram_bar, fmt_bytes(panel_ram))}\n"
         f"<b>⚡ {sc('CPU Telemetry')}</b>  <i>{sc('sample')} {sample_age}s ago</i>\n"
-        f"{bullet('System CPU',     '<code>' + system_bar + '</code>')}\n"
-        f"{bullet('Panel CPU',      '<code>' + cpu_bar + '</code>')}\n"
+        f"{_resource_metric('System CPU', system_bar, f'{system_cpu:.1f}%')}\n"
+        f"{_resource_metric('Panel CPU', cpu_bar, f'{panel_cpu:.1f}%')}\n"
         f"{bullet('CPU Trend',      '<code>' + spark(CPU_HISTORY) + '</code>')}\n"
         f"{bullet('Peak / Load',    peak_load_display)}\n"
-        f"{bullet('Cores',           core_display)}\n"
+        f"• <b>Cores</b> — {core_count}\n{core_rows}\n"
         f"{G['div']}\n"
         f"{bullet('▶ Running Bots',  len(running_bots))}\n"
         f"{bullet('💥 Crashed',      len(crashed_bots))}\n"
-        f"{bullet('Child RAM Total', child_ram_display)}\n"
-        f"{bullet('Child CPU Total', child_cpu_display)}\n"
+        f"{_resource_metric('Child RAM Total', lbar(child_ram_pct), fmt_bytes(total_child_ram))}\n"
+        f"{_resource_metric('Child CPU Total', lbar(total_child_cpu), f'{total_child_cpu:.1f}%')}\n"
         f"{G['div']}\n"
         f"<b>{sc('Active Instances')} (5s Auto-Sync):</b>\n"
         + ("\n".join(
-            f"  {G['bullet']} <code>{bid[:8]}</code> "
-            f"{esc(info.get('name','?')[:14])} | <code>{lbar(TELEMETRY.get(bid, {}).get('cpu', 0.0))}</code>"
+            f"  {G['bullet']} <b>{esc(info.get('name','?')[:20])}</b> <code>{bid[:8]}</code>\n"
+            f"    CPU: {lbar(TELEMETRY.get(bid, {}).get('cpu', 0.0))}"
             for bid, info in running_bots[:6]
         ) if running_bots else f"<i>{sc('No active instances')}</i>")
         + f"\n{G['div']}{FOOTER}"
@@ -9662,13 +9666,12 @@ def render_adm_monitor_system(call: types.CallbackQuery) -> None:
 
     def core_bar(pct: float) -> str:
         return _colored_progress_bar(pct, width=6, decimals=0)
-    core_rows = "  ".join(
-        f"C{i + 1} {core_bar(max(0.0, float(v)))}"
+    core_rows = "\n".join(
+        f"  C{i + 1}: {core_bar(max(0.0, float(v)))}"
         for i, v in enumerate(per_core[:12])
-    ) or "No core data"
+    ) or "  No core data"
     core_count = len(per_core) or int(SYS_TELEMETRY.get("cpu_count", 0) or 0)
     frequency_display = f"{float(SYS_TELEMETRY.get('cpu_freq', 0.0) or 0.0):.0f} MHz"
-    core_rows_display = f"{core_count}  <code>{esc(core_rows)}</code>"
     load_display = f"{load1:.2f} / {load5:.2f} / {load15:.2f}"
     trend = "▁▂▃▄▅▆▇█"
     trend_line = "".join(trend[min(7, max(0, int(float(v) / 12.5)))] for v in list(CPU_HISTORY)[-24:]) or "—"
@@ -9676,20 +9679,20 @@ def render_adm_monitor_system(call: types.CallbackQuery) -> None:
     if psutil:
         try:
             vm = psutil.virtual_memory()
-            memory_total_display = f"{fmt_bytes(vm.used)} / {fmt_bytes(vm.total)}  {bar(mem_pct)}"
+            memory_total_display = f"{fmt_bytes(vm.used)} / {fmt_bytes(vm.total)}"
         except Exception:
             pass
     cap = (
         f"<b>🖥️ {sc('System Monitor')}</b>\n"
         f"{G['div_eq']}\n"
         f"<b>⚡ {sc('CPU Intelligence')}</b>\n"
-        f"{bullet('System CPU', bar(cpu_pct))}\n"
-        f"{bullet('Panel CPU',  bar(panel_cpu))}\n"
+        f"{_resource_metric('System CPU', bar(cpu_pct), f'{cpu_pct:.1f}%')}\n"
+        f"{_resource_metric('Panel CPU', bar(panel_cpu), f'{panel_cpu:.1f}%')}\n"
         f"{bullet('Trend',      f'<code>{trend_line}</code>  peak {cpu_peak:.1f}%')}\n"
-        f"{bullet('Cores',      core_rows_display)}\n"
+        f"• <b>Cores</b> — {core_count}\n{core_rows}\n"
         f"{bullet('Frequency',  frequency_display)}\n"
-        f"{bullet('Memory Used', memory_total_display)}\n"
-        f"{bullet('Disk',      bar(disk_pct))}\n"
+        f"{_resource_metric('Memory Used', bar(mem_pct), memory_total_display)}\n"
+        f"{_resource_metric('Disk Used', bar(disk_pct), f'{disk_pct:.1f}%')}\n"
         f"{bullet('Load 1m / 5m / 15m', load_display)}\n"
         f"{bullet('Threads',   threading.active_count())}\n"
         f"{bullet('PID',       os.getpid())}\n"
@@ -10215,13 +10218,15 @@ def render_adm_bc_resources(call: types.CallbackQuery, bid: str) -> None:
                     disk += (Path(root) / f).stat().st_size
                 except OSError:
                     pass
+    host_mem_total = psutil.virtual_memory().total if psutil else 1
+    ram_pct = (rss / host_mem_total) * 100 if host_mem_total > 0 else 0
     cap = (
         f"<b>📊 {sc('Resource Usage')}: {esc(b.get('name','?'))}</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Status',   '▶ Running' if is_running else '⏹ Stopped')}\n"
-        f"{bullet('RAM RSS',  fmt_bytes(rss))}\n"
+        f"{_resource_metric('RAM RSS', _colored_progress_bar(ram_pct, width=12, decimals=1), fmt_bytes(rss))}\n"
         f"{bullet('RAM VMS',  fmt_bytes(vms))}\n"
-        f"{bullet('CPU %',    f'{cpu:.1f}%')}\n"
+        f"{_resource_metric('CPU', _colored_progress_bar(cpu, width=12, decimals=1), f'{cpu:.1f}%')}\n"
         f"{bullet('Threads',  num_threads)}\n"
         f"{bullet('Open FDs', num_fds)}\n"
         f"{bullet('Disk',     fmt_bytes(disk))}\n"
@@ -15345,6 +15350,11 @@ def _resource_usage_bar(pct: float, width: int = 10) -> str:
     """Render resource use relative to the configured limit."""
     return _colored_progress_bar(pct, width=width, decimals=0)
 
+def _resource_metric(label: str, bar: str, value: str = "") -> str:
+    """Render a resource label followed by a readable standalone bar line."""
+    suffix = f" — {value}" if value else ""
+    return f"• <b>{esc(label)}</b>{suffix}\n  {bar}"
+
 def _user_can_host_gh(u: Dict[str, Any]) -> bool:
     plan = u.get("plan", "free")
     return plan not in ("free",)
@@ -16960,13 +16970,15 @@ def _format_quota_forecast(uid: int) -> str:
     storage_projection = None
     if storage.get("ready"):
         storage_projection = max(0.0, float(storage["current"]) + max(0.0, float(storage["per_day"])) * 30)
+    cpu_pct = (current["cpu_pct"] / current["cpu_limit_pct"] * 100) if current["cpu_limit_pct"] > 0 else 0
+    ram_pct = (current["ram_bytes"] / current["ram_limit_bytes"] * 100) if current["ram_limit_bytes"] > 0 else 0
     lines = [
         f"<b>📈 Quota forecast</b>",
         f"{G['div_eq']}",
         f"<b>Bot slots</b>: {current['bot_count']} / {current['bot_limit']} (fixed quota; no trend projection)",
-        f"<b>CPU</b>: {current['cpu_pct']:.1f}% / {current['cpu_limit_pct']:.0f}% of one-core allowance across available slots",
+        _resource_metric("CPU", _resource_usage_bar(cpu_pct, width=12), f"{current['cpu_pct']:.1f}% / {current['cpu_limit_pct']:.0f}% of allowance"),
         f"  {esc(forecast_label(cpu_days, cpu))} · {esc(change_per_day(cpu, '% of one core'))}",
-        f"<b>RAM</b>: {current['ram_bytes'] / (1024*1024):.1f} / {current['ram_limit_bytes'] / (1024*1024):.0f} MB across available slots",
+        _resource_metric("RAM", _resource_usage_bar(ram_pct, width=12), f"{current['ram_bytes'] / (1024*1024):.1f} / {current['ram_limit_bytes'] / (1024*1024):.0f} MB"),
         f"  {esc(forecast_label(ram_days, ram))} · {esc(change_per_day(ram, 'MB'))}",
     ]
     if storage_projection is not None:
@@ -17676,6 +17688,8 @@ def render_bot_view(
     mem_mb = st['memBytes'] / (1024 * 1024)
     mem_pct = (mem_mb / plan_ram) * 100 if plan_ram > 0 else 0
     mem_bar = _resource_usage_bar(mem_pct)
+    cpu_value = f"{float(st['cpuPct']):.1f}% / {_format_cpu_limit(plan_cpu)}"
+    mem_value = f"{fmt_bytes(st['memBytes'])} / {int(plan_ram)} MB"
 
     cap = (
         f"<b>{G['diamond']} {esc(b['name'])}</b>\n"
@@ -17683,8 +17697,8 @@ def render_bot_view(
         f"{bullet('Status', status_lbl)}\n"
         f"{bullet('Kind', st['kind'] or '—')}\n"
         f"{bullet('Uptime', fmt_dur(st['uptimeMs']))}\n"
-        f"{bullet('CPU Usage', '<code>' + cpu_bar + '</code> / ' + _format_cpu_limit(plan_cpu))}\n"
-        f"{bullet('RAM Usage', fmt_bytes(st['memBytes']) + ' <code>' + mem_bar + '</code> / ' + str(int(plan_ram)) + ' MB')}\n"
+        f"{_resource_metric('CPU Usage', cpu_bar, cpu_value)}\n"
+        f"{_resource_metric('RAM Usage', mem_bar, mem_value)}\n"
         f"<i>🟩 &lt;50%  🟨 50–79%  🟥 80–100% of plan limit</i>\n"
         f"{bullet('Storage', fmt_bytes(st['sizeBytes']))}\n"
         f"{bullet('Created', fmt_ts(b.get('created')))}"
