@@ -103,8 +103,10 @@ class VaultSnapshotMaterializeTests(unittest.TestCase):
         finally:
             shutil.rmtree(stage)
 
-    def test_successful_overwrite_replaces_base_and_keeps_backup(self) -> None:
+    def test_successful_overwrite_replaces_state_and_keeps_application_root(self) -> None:
         (self.base / "old.txt").write_bytes(b"old data")
+        (self.base / "storage").mkdir()
+        (self.base / "storage" / "old-state.txt").write_bytes(b"old state")
         encrypted = self._archive(
             [
                 ("file", "storage/new.txt", b"new data"),
@@ -117,9 +119,9 @@ class VaultSnapshotMaterializeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual((self.base / "storage/new.txt").read_bytes(), b"new data")
         self.assertEqual((self.base / "sandbox/run.py").read_bytes(), b"run()\n")
-        self.assertFalse((self.base / "old.txt").exists())
+        self.assertEqual((self.base / "old.txt").read_bytes(), b"old data")
         backup = Path(result["restoredFrom"])
-        self.assertEqual((backup / "old.txt").read_bytes(), b"old data")
+        self.assertEqual((backup / "storage/old-state.txt").read_bytes(), b"old state")
         self.assertEqual(self._stage_names(), set())
 
     def test_parent_traversal_is_rejected_without_changes(self) -> None:

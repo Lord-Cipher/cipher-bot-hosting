@@ -383,19 +383,46 @@ def materialize_snapshot(base_dir: str | Path, encrypted_archive: bytes, key: st
         finally:
             os.close(root_fd)
         if overwrite:
+            # The application root may be a container mount and cannot be
+            # renamed across devices. Snapshots contain only restorable state,
+            # so preserve the application code and replace storage/sandbox
+            # independently using copy operations.
             backup = base.with_name(base.name + f".pre-restore-{int(time.time())}")
-            moved_base = False
-            if base.exists():
-                base.rename(backup)
-                moved_base = True
+            backup.mkdir(parents=True, exist_ok=False)
+            replaced = []
             try:
-                stage.rename(base)
+                for dirname in REQUIRED_STATE_DIRS:
+                    target = base / dirname
+                    saved = backup / dirname
+                    staged = stage / dirname
+                    if target.exists() or target.is_symlink():
+                        shutil.copytree(target, saved, symlinks=True)
+                    if target.exists() or target.is_symlink():
+                        if target.is_dir() and not target.is_symlink():
+                            shutil.rmtree(target)
+                        else:
+                            target.unlink()
+                    if staged.exists():
+                        shutil.copytree(staged, target, symlinks=False)
+                    else:
+                        target.mkdir(parents=True, exist_ok=True)
+                    replaced.append(dirname)
+                shutil.rmtree(stage, ignore_errors=True)
+                stage = None
+                return {"ok": True, "restoredFrom": str(backup)}
             except Exception:
-                if moved_base and not base.exists() and backup.exists():
-                    backup.rename(base)
+                for dirname in reversed(replaced):
+                    target = base / dirname
+                    saved = backup / dirname
+                    if target.exists() or target.is_symlink():
+                        if target.is_dir() and not target.is_symlink():
+                            shutil.rmtree(target)
+                        else:
+                            target.unlink()
+                    if saved.exists():
+                        shutil.copytree(saved, target, symlinks=True)
+                shutil.rmtree(backup, ignore_errors=True)
                 raise
-            stage = None
-            return {"ok": True, "restoredFrom": str(backup)}
         staged_at = str(stage)
         stage = None
         return {"ok": True, "stagedAt": staged_at}
