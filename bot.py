@@ -9541,7 +9541,10 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
     system_bar = lbar(system_cpu)
     cpu_peak = max(CPU_HISTORY or [system_cpu])
     per_core = list(SYS_TELEMETRY.get("cpu_per_core") or [])
-    core_line = "  ".join(f"C{i + 1}:{max(0.0, float(v)):.0f}%" for i, v in enumerate(per_core[:8])) or "No core data"
+    core_line = "  ".join(
+        f"C{i + 1} {lbar(max(0.0, float(v)))} {max(0.0, float(v)):.0f}%"
+        for i, v in enumerate(per_core[:8])
+    ) or "No core data"
     core_count = len(per_core) or int(SYS_TELEMETRY.get("cpu_count", 0) or 0)
     load1, load5, load15 = SYS_TELEMETRY.get("load", (0.0, 0.0, 0.0))
     sample_age = max(0, int(time.time() - float(SYS_TELEMETRY.get("sample_ts", 0.0) or time.time())))
@@ -9551,7 +9554,9 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
     panel_ram_display = f"{fmt_bytes(panel_ram)} <code>{ram_bar}</code>"
     peak_load_display = f"{cpu_peak:.1f}%  |  {load1:.2f} / {load5:.2f} / {load15:.2f}"
     core_display = f"{core_count}  <code>{esc(core_line)}</code>"
-    child_cpu_display = f"{total_child_cpu:.1f}%"
+    child_cpu_display = f"<code>{lbar(total_child_cpu)}</code> {total_child_cpu:.1f}%"
+    child_ram_pct = (total_child_ram / mem_total) * 100 if mem_total > 0 else 0
+    child_ram_display = f"{fmt_bytes(total_child_ram)} <code>{lbar(child_ram_pct)}</code>"
 
     cap = (
         f"<b>📡 {sc('Live Monitor')} (5s Live Feed)</b>\n"
@@ -9567,7 +9572,7 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
         f"{G['div']}\n"
         f"{bullet('▶ Running Bots',  len(running_bots))}\n"
         f"{bullet('💥 Crashed',      len(crashed_bots))}\n"
-        f"{bullet('Child RAM Total', fmt_bytes(total_child_ram))}\n"
+        f"{bullet('Child RAM Total', child_ram_display)}\n"
         f"{bullet('Child CPU Total', child_cpu_display)}\n"
         f"{G['div']}\n"
         f"<b>{sc('Active Instances')} (5s Auto-Sync):</b>\n"
@@ -9651,13 +9656,23 @@ def render_adm_monitor_system(call: types.CallbackQuery) -> None:
         pass
     def bar(pct: float) -> str:
         return _colored_progress_bar(pct, width=20, decimals=1)
-    core_rows = "  ".join(f"C{i + 1}:{float(v):.0f}%" for i, v in enumerate(per_core[:12])) or "No core data"
+    core_rows = "  ".join(
+        f"C{i + 1} {bar(max(0.0, float(v)))} {max(0.0, float(v)):.0f}%"
+        for i, v in enumerate(per_core[:12])
+    ) or "No core data"
     core_count = len(per_core) or int(SYS_TELEMETRY.get("cpu_count", 0) or 0)
     frequency_display = f"{float(SYS_TELEMETRY.get('cpu_freq', 0.0) or 0.0):.0f} MHz"
     core_rows_display = f"{core_count}  <code>{esc(core_rows)}</code>"
     load_display = f"{load1:.2f} / {load5:.2f} / {load15:.2f}"
     trend = "▁▂▃▄▅▆▇█"
     trend_line = "".join(trend[min(7, max(0, int(float(v) / 12.5)))] for v in list(CPU_HISTORY)[-24:]) or "—"
+    memory_total_display = "—"
+    if psutil:
+        try:
+            vm = psutil.virtual_memory()
+            memory_total_display = f"{fmt_bytes(vm.used)} / {fmt_bytes(vm.total)}  {bar(mem_pct)}"
+        except Exception:
+            pass
     cap = (
         f"<b>🖥️ {sc('System Monitor')}</b>\n"
         f"{G['div_eq']}\n"
@@ -9667,7 +9682,7 @@ def render_adm_monitor_system(call: types.CallbackQuery) -> None:
         f"{bullet('Trend',      f'<code>{trend_line}</code>  peak {cpu_peak:.1f}%')}\n"
         f"{bullet('Cores',      core_rows_display)}\n"
         f"{bullet('Frequency',  frequency_display)}\n"
-        f"{bullet('Memory',    bar(mem_pct))}\n"
+        f"{bullet('Memory Used', memory_total_display)}\n"
         f"{bullet('Disk',      bar(disk_pct))}\n"
         f"{bullet('Load 1m / 5m / 15m', load_display)}\n"
         f"{bullet('Threads',   threading.active_count())}\n"
