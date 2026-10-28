@@ -7713,16 +7713,16 @@ def render_adm_sys_health(call: types.CallbackQuery) -> None:
     cap = (
         f"<b>🖥️ {sc('System Health')}</b>\n"
         f"{G['div_eq']}\n"
-        f"{bullet('Uptime',          fmt_dur(up_secs * 1000))}\n"
+        f"{_plain_metric('Uptime', fmt_dur(up_secs * 1000))}\n"
         f"{_resource_metric('Panel RAM (RSS)', _colored_progress_bar(panel_ram_pct, width=12, decimals=1), fmt_bytes(int(rss)))}\n"
-        f"{bullet('Panel RAM (VMS)', fmt_bytes(int(vms)))}\n"
+        f"{_plain_metric('Panel RAM (VMS)', fmt_bytes(int(vms)))}\n"
         f"{_resource_metric('Panel CPU', _colored_progress_bar(cpu_p, width=12, decimals=1), f'{cpu_p:.1f}%')}\n"
-        f"{bullet('Child bots',      f'{child_n} running')}\n"
+        f"{_plain_metric('Child bots', f'{child_n} running')}\n"
         f"{_resource_metric('Child RAM total', _colored_progress_bar(child_ram_pct, width=12, decimals=1), fmt_bytes(child_rss))}\n"
-        f"{bullet('Disk total',      fmt_bytes(disk_total))}\n"
+        f"{_plain_metric('Disk total', fmt_bytes(disk_total))}\n"
         f"{_resource_metric('Disk used', _colored_progress_bar(disk_pct, width=12, decimals=1), fmt_bytes(disk_used))}\n"
-        f"{bullet('Disk free',       fmt_bytes(disk_free))}\n"
-        f"{bullet('PID',             os.getpid())}\n"
+        f"{_plain_metric('Disk free', fmt_bytes(disk_free))}\n"
+        f"{_plain_metric('PID', os.getpid())}\n"
         f"{G['div']}{FOOTER}"
     )
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, _adm_back("adm_sys_tools"), call=call)
@@ -9568,23 +9568,23 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
     cap = (
         f"<b>📡 {sc('Live Monitor')} (5s Live Feed)</b>\n"
         f"{G['div_eq']}\n"
-        f"{bullet('Panel Uptime',   fmt_dur(up_s * 1000))}\n"
+        f"{_plain_metric('Panel Uptime', fmt_dur(up_s * 1000))}\n"
         f"{_resource_metric('Panel RAM', ram_bar, fmt_bytes(panel_ram))}\n"
         f"<b>⚡ {sc('CPU Telemetry')}</b>  <i>{sc('sample')} {sample_age}s ago</i>\n"
         f"{_resource_metric('System CPU', system_bar, f'{system_cpu:.1f}%')}\n"
         f"{_resource_metric('Panel CPU', cpu_bar, f'{panel_cpu:.1f}%')}\n"
-        f"{bullet('CPU Trend',      '<code>' + spark(CPU_HISTORY) + '</code>')}\n"
-        f"{bullet('Peak / Load',    peak_load_display)}\n"
+        f"{_plain_metric('CPU Trend', spark(CPU_HISTORY))}\n"
+        f"{_plain_metric('Peak / Load', peak_load_display)}\n"
         f"• <b>Cores</b> — {core_count}\n{core_rows}\n"
         f"{G['div']}\n"
-        f"{bullet('▶ Running Bots',  len(running_bots))}\n"
-        f"{bullet('💥 Crashed',      len(crashed_bots))}\n"
+        f"{_plain_metric('▶ Running Bots', len(running_bots))}\n"
+        f"{_plain_metric('💥 Crashed', len(crashed_bots))}\n"
         f"{_resource_metric('Child RAM Total', lbar(child_ram_pct), fmt_bytes(total_child_ram))}\n"
         f"{_resource_metric('Child CPU Total', lbar(total_child_cpu), f'{total_child_cpu:.1f}%')}\n"
         f"{G['div']}\n"
         f"<b>{sc('Active Instances')} (5s Auto-Sync):</b>\n"
         + ("\n".join(
-            f"  {G['bullet']} <b>{esc(info.get('name','?')[:20])}</b> <code>{bid[:8]}</code>\n"
+            f"  {G['bullet']} <b>{esc(info.get('name','?')[:20])}</b> {bid[:8]}\n"
             f"    CPU: {lbar(TELEMETRY.get(bid, {}).get('cpu', 0.0))}"
             for bid, info in running_bots[:6]
         ) if running_bots else f"<i>{sc('No active instances')}</i>")
@@ -9630,7 +9630,7 @@ def render_adm_monitor_bots(call: types.CallbackQuery) -> None:
                     pass
         status = "▶ running" if is_running else f"⏹ exit={rc}"
         rows.append(
-            f"{G['bullet']} <b>{esc(name)}</b> <code>{bid[:8]}</code>\n"
+            f"{G['bullet']} <b>{esc(name)}</b> {bid[:8]}\n"
             f"   {status} | PID {pid} | {fmt_bytes(rss)} | CPU {cpu:.1f}%"
         )
     cap = (
@@ -9688,14 +9688,14 @@ def render_adm_monitor_system(call: types.CallbackQuery) -> None:
         f"<b>⚡ {sc('CPU Intelligence')}</b>\n"
         f"{_resource_metric('System CPU', bar(cpu_pct), f'{cpu_pct:.1f}%')}\n"
         f"{_resource_metric('Panel CPU', bar(panel_cpu), f'{panel_cpu:.1f}%')}\n"
-        f"{bullet('Trend',      f'<code>{trend_line}</code>  peak {cpu_peak:.1f}%')}\n"
+        f"{_plain_metric('Trend', f'{trend_line}  peak {cpu_peak:.1f}%')}\n"
         f"• <b>Cores</b> — {core_count}\n{core_rows}\n"
-        f"{bullet('Frequency',  frequency_display)}\n"
+        f"{_plain_metric('Frequency', frequency_display)}\n"
         f"{_resource_metric('Memory Used', bar(mem_pct), memory_total_display)}\n"
         f"{_resource_metric('Disk Used', bar(disk_pct), f'{disk_pct:.1f}%')}\n"
-        f"{bullet('Load 1m / 5m / 15m', load_display)}\n"
-        f"{bullet('Threads',   threading.active_count())}\n"
-        f"{bullet('PID',       os.getpid())}\n"
+        f"{_plain_metric('Load 1m / 5m / 15m', load_display)}\n"
+        f"{_plain_metric('Threads', threading.active_count())}\n"
+        f"{_plain_metric('PID', os.getpid())}\n"
         f"{G['div']}{FOOTER}"
     )
     show_menu(call.message.chat.id, PHOTOS.get("monitor", PHOTOS["stats"]), cap,
@@ -15354,6 +15354,10 @@ def _resource_metric(label: str, bar: str, value: str = "") -> str:
     """Render a resource label followed by a readable standalone bar line."""
     suffix = f" — {value}" if value else ""
     return f"• <b>{esc(label)}</b>{suffix}\n  {bar}"
+
+def _plain_metric(label: str, value: Any) -> str:
+    """Render a resource-panel value without the generic bullet code wrapper."""
+    return f"• <b>{esc(label)}</b> — {value}"
 
 def _user_can_host_gh(u: Dict[str, Any]) -> bool:
     plan = u.get("plan", "free")

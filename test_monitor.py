@@ -34,6 +34,8 @@ try:
     bot.render_adm_live_monitor(Call())
     assert rendered, "monitor should render even with remote-only entries"
     assert bot.LIVE_UI_SESSIONS[9001]["type"] == "adm_monitor"
+    live_text = rendered[-1][0][2]
+    assert "<code>" not in live_text and "</code>" not in live_text
 
     # The source must keep refresh callbacks out of the generic admin fallback,
     # which previously made the refresh button appear to close the screen.
