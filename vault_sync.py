@@ -207,6 +207,42 @@ def sync_vault(base_dir: str | Path, token: str, repo: str, branch: str = "main"
         VAULT_SYNC_LOCK.release()
 
 
+def download_latest_snapshot(token: str, repo: str, branch: str = "main") -> tuple[bytes, Dict[str, Any]]:
+    """Download and verify the latest encrypted snapshot and its manifest."""
+    if not token:
+        raise ValueError("Vault token is required.")
+    api = _api_base(repo)
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"token {token.strip()}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "cipher-bot-hosting",
+    })
+
+    def content(path: str) -> bytes:
+        branch_ref = quote(str(branch or "main").strip() or "main", safe="")
+        response = _github(session, "GET", f"{api}/contents/{quote(path, safe='/')}?ref={branch_ref}")
+        payload = response.json()
+        if payload.get("encoding") != "base64" or not payload.get("content"):
+            raise ValueError(f"Vault file is not a base64 GitHub content response: {path}")
+        return base64.b64decode("".join(str(payload["content"]).split()))
+
+    latest = json.loads(content("LATEST.json").decode("utf-8"))
+    manifest_path = str(latest.get("manifest") or "")
+    if not manifest_path.startswith("snapshots/") or not manifest_path.endswith("/manifest.json"):
+        raise ValueError("Vault latest pointer is invalid.")
+    manifest = json.loads(content(manifest_path).decode("utf-8"))
+    archive_path = str(manifest.get("archive") or "")
+    if not archive_path.startswith("snapshots/") or not archive_path.endswith(".enc"):
+        raise ValueError("Vault manifest archive path is invalid.")
+    encrypted = content(archive_path)
+    expected = str(manifest.get("archiveSha256") or "")
+    if not expected or hashlib.sha256(encrypted).hexdigest() != expected:
+        raise ValueError("Vault archive integrity check failed.")
+    return encrypted, manifest
+
+
 def _restore_safe_support_available() -> bool:
     """Return whether the platform can safely create archive paths below a dir fd."""
     return bool(

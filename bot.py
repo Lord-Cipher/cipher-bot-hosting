@@ -37,7 +37,7 @@ from telebot.apihelper import ApiTelegramException
 import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
-from vault_sync import sync_vault
+from vault_sync import download_latest_snapshot, materialize_snapshot, sync_vault
 from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
 from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle
@@ -4365,7 +4365,11 @@ def gh_restore_now(overwrite: bool = True) -> Dict[str, Any]:
     """Restore the full tarball snapshot; when none is stored (repo only
     has the per-file layout) fall back to restoring users + bot files."""
     if not gh_enabled():
-        return {"ok": False, "error": "Not configured."}
+        vault_result = cipher_vault_restore_now(overwrite=overwrite)
+        if vault_result.get("ok"):
+            vault_result["source"] = "cipher-vault"
+            return vault_result
+        return {"ok": False, "error": f"Not configured. Cipher Vault: {vault_result.get('error', 'not configured')}"}
     try:
         buf = _gh_download_full_state()
     except Exception as exc:
@@ -4377,8 +4381,13 @@ def gh_restore_now(overwrite: bool = True) -> Dict[str, Any]:
         if res.get("ok"):
             res["sizeBytes"] = res.get("sizeBytes", 0)
             return res
+        vault_result = cipher_vault_restore_now(overwrite=overwrite)
+        if vault_result.get("ok"):
+            vault_result["source"] = "cipher-vault"
+            return vault_result
         return {"ok": False, "error": f"No backup found in {GH['repo']}@{GH['branch']} "
-                                        f"({res.get('error', 'no users database')})."}
+                                        f"({res.get('error', 'no users database')}). Cipher Vault: "
+                                        f"{vault_result.get('error', 'not configured')}"}
     tmp = Path(tempfile.gettempdir()) / f"panel-restore-{int(time.time())}.tar.gz"
     tmp.write_bytes(buf)
     try:
@@ -15090,6 +15099,20 @@ def cipher_vault_status() -> Dict[str, Any]:
         "last": history[-1] if history else None,
         "history": history[-10:],
     }
+def cipher_vault_restore_now(overwrite: bool = True) -> Dict[str, Any]:
+    """Restore the latest authenticated Cipher Vault snapshot safely."""
+    try:
+        cfg = _vault_config()
+        if not cfg["token"] or not cfg["key"] or not cfg["repo"]:
+            return {"ok": False, "error": "Cipher Vault is not configured."}
+        encrypted, manifest = download_latest_snapshot(cfg["token"], cfg["repo"], cfg["branch"])
+        result = materialize_snapshot(BASE_DIR, encrypted, cfg["key"], overwrite=overwrite)
+        if result.get("ok"):
+            result.update({"snapshotId": manifest.get("snapshotId"), "fileCount": manifest.get("fileCount", 0),
+                           "sizeBytes": manifest.get("sizeBytes", 0)})
+        return result
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 def cipher_vault_sync_now() -> Dict[str, Any]:
     global _VAULT_LAST_SYNC
     if not _VAULT_LOCK.acquire(blocking=False):
