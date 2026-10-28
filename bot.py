@@ -9527,9 +9527,12 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
             pass
     up_s = int(time.time() - START_TIME) if "START_TIME" in globals() else 0
     
-    # Progress bar helper for live monitor (Elite 20-block precision)
+    # Compact bars keep the Telegram dashboard readable on narrow screens.
     def lbar(pct: float) -> str:
-        return _colored_progress_bar(pct, width=20, decimals=1)
+        return _colored_progress_bar(pct, width=12, decimals=1)
+
+    def core_bar(pct: float) -> str:
+        return _colored_progress_bar(pct, width=6, decimals=0)
 
     def spark(values: Any) -> str:
         levels = "▁▂▃▄▅▆▇█"
@@ -9542,7 +9545,7 @@ def render_adm_live_monitor(call: types.CallbackQuery) -> None:
     cpu_peak = max(CPU_HISTORY or [system_cpu])
     per_core = list(SYS_TELEMETRY.get("cpu_per_core") or [])
     core_line = "  ".join(
-        f"C{i + 1} {lbar(max(0.0, float(v)))} {max(0.0, float(v)):.0f}%"
+        f"C{i + 1} {core_bar(max(0.0, float(v)))}"
         for i, v in enumerate(per_core[:8])
     ) or "No core data"
     core_count = len(per_core) or int(SYS_TELEMETRY.get("cpu_count", 0) or 0)
@@ -9655,9 +9658,12 @@ def render_adm_monitor_system(call: types.CallbackQuery) -> None:
     except Exception:
         pass
     def bar(pct: float) -> str:
-        return _colored_progress_bar(pct, width=20, decimals=1)
+        return _colored_progress_bar(pct, width=12, decimals=1)
+
+    def core_bar(pct: float) -> str:
+        return _colored_progress_bar(pct, width=6, decimals=0)
     core_rows = "  ".join(
-        f"C{i + 1} {bar(max(0.0, float(v)))} {max(0.0, float(v)):.0f}%"
+        f"C{i + 1} {core_bar(max(0.0, float(v)))}"
         for i, v in enumerate(per_core[:12])
     ) or "No core data"
     core_count = len(per_core) or int(SYS_TELEMETRY.get("cpu_count", 0) or 0)

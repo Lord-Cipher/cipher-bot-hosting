@@ -44,7 +44,7 @@ try:
         'if data == "adm_monitor_system":',
         'def _is_running(info: Dict[str, Any]) -> bool:',
         "memory_total_display =",
-        "C{i + 1} {bar(max(0.0, float(v)))}",
+        "C{i + 1} {core_bar(max(0.0, float(v)))}",
     ):
         assert marker in source, marker
 finally:
