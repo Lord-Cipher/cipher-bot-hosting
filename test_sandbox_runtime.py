@@ -10,9 +10,12 @@ from sandbox_runtime import build_run_command, install_dependencies_command
 
 bot_source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
 assert 'sandbox_test = sandbox_on and bool(get_setting("sandbox_test_mode", False))' in bot_source
-assert 'Sandbox hosting requires Docker locally or an authenticated Docker VPS node.' in bot_source
+assert 'This host has no Docker. Native hosting is limited to owner/approved bots' in bot_source
 assert 'capabilities") or {}).get("docker") is True' in bot_source
 assert 'if requested_node or not docker_available():' in bot_source
+assert 'Native hosting is limited to owner/approved bots' in bot_source
+assert 'native_host_mode = True' in bot_source
+assert 'providers = ["...", "python", "node"]' in Path(__file__).with_name("nixpacks.toml").read_text(encoding="utf-8")
 
 old_which = sandbox_runtime.shutil.which
 old_run = sandbox_runtime.subprocess.run

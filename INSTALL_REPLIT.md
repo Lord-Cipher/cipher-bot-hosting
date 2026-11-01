@@ -6,4 +6,10 @@ The keyring and panel state must survive restarts. Keep the project workspace pe
 
 Use one running deployment for a polling bot. After the first deployment starts, configure the vault token and run the first sync. The automatically generated key is then reused for later syncs and restores on that persistent deployment. Set `CIPHER_VAULT_KEY` only when importing an existing encrypted vault whose original key is available.
 
+Replit can provide Node.js through its native environment/Nix configuration.
+When Docker is unavailable, owner-owned or administrator-approved Node.js bots
+may run directly with that host runtime. This mode is not an isolation
+boundary, so unapproved user code remains blocked unless Docker Sandbox or a
+remote worker is available.
+
 See the [Replit App Storage documentation](https://docs.replit.com/features/data-and-storage/object-storage) for persistent object storage options.

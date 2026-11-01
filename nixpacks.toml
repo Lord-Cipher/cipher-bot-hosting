@@ -1,0 +1,9 @@
+# The control plane is Python, but approved hosted bots may run natively on
+# Railway when Docker and a remote Sandbox worker are unavailable.
+providers = ["...", "python", "node"]
+
+[phases.setup]
+nixPkgs = ["...", "nodejs"]
+
+[variables]
+NODE_ENV = "production"

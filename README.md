@@ -110,6 +110,13 @@ install dependencies with `npm ci` when a lockfile is present, otherwise
 packages in an isolated dependency volume, so npm does not need to be
 installed on the control-panel host.
 
+When Docker is unavailable, the panel can run an owner-owned or explicitly
+approved bot directly with the host's Python/Node runtime. This is the mode for
+Railway, Render, and Replit. It is not an isolation boundary: untrusted bots
+remain blocked unless a Docker Sandbox or authenticated remote worker is
+available. Railway builds include both Python and Node.js through
+`nixpacks.toml`; Render and Replit should use their native runtimes.
+
 WhatsApp clients need outbound network access. Keep the global Sandbox network
 setting and the individual bot's **Sandbox Network** switch enabled only for
 bots that need it. The container filesystem remains read-only, but

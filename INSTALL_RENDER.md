@@ -6,4 +6,11 @@ Render services use an ephemeral filesystem by default. Attach a paid Render per
 
 Keep one service instance when using a disk-backed bot. After attaching the disk, deploy the service and configure the vault token. The first successful vault sync creates the first automatically managed snapshot. Set `CIPHER_VAULT_KEY` only when importing an existing encrypted vault whose original key is available.
 
+Render's native runtimes include Node.js and npm. With Sandbox enabled but no
+Docker daemon or remote worker available, Cipher Bot Hosting can run
+owner-owned or administrator-approved Node.js bots directly in the Render
+service. This is host-native execution rather than a security sandbox; users'
+unapproved code remains blocked unless Docker Sandbox or a remote worker is
+configured.
+
 See the [Render persistent disk documentation](https://render.com/docs/disks) for disk setup and limitations.

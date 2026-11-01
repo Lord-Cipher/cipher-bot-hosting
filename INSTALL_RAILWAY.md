@@ -32,6 +32,13 @@ In your Railway project settings, configure the following environment variables:
 4. Add the required environment variables in the Railway Variables tab.
 5. Railway will automatically build and start the application using `python3 bot.py`.
 
+The repository includes `nixpacks.toml`, which asks Railway/Nixpacks to provide
+both Python and Node.js. Therefore approved Node.js bots can run directly on
+Railway even though the Railway service does not expose a Docker daemon to the
+Python control process. This host-native fallback is intentionally limited to
+owner-owned or administrator-approved bots; untrusted user code still requires
+Docker Sandbox or a configured remote worker.
+
 ### Cipher Vault key management
 
 When a Cipher Vault token is configured through the panel, the bot generates

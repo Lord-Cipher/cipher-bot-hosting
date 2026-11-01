@@ -3545,6 +3545,7 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
         b["admin_trusted"] = True
         save_bot(b)
     selected_node = None
+    native_host_mode = False
     if sandbox_on:
         allow_network = _sandbox_network_allowed(b)
         nodes = _nodes_load()
@@ -3600,22 +3601,31 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
                 return result
     if sandbox_on:
         if not docker_available():
-            return _start_failure(b, "Sandbox hosting requires Docker locally or an authenticated Docker VPS node.")
-        plan_key = str((owner or {}).get("plan", "free")).lower()
-        runtime_env_file = bot_dir / ".cipher-runtime.env"
-        try:
-            runtime_env_file.write_text("".join(f"{k}={str(v).replace(chr(10), '')}\n" for k, v in extra_env.items() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k))), encoding="utf-8")
-            try: runtime_env_file.chmod(0o600)
-            except OSError: pass
-        except Exception as exc:
-            return _start_failure(b, f"sandbox environment setup failed: {exc}")
-        dep_cmd = install_dependencies_command(bot_dir, plan_key, runtime=kind)
-        dep = subprocess.run(dep_cmd, cwd=str(bot_dir), capture_output=True, text=True, timeout=900)
-        log.extend((dep.stdout or "").splitlines()[-20:])
-        log.extend((dep.stderr or "").splitlines()[-20:])
-        if dep.returncode != 0:
-            return _start_failure(b, "Sandbox dependency installation failed.")
-        cmd = build_run_command(bid, bot_dir, entry, plan_key, network=allow_network, runtime=kind, env_file=runtime_env_file)
+            # Railway, Render, and Replit commonly provide a native runtime
+            # but do not expose a Docker daemon. Only a clean/approved bot may
+            # use that fallback because it runs beside the control plane.
+            if not trusted:
+                return _start_failure(b, "This host has no Docker. Native hosting is limited to owner/approved bots; approve this bot or attach a Sandbox worker.")
+            native_host_mode = True
+        if native_host_mode:
+            b["preflight"] = {"verdict": "NATIVE_HOST", "reason": "Docker unavailable; running approved bot with the host runtime.", "checked": ts_iso()}
+            save_bot(b)
+        else:
+            plan_key = str((owner or {}).get("plan", "free")).lower()
+            runtime_env_file = bot_dir / ".cipher-runtime.env"
+            try:
+                runtime_env_file.write_text("".join(f"{k}={str(v).replace(chr(10), '')}\n" for k, v in extra_env.items() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k))), encoding="utf-8")
+                try: runtime_env_file.chmod(0o600)
+                except OSError: pass
+            except Exception as exc:
+                return _start_failure(b, f"sandbox environment setup failed: {exc}")
+            dep_cmd = install_dependencies_command(bot_dir, plan_key, runtime=kind)
+            dep = subprocess.run(dep_cmd, cwd=str(bot_dir), capture_output=True, text=True, timeout=900)
+            log.extend((dep.stdout or "").splitlines()[-20:])
+            log.extend((dep.stderr or "").splitlines()[-20:])
+            if dep.returncode != 0:
+                return _start_failure(b, "Sandbox dependency installation failed.")
+            cmd = build_run_command(bid, bot_dir, entry, plan_key, network=allow_network, runtime=kind, env_file=runtime_env_file)
     elif not trusted:
         return _start_failure(b, "Untrusted bots cannot run with Sandbox Mode OFF.")
     else:
