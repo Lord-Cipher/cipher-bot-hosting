@@ -17680,7 +17680,7 @@ def render_bot_view(
         status_lbl = "\u23f9 Stopped"
     src_info = ""
     if b.get("source") in ("github", "github_browser"):
-        src_info = f"\n{bullet('Source', '🐙 GitHub')}\n{bullet('Repo', esc((b.get('gh_repo','?'))[:40]))}"
+        src_info = f"\n{_plain_metric('Source', '🐙 GitHub')}\n{_plain_metric('Repo', esc((b.get('gh_repo','?'))[:40]))}"
 
     # Resource meters show consumption relative to this user's configured plan
     # limits, rather than percent of total host CPU/RAM capacity.
@@ -17698,14 +17698,14 @@ def render_bot_view(
     cap = (
         f"<b>{G['diamond']} {esc(b['name'])}</b>\n"
         f"{G['div_eq']}\n"
-        f"{bullet('Status', status_lbl)}\n"
-        f"{bullet('Kind', st['kind'] or '—')}\n"
-        f"{bullet('Uptime', fmt_dur(st['uptimeMs']))}\n"
+        f"{_plain_metric('Status', esc(status_lbl))}\n"
+        f"{_plain_metric('Kind', esc(st['kind'] or '—'))}\n"
+        f"{_plain_metric('Uptime', fmt_dur(st['uptimeMs']))}\n"
         f"{_resource_metric('CPU Usage', cpu_bar, cpu_value)}\n"
         f"{_resource_metric('RAM Usage', mem_bar, mem_value)}\n"
         f"<i>🟩 &lt;50%  🟨 50–79%  🟥 80–100% of plan limit</i>\n"
-        f"{bullet('Storage', fmt_bytes(st['sizeBytes']))}\n"
-        f"{bullet('Created', fmt_ts(b.get('created')))}"
+        f"{_plain_metric('Storage', fmt_bytes(st['sizeBytes']))}\n"
+        f"{_plain_metric('Created', fmt_ts(b.get('created')))}"
         f"{src_info}"
         f"{err_block}\n"
         f"{G['div']}{FOOTER}"
@@ -17713,7 +17713,7 @@ def render_bot_view(
     is_premium = owner_doc.get("plan", "free") != "free" and user_plan_active(owner_doc)
     tun = TUNNELS.get(bot_id) if "TUNNELS" in globals() else None
     if tun and tun.get("proc") and tun["proc"].poll() is None and tun.get("url"):
-        cap = cap[:-len(FOOTER)] + f"\n{bullet('Public URL', tun['url'])}" + FOOTER
+        cap = cap[:-len(FOOTER)] + f"\n{_plain_metric('Public URL', esc(tun['url']))}" + FOOTER
     actions_kb = bot_actions_kb(bot_id, st["running"], premium=is_premium)
     if isinstance(b.get("ai_sentinel_backup"), dict):
         actions_kb.add(Btn("↩️ Roll back Sentinel fix", callback_data=f"bot_rollbackfix_{bot_id}", style="danger"))
