@@ -116,9 +116,11 @@ bots that need it. The container filesystem remains read-only, but
 `/app/.cipher-runtime-data` is a dedicated writable persistent directory for
 WhatsApp authentication/session files. Configure libraries such as Baileys or
 `whatsapp-web.js` to store their auth state there; do not write credentials to
-the source tree. On a remote VPS worker this directory persists with the bot's
-worker workspace, so do not periodically delete `/tmp/cipher-bots` if sessions
-must survive restarts.
+the source tree. The directory survives a container restart, but the current
+remote worker workspace is under `/tmp/cipher-bots` and is removed on a fresh
+deployment or a host cleanup/reboot. For long-lived WhatsApp sessions, attach
+a persistent worker volume and move the worker workspace there before using
+production accounts; otherwise expect to scan a new QR code after cleanup.
 
 ## Update
 
