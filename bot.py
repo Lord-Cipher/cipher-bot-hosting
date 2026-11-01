@@ -17023,8 +17023,9 @@ def render_profile(call: types.CallbackQuery) -> None:
         f"{bullet('Referrals', u.get('ref_count', 0))}\n"
         f"{G['div']}{FOOTER}"
     )
-    kb = back_main_kb()
+    kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(Btn("📈 Quota Forecast", callback_data="quota_forecast", style="primary"))
+    kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("profile", PHOTOS["main"]), cap, kb, call=call)
 def _referral_redeem(uid: int, mode: str, quantity: int = 1) -> Tuple[bool, str]:
     """Redeem referral credits for one or more configured entitlements."""
