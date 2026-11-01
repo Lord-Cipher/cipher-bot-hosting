@@ -147,17 +147,27 @@ def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: st
         "User-Agent": "cipher-bot-hosting",
     })
     api = _api_base(repo)
-    branch_ref = quote(str(branch or "main").strip() or "main", safe="")
+    branch_name = str(branch or "main").strip() or "main"
+    branch_ref = quote(branch_name, safe="")
+    branch_name_ref = f"refs/heads/{branch_name}"
     # Blob creation is idempotent (same content -> same SHA), so the whole
     # publish sequence can safely be retried if the branch moves between the
     # ref read and the ref update (409/422 non-fast-forward).
     last_error: Optional[str] = None
     for attempt in range(3):
         try:
-            ref = _github(session, "GET", f"{api}/git/ref/heads/{branch_ref}").json()
-            parent_sha = ref["object"]["sha"]
-            parent_commit = _github(session, "GET", f"{api}/git/commits/{parent_sha}").json()
-            base_tree = parent_commit["tree"]["sha"]
+            parent_sha: Optional[str] = None
+            base_tree: Optional[str] = None
+            try:
+                ref = _github(session, "GET", f"{api}/git/ref/heads/{branch_ref}").json()
+                parent_sha = ref["object"]["sha"]
+                parent_commit = _github(session, "GET", f"{api}/git/commits/{parent_sha}").json()
+                base_tree = parent_commit["tree"]["sha"]
+            except requests.HTTPError as exc:
+                if getattr(exc.response, "status_code", None) != 404:
+                    raise
+                # An empty repository has no branch/ref yet. The first sync
+                # creates its complete tree and initial commit below.
 
             def blob(data: bytes) -> str:
                 return _github(session, "POST", f"{api}/git/blobs", json={
@@ -170,19 +180,29 @@ def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: st
             manifest_sha = blob(manifest_bytes)
             latest_bytes = (json.dumps({"snapshotId": snapshot_id, "manifest": f"snapshots/{snapshot_id}/manifest.json"}, indent=2) + "\n").encode()
             latest_sha = blob(latest_bytes)
-            tree = _github(session, "POST", f"{api}/git/trees", json={
-                "base_tree": base_tree,
+            tree_payload: Dict[str, Any] = {
                 "tree": [
                     {"path": f"snapshots/{snapshot_id}/platform.tar.gz.enc", "mode": "100644", "type": "blob", "sha": archive_sha},
                     {"path": f"snapshots/{snapshot_id}/manifest.json", "mode": "100644", "type": "blob", "sha": manifest_sha},
                     {"path": "LATEST.json", "mode": "100644", "type": "blob", "sha": latest_sha},
                 ],
-            }).json()["sha"]
-            commit = _github(session, "POST", f"{api}/git/commits", json={
-                "message": f"vault: snapshot {snapshot_id}", "tree": tree, "parents": [parent_sha]
-            }).json()["sha"]
-            # The sole ref update is the atomic publication point.
-            _github(session, "PATCH", f"{api}/git/refs/heads/{branch_ref}", json={"sha": commit, "force": False})
+            }
+            if base_tree:
+                tree_payload["base_tree"] = base_tree
+            tree = _github(session, "POST", f"{api}/git/trees", json=tree_payload).json()["sha"]
+            commit_payload: Dict[str, Any] = {
+                "message": f"vault: snapshot {snapshot_id}", "tree": tree,
+            }
+            if parent_sha:
+                commit_payload["parents"] = [parent_sha]
+            commit = _github(session, "POST", f"{api}/git/commits", json=commit_payload).json()["sha"]
+            # The sole ref update is the atomic publication point. Empty
+            # repositories need the create-ref endpoint because no branch
+            # exists yet; established repositories update the existing ref.
+            if parent_sha:
+                _github(session, "PATCH", f"{api}/git/refs/heads/{branch_ref}", json={"sha": commit, "force": False})
+            else:
+                _github(session, "POST", f"{api}/git/refs", json={"ref": branch_name_ref, "sha": commit})
             return {"ok": True, "snapshotId": snapshot_id, "commit": commit, "manifest": manifest}
         except requests.HTTPError as exc:
             status = getattr(exc.response, "status_code", None)

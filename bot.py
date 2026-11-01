@@ -20025,7 +20025,7 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn("Set GitHub Token", callback_data="adm_vault_token", style="primary"),
            Btn("Change Repository", callback_data="adm_vault_repo", style="primary"),
-           Btn("Force Sync to Vault", callback_data="adm_vault_force", style="success"),
+           Btn("Initialize / Sync Vault", callback_data="adm_vault_force", style="success"),
            Btn("Vault History", callback_data="adm_vault_history", style="primary"))
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("security", PHOTOS["admin"]), cap, kb, call=call)
