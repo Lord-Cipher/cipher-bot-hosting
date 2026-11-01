@@ -15032,7 +15032,8 @@ def _ensure_vault_runtime_key() -> str:
       return current
   raw_key = Fernet.generate_key().decode("ascii")
   key_id, key, cipher = encrypt_file(raw_key.encode("ascii"))
-  KEYRING.store(key_id, key, {"purpose": "cipher_vault_key"})
+  if not KEYRING.store(key_id, key, {"purpose": "cipher_vault_key"}):
+      raise RuntimeError("Automatic Cipher Vault key could not be persisted. Attach persistent storage and retry.")
   set_setting("vault_key_key_id", key_id)
   set_setting("vault_key_cipher", base64.b64encode(cipher).decode("ascii"))
   return raw_key
@@ -15127,6 +15128,7 @@ def cipher_vault_status() -> Dict[str, Any]:
     history = get_setting("vault_history", []) or []
     return {
         "configured": bool(cfg["token"] and cfg["key"] and cfg["repo"]),
+        "keyManaged": bool(cfg["key"]),
         "repo": cfg["repo"],
         "last": history[-1] if history else None,
         "history": history[-10:],
@@ -20011,9 +20013,11 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
         return
     status = cipher_vault_status(); last = status.get("last") or {}
     state = "CONNECTED" if status.get("configured") else "NOT CONFIGURED"
+    key_state = "AUTO-MANAGED" if status.get("keyManaged") else "WAITING FOR TOKEN"
     cap = (f"<b>🔐 Cipher Vault</b>\n{G['div_eq']}\n"
            f"{bullet('Repository', status.get('repo'))}\n"
            f"{bullet('Status', state)}\n"
+           f"{bullet('Encryption Key', key_state)}\n"
            f"{bullet('Last Sync', last.get('createdAt', '—'))}\n"
            f"{bullet('Files', last.get('fileCount', '—'))}\n"
            f"{bullet('Archive', fmt_bytes(last.get('sizeBytes', 0)) if last else '—')}\n{G['div']}"

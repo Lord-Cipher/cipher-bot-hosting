@@ -32,6 +32,15 @@ In your Railway project settings, configure the following environment variables:
 4. Add the required environment variables in the Railway Variables tab.
 5. Railway will automatically build and start the application using `python3 bot.py`.
 
+### Cipher Vault key management
+
+When a Cipher Vault token is configured through the panel, the bot generates
+the Fernet encryption key automatically and stores it in the panel keyring.
+`CIPHER_VAULT_KEY` is not required for new installations; it is only needed
+when importing an existing encrypted vault. Attach a Railway Volume mounted at
+`/app/storage` so the keyring, panel settings, and bot state survive container
+restarts and redeploys. Do not generate a new key for an existing snapshot.
+
 ---
 
 ### How Railway Execution Works Without Systemd
