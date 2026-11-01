@@ -3232,21 +3232,29 @@ def install_deps(bot_dir: Path, kind: str, log: List[str]) -> bool:
         if kind == "node":
             pkg = bot_dir / "package.json"
             if not pkg.exists():
-                return False
+                log.append(f"[{G['ok']}] no package.json; using Node.js built-ins only")
+                return True
             if (bot_dir / "node_modules").exists():
                 log.append(f"[{G['ok']}] node_modules cached, skipping npm install")
+                return True
+            npm = shutil.which("npm")
+            node = shutil.which("node")
+            if not node or not npm:
+                log.append(f"[{G['warn']}] Node.js and npm are required for this deployment (node={node or 'missing'}, npm={npm or 'missing'})")
                 return False
-            log.append(f"{G['div']} npm install {G['div']}")
+            lock = bot_dir / "package-lock.json"
+            command = [npm, "ci" if lock.exists() else "install", "--omit=dev", "--no-audit", "--no-fund"]
+            log.append(f"{G['div']} {' '.join(command[1:3])} {G['div']}")
             r = subprocess.run(
-                ["npm", "install", "--omit=dev", "--no-audit", "--no-fund"],
-                cwd=str(bot_dir), timeout=300, capture_output=True, text=True,
+                command,
+                cwd=str(bot_dir), timeout=900, capture_output=True, text=True,
             )
             for line in (r.stdout or "").splitlines()[-15:]:
                 log.append(line)
             for line in (r.stderr or "").splitlines()[-10:]:
                 log.append(line)
             log.append(f"[{G['ok']}] npm done (rc={r.returncode})")
-            return True
+            return r.returncode == 0
     except subprocess.TimeoutExpired:
         log.append(f"[{G['warn']}] dependency install timeout (>5min)")
     except FileNotFoundError as e:
@@ -3611,7 +3619,9 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
     elif not trusted:
         return _start_failure(b, "Untrusted bots cannot run with Sandbox Mode OFF.")
     else:
-        install_deps(bot_dir, kind, log)
+        if not install_deps(bot_dir, kind, log):
+            if kind == "node":
+                return _start_failure(b, "Node.js dependency installation failed. Ensure package.json is valid and Node.js/npm are installed on this host.")
     try:
         proc = subprocess.Popen(
             cmd, cwd=str(bot_dir), env=safe_env(bot_dir, extra_env),

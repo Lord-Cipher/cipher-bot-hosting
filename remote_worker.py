@@ -134,7 +134,7 @@ def _cleanup(c, remote: str, container: str) -> None:
     _run(c, f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true; rm -rf -- {shlex.quote(remote)}", timeout=30)
 
 
-_PROJECT_UPLOAD_EXCLUDES = {".git", "__pycache__", ".deps", ".tmp_run", ".cipher-runtime.env"}
+_PROJECT_UPLOAD_EXCLUDES = {".git", "__pycache__", ".deps", ".tmp_run", ".cipher-runtime.env", ".cipher-runtime-data"}
 
 
 def _require_safe_project_walk() -> int:
@@ -266,7 +266,7 @@ def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path
         uid, gid = int(identity[0]), int(identity[1])
         if uid == 0:
             return {"ok": False, "error": "Use a non-root SSH account with Docker access for Sandbox isolation."}
-        run_remote(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true; rm -rf -- {shlex.quote(remote)}; mkdir -p {shlex.quote(remote)}/.deps && chmod 700 {shlex.quote(remote)}")
+        run_remote(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true; rm -rf -- {shlex.quote(remote)}; mkdir -p {shlex.quote(remote)}/.deps {shlex.quote(remote)}/.cipher-runtime-data && chmod 700 {shlex.quote(remote)}")
         for rel, payload in _iter_project_payloads(local_dir):
             dst = posixpath.join(remote, rel)
             run_remote(f"mkdir -p {shlex.quote(posixpath.dirname(dst))}")
@@ -295,7 +295,7 @@ def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path
             if runtime == "node" else ""
         )
         python_path = " -e PYTHONPATH=/app/.deps" if runtime == "python" else ""
-        cmd = f"docker run -d --rm --name {shlex.quote(container)} --cpus {shlex.quote(lim['cpus'])} --memory {shlex.quote(lim['memory'])} --pids-limit {int(lim['pids'])} --read-only --cap-drop ALL --security-opt no-new-privileges:true --user {uid}:{gid} --network {network_mode} --env-file {shlex.quote(env_path)} -v {shlex.quote(remote)}:/app:ro -v {shlex.quote(remote+'/.deps')}:/app/.deps:ro{node_modules_mount} --tmpfs /app/.tmp_run:rw,noexec,nosuid,size=64m,uid={uid},gid={gid} --tmpfs /tmp:rw,noexec,nosuid,size=64m{python_path} -w /app {image_cmd} {shlex.quote(entry)}"
+        cmd = f"docker run -d --rm --name {shlex.quote(container)} --cpus {shlex.quote(lim['cpus'])} --memory {shlex.quote(lim['memory'])} --pids-limit {int(lim['pids'])} --read-only --cap-drop ALL --security-opt no-new-privileges:true --user {uid}:{gid} --network {network_mode} --env-file {shlex.quote(env_path)} -v {shlex.quote(remote)}:/app:ro -v {shlex.quote(remote+'/.deps')}:/app/.deps:ro -v {shlex.quote(remote+'/.cipher-runtime-data')}:/app/.cipher-runtime-data:rw{node_modules_mount} --tmpfs /app/.tmp_run:rw,noexec,nosuid,size=64m,uid={uid},gid={gid} --tmpfs /tmp:rw,noexec,nosuid,size=64m{python_path} -w /app {image_cmd} {shlex.quote(entry)}"
         code, out, err = run_remote(cmd)
         if code or not out.strip():
             return {"ok": False, "error": err[-300:] or "Docker startup failed."}

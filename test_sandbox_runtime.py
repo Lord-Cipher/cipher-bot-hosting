@@ -50,9 +50,11 @@ with tempfile.TemporaryDirectory(prefix="sandbox-runtime-node-test-") as tmp:
     (root / "package.json").write_text('{"dependencies":{"example":"1.0.0"}}', encoding="utf-8")
     install = install_dependencies_command(root, "basic", runtime="node")
     assert "npm install --ignore-scripts --no-audit --no-fund" in install[-1]
+    assert "npm ci --ignore-scripts --no-audit --no-fund" in install[-1]
     assert "cd /app/.deps" in install[-1]
     run = build_run_command("bot2", root, "index.js", "basic", network=True, runtime="node")
     assert f"{root}/.deps/node_modules:/app/node_modules:ro" in run
+    assert f"{root}/.cipher-runtime-data:/app/.cipher-runtime-data:rw" in run
     assert "PYTHONPATH=/app/.deps" not in run
     assert not any(arg == "none" for arg in run)
 

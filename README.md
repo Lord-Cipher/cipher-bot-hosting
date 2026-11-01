@@ -100,6 +100,26 @@ curl -6 -sS -o /dev/null -w 'HTTP %{http_code} via %{remote_ip}\n' \
 
 For adding a separate VPS as an Infrastructure/Sandbox node—including the Freestyle `known_hosts` fix—follow [INSTALL_VPS.md](INSTALL_VPS.md).
 
+## Node.js and WhatsApp bots
+
+Node.js bots are supported alongside Python bots. A project should contain an
+`index.js` (or another `.js` entry file) and, when it uses packages, a
+`package.json`; `package-lock.json` is recommended. Trusted non-Sandbox runs
+install dependencies with `npm ci` when a lockfile is present, otherwise
+`npm install`. Sandboxed runs use the pinned `node:22-slim` image and install
+packages in an isolated dependency volume, so npm does not need to be
+installed on the control-panel host.
+
+WhatsApp clients need outbound network access. Keep the global Sandbox network
+setting and the individual bot's **Sandbox Network** switch enabled only for
+bots that need it. The container filesystem remains read-only, but
+`/app/.cipher-runtime-data` is a dedicated writable persistent directory for
+WhatsApp authentication/session files. Configure libraries such as Baileys or
+`whatsapp-web.js` to store their auth state there; do not write credentials to
+the source tree. On a remote VPS worker this directory persists with the bot's
+worker workspace, so do not periodically delete `/tmp/cipher-bots` if sessions
+must survive restarts.
+
 ## Update
 
 ```bash

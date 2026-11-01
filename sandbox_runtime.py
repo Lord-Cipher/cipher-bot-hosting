@@ -55,7 +55,7 @@ def install_dependencies_command(workdir: str | Path, plan: str = "free", runtim
             "if [ -f /app/package.json ]; then "
             "cp /app/package.json /app/.deps/package.json && "
             "if [ -f /app/package-lock.json ]; then cp /app/package-lock.json /app/.deps/package-lock.json; fi && "
-            "cd /app/.deps && npm install --ignore-scripts --no-audit --no-fund; fi"
+            "cd /app/.deps && if [ -f package-lock.json ]; then npm ci --ignore-scripts --no-audit --no-fund; else npm install --ignore-scripts --no-audit --no-fund; fi; fi"
         )
     elif runtime == "python":
         image = "python:3.11-slim"
@@ -92,7 +92,9 @@ def build_run_command(bot_id: str, workdir: str | Path, entrypoint: str, plan: s
         raise ValueError("unsupported runtime")
     image, executable = ("node:22-slim", "node") if runtime == "node" else ("python:3.11-slim", "python")
     deps = root / ".deps"; deps.mkdir(parents=True, exist_ok=True)
-    cmd += ["-v", f"{root}:/app:ro", "-v", f"{deps}:/app/.deps:ro"]
+    runtime_data = root / ".cipher-runtime-data"; runtime_data.mkdir(parents=True, exist_ok=True)
+    cmd += ["-v", f"{root}:/app:ro", "-v", f"{deps}:/app/.deps:ro",
+            "-v", f"{runtime_data}:/app/.cipher-runtime-data:rw"]
     if runtime == "python":
         cmd += ["-e", "PYTHONPATH=/app/.deps"]
     else:
