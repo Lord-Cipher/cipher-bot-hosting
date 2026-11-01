@@ -2966,7 +2966,10 @@ def safe_env(bot_dir: Path, extra: Optional[Dict[str, str]] = None) -> Dict[str,
     env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV_NAMES}
     env["HOME"]    = str(bot_dir)
     env["TMPDIR"]  = str(bot_dir / ".tmp_run")
-    env["PATH"]    = "/usr/local/bin:/usr/bin:/bin"
+    # Preserve provider-managed paths (for example Railway's Nix store) so
+    # native Node.js/npm binaries remain discoverable. The old fixed PATH made
+    # a successful Nixpacks install look like Node was missing at runtime.
+    env["PATH"]    = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     env.setdefault("NODE_ENV", "production")
     deps_dir = str(bot_dir / ".deps")
     existing_pp = env.get("PYTHONPATH", "")
@@ -3608,6 +3611,10 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
                 return _start_failure(b, "This host has no Docker. Native hosting is limited to owner/approved bots; approve this bot or attach a Sandbox worker.")
             native_host_mode = True
         if native_host_mode:
+            runtime_data = bot_dir / ".cipher-runtime-data"
+            runtime_data.mkdir(parents=True, exist_ok=True)
+            extra_env = dict(extra_env)
+            extra_env.setdefault("CIPHER_RUNTIME_DATA", str(runtime_data))
             b["preflight"] = {"verdict": "NATIVE_HOST", "reason": "Docker unavailable; running approved bot with the host runtime.", "checked": ts_iso()}
             save_bot(b)
         else:

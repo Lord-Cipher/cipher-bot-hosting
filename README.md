@@ -121,9 +121,11 @@ WhatsApp clients need outbound network access. Keep the global Sandbox network
 setting and the individual bot's **Sandbox Network** switch enabled only for
 bots that need it. The container filesystem remains read-only, but
 `/app/.cipher-runtime-data` is a dedicated writable persistent directory for
-WhatsApp authentication/session files. Configure libraries such as Baileys or
-`whatsapp-web.js` to store their auth state there; do not write credentials to
-the source tree. The directory survives a container restart, but the current
+WhatsApp authentication/session files. In native host mode, the bot also
+receives `CIPHER_RUNTIME_DATA` pointing to its equivalent writable directory.
+Configure libraries such as Baileys or `whatsapp-web.js` to store their auth
+state there; do not write credentials to the source tree. The directory
+survives a container restart, but the current
 remote worker workspace is under `/tmp/cipher-bots` and is removed on a fresh
 deployment or a host cleanup/reboot. For long-lived WhatsApp sessions, attach
 a persistent worker volume and move the worker workspace there before using
