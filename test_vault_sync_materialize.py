@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import io
+import base64
+import hashlib
+import json
 import shutil
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
@@ -185,6 +189,53 @@ class VaultSnapshotMaterializeTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("Backup authentication failed", result["error"])
         self.assertEqual(self._stage_names(), set())
+
+    def test_large_archive_uses_git_blob_fallback(self) -> None:
+        encrypted = b"encrypted archive returned by the blob endpoint"
+        snapshot_id = "20261101T112350Z-5c969fe5a9eb"
+        manifest_path = f"snapshots/{snapshot_id}/manifest.json"
+        archive_path = f"snapshots/{snapshot_id}/platform.tar.gz.enc"
+        manifest = {
+            "format": "cipher-vault-v1",
+            "snapshotId": snapshot_id,
+            "manifest": manifest_path,
+            "archive": archive_path,
+            "archiveSha256": hashlib.sha256(encrypted).hexdigest(),
+        }
+
+        class Response:
+            def __init__(self, payload: dict) -> None:
+                self.payload = payload
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return self.payload
+
+        class Session:
+            def __init__(self) -> None:
+                self.headers = {}
+
+            def request(self, method: str, url: str, **kwargs):
+                if "/contents/LATEST.json" in url:
+                    raw = (json.dumps({"manifest": manifest_path}) + "\n").encode()
+                    return Response({"encoding": "base64", "content": base64.b64encode(raw).decode()})
+                if url.endswith(f"/contents/{manifest_path}?ref=main"):
+                    raw = (json.dumps(manifest) + "\n").encode()
+                    return Response({"encoding": "base64", "content": base64.b64encode(raw).decode()})
+                if url.endswith(f"/contents/{archive_path}?ref=main"):
+                    return Response({"type": "file", "encoding": "none", "sha": "archive-blob-sha"})
+                if url.endswith("/git/blobs/archive-blob-sha"):
+                    return Response({"encoding": "base64", "content": base64.b64encode(encrypted).decode()})
+                raise AssertionError(url)
+
+        with patch.object(vault_sync.requests, "Session", Session):
+            downloaded, downloaded_manifest = vault_sync.download_latest_snapshot(
+                "token", "Lord-Cipher/cipher-vault", "main"
+            )
+        self.assertEqual(downloaded, encrypted)
+        self.assertEqual(downloaded_manifest["snapshotId"], snapshot_id)
 
 
 if __name__ == "__main__":

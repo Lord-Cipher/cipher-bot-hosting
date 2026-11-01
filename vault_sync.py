@@ -224,9 +224,18 @@ def download_latest_snapshot(token: str, repo: str, branch: str = "main") -> tup
         branch_ref = quote(str(branch or "main").strip() or "main", safe="")
         response = _github(session, "GET", f"{api}/contents/{quote(path, safe='/')}?ref={branch_ref}")
         payload = response.json()
-        if payload.get("encoding") != "base64" or not payload.get("content"):
-            raise ValueError(f"Vault file is not a base64 GitHub content response: {path}")
-        return base64.b64decode("".join(str(payload["content"]).split()))
+        if isinstance(payload, dict) and payload.get("encoding") == "base64" and payload.get("content"):
+            return base64.b64decode("".join(str(payload["content"]).split()))
+
+        # GitHub may omit inline content for large files from the Contents API
+        # (notably the encrypted tarball). Resolve the returned blob SHA via
+        # the Git Data API instead of treating that valid response as missing.
+        blob_sha = payload.get("sha") if isinstance(payload, dict) else None
+        if blob_sha:
+            blob_payload = _github(session, "GET", f"{api}/git/blobs/{quote(str(blob_sha), safe='')}").json()
+            if isinstance(blob_payload, dict) and blob_payload.get("encoding") == "base64" and blob_payload.get("content"):
+                return base64.b64decode("".join(str(blob_payload["content"]).split()))
+        raise ValueError(f"Vault file is not a readable GitHub content response: {path}")
 
     latest = json.loads(content("LATEST.json").decode("utf-8"))
     manifest_path = str(latest.get("manifest") or "")
