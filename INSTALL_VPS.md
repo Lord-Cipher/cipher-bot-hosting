@@ -161,13 +161,14 @@ Replace the documentation-only IPv6 address with your worker's real global IPv6.
 
 ### 2. Configure encrypted credential storage on the control panel
 
-The panel needs a stable Fernet key before it can save SSH credentials. First check whether `CIPHER_VAULT_KEY` is already set or whether the panel has created its Vault-managed runtime key. Reuse the active key; do not replace it. Only if neither exists, generate a key once:
-
-```bash
-python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
-```
-
-Set the generated result as `CIPHER_VAULT_KEY` in the **control panel's** environment or `.env`, then restart the panel. Keep the active key backed up and unchanged: changing or losing it makes previously stored node credentials unreadable. Do not paste it into Telegram or commit `.env` to Git.
+The panel generates and stores its Fernet key automatically when encrypted
+credentials or Cipher Vault are first configured. No manual
+`CIPHER_VAULT_KEY` is required for a new installation. Keep the panel's
+`storage/` directory on the VPS filesystem and preserve it across upgrades;
+that directory contains the encrypted keyring and panel settings. Set
+`CIPHER_VAULT_KEY` only when importing an existing encrypted vault. Never
+replace or lose the active key, and never paste it into Telegram or commit it
+to Git.
 
 ### 3. Register and test the node in Telegram
 

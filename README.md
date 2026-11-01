@@ -49,13 +49,12 @@ OWNER_ID=YOUR_NUMERIC_TELEGRAM_USER_ID
 FORCE_POLLING=true
 ```
 
-Save in nano with **Ctrl+O**, press **Enter**, then exit with **Ctrl+X**. Generate and add a stable credential-encryption key once:
-
-```bash
-sudo -u cipherbot bash -c 'key=$(/opt/cipher-bot/venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"); printf "\\nCIPHER_VAULT_KEY=%s\\n" "$key" >> /opt/cipher-bot/.env'
-```
-
-Run key generation only once. Keep `.env` private and preserve the active key; replacing or losing it can make saved node credentials unreadable. Never commit `.env` or send secrets in chat.
+Save in nano with **Ctrl+O**, press **Enter**, then exit with **Ctrl+X**. The
+panel generates and persists its Fernet key automatically when encrypted
+credentials or Cipher Vault are first configured. Keep `/opt/cipher-bot/storage`
+on the VPS filesystem and preserve it across upgrades. Set `CIPHER_VAULT_KEY`
+only when importing an existing encrypted vault. Never commit `.env` or send
+secrets in chat.
 
 ### 4. Create and start the systemd service
 
