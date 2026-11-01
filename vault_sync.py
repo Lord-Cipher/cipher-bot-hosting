@@ -164,8 +164,22 @@ def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: st
                 parent_commit = _github(session, "GET", f"{api}/git/commits/{parent_sha}").json()
                 base_tree = parent_commit["tree"]["sha"]
             except requests.HTTPError as exc:
-                if getattr(exc.response, "status_code", None) != 404:
+                # GitHub returns 409 ("Git Repository is empty") for a new
+                # repository with no branch; some API paths return 404.
+                status = getattr(exc.response, "status_code", None)
+                if status not in (404, 409):
                     raise
+                if status == 409:
+                    # GitHub does not allow Git Data API blob creation until
+                    # the repository has one commit. Seed the eventual
+                    # LATEST path through Contents API; the next attempt
+                    # overwrites it in the atomic snapshot commit.
+                    _github(session, "PUT", f"{api}/contents/LATEST.json", json={
+                        "message": "vault: initialize repository",
+                        "content": base64.b64encode(b"{}\n").decode(),
+                        "branch": branch_name,
+                    })
+                    continue
                 # An empty repository has no branch/ref yet. The first sync
                 # creates its complete tree and initial commit below.
 

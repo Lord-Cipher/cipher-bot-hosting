@@ -35,12 +35,20 @@ class EmptyRepositoryBootstrapTests(unittest.TestCase):
         class Session:
             def __init__(self):
                 self.headers = {}
+                self.initialized = False
 
             def request(self, method, url, **kwargs):
                 nonlocal blob_number
                 calls.append((method, url, kwargs.get("json")))
                 if method == "GET" and "/git/ref/heads/main" in url:
-                    return _Response(status=404)
+                    if not self.initialized:
+                        return _Response(status=409)
+                    return _Response({"object": {"sha": "parent-1"}})
+                if method == "GET" and "/git/commits/parent-1" in url:
+                    return _Response({"tree": {"sha": "base-tree-1"}})
+                if method == "PUT" and url.endswith("/contents/LATEST.json"):
+                    self.initialized = True
+                    return _Response({"commit": {"sha": "seed-commit"}}, status=201)
                 if method == "POST" and url.endswith("/git/blobs"):
                     blob_number += 1
                     return _Response({"sha": f"blob-{blob_number}"})
@@ -52,9 +60,9 @@ class EmptyRepositoryBootstrapTests(unittest.TestCase):
                     payload = kwargs["json"]
                     self.commit_payload = payload
                     return _Response({"sha": "commit-1"})
-                if method == "POST" and url.endswith("/git/refs"):
+                if method == "PATCH" and url.endswith("/git/refs/heads/main"):
                     self.ref_payload = kwargs["json"]
-                    return _Response({"ref": self.ref_payload["ref"]})
+                    return _Response({"ref": "refs/heads/main"})
                 raise AssertionError(f"Unexpected GitHub request: {method} {url}")
 
         with tempfile.TemporaryDirectory(prefix="vault-publish-test-") as raw_root:
@@ -74,13 +82,12 @@ class EmptyRepositoryBootstrapTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["commit"], "commit-1")
         self.assertEqual(blob_number, 3)
-        ref_calls = [item for item in calls if item[0] == "POST" and item[1].endswith("/git/refs")]
-        self.assertEqual(len(ref_calls), 1)
-        self.assertEqual(ref_calls[0][2]["ref"], "refs/heads/main")
+        seed_calls = [item for item in calls if item[0] == "PUT" and item[1].endswith("/contents/LATEST.json")]
+        self.assertEqual(len(seed_calls), 1)
         tree_calls = [item for item in calls if item[0] == "POST" and item[1].endswith("/git/trees")]
-        self.assertNotIn("base_tree", tree_calls[0][2])
+        self.assertEqual(tree_calls[0][2]["base_tree"], "base-tree-1")
         commit_calls = [item for item in calls if item[0] == "POST" and item[1].endswith("/git/commits")]
-        self.assertNotIn("parents", commit_calls[0][2])
+        self.assertEqual(commit_calls[0][2]["parents"], ["parent-1"])
 
 
 if __name__ == "__main__":
