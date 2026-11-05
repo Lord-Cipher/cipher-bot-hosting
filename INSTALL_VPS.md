@@ -121,6 +121,17 @@ and load-average indicators. Use **Refresh All Metrics** to probe the pool;
 automatic bot placement then prefers the healthy worker with the lowest
 measured pressure, while an explicit bot assignment remains fixed.
 
+Sandbox settings also include automatic VPS failover and a deployment queue.
+If an automatically assigned worker goes offline, the bot tries another
+healthy worker. If no worker is available, a deployment can wait in the queue
+until capacity returns. Explicit node assignments remain authoritative.
+
+For a full migration or clean rebuild, export **Full Recovery** from the
+Import/Export panel. Import the resulting `.cipher-backup` after deployment;
+it restores the database, settings, encrypted key caches, bot files, and
+sandbox files. Preserve the same bot token and owner identity, or configure
+the same `CIPHER_RECOVERY_PASSPHRASE` on both installations.
+
 ### 1. Prepare the worker VPS
 
 On an Ubuntu/Debian worker, install SSH and Docker:

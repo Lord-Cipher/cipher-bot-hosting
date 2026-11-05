@@ -37,7 +37,7 @@ from telebot.apihelper import ApiTelegramException
 import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
-from vault_sync import download_latest_snapshot, materialize_snapshot, sync_vault
+from vault_sync import download_latest_snapshot, materialize_snapshot, sync_vault, export_portable_backup, import_portable_backup
 from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
 from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle, bootstrap_docker_worker, refresh_docker_images
@@ -3385,6 +3385,41 @@ def _start_failure(b: Dict[str, Any], error: str) -> Dict[str, Any]:
         b.pop("sandbox_expires_at", None)
     save_bot(b)
     return {"ok": False, "error": str(error)[:240]}
+
+def _enqueue_deployment(b: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    queue = list(get_setting("deployment_queue", []) or [])
+    bid = str(b.get("_id", ""))
+    if not any(str(item.get("bot_id")) == bid for item in queue):
+        queue.append({"bot_id": bid, "owner": b.get("owner"), "queued_at": ts_iso(), "attempts": 0, "reason": str(reason)[:240]})
+        set_setting("deployment_queue", queue[-500:])
+    b["status"] = "queued"
+    b["queue_reason"] = str(reason)[:240]
+    save_bot(b)
+    return {"ok": False, "queued": True, "error": "No Docker worker is currently available. Deployment queued for the next healthy worker."}
+
+def _process_deployment_queue() -> None:
+    if not bool(_bc_get("deployment_queue_enabled")):
+        return
+    queue = list(get_setting("deployment_queue", []) or [])
+    kept: List[Dict[str, Any]] = []
+    for item in queue[:50]:
+        current = find_bot(str(item.get("bot_id", "")))
+        if not current or current.get("status") not in {"queued", "stopped", "unavailable"}:
+            continue
+        item["attempts"] = int(item.get("attempts", 0) or 0) + 1
+        if item["attempts"] > 30:
+            current["status"] = "stopped"
+            current["last_error"] = "Deployment queue expired after 30 attempts."
+            save_bot(current)
+            continue
+        result = start_child(current)
+        if not result.get("ok") and result.get("queued"):
+            kept.append(item)
+        elif not result.get("ok"):
+            current["status"] = "queued"
+            save_bot(current)
+            kept.append(item)
+    set_setting("deployment_queue", kept + queue[50:])
 SANDBOX_TEST_TTL_SECONDS = 60
 _SANDBOX_CODE_SUFFIXES = {".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".sh"}
 def _sandbox_workspace_files(bot_dir: Path) -> List[Tuple[str, bytes]]:
@@ -3557,53 +3592,75 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
         ready_candidates = [n for n in candidates if n and n.get("enabled") and n.get("status") in {"ONLINE", "AUTHENTICATED"} and n.get("connection_type") == "ssh" and (n.get("capabilities") or {}).get("docker") is True]
         if not requested_node:
             ready_candidates.sort(key=_node_load_score)
-        selected_node = next(iter(ready_candidates), None)
+        selected_node = None
+        remote_result: Dict[str, Any] = {"ok": False, "error": "No healthy VPS worker accepted the deployment."}
         # A specifically assigned node is authoritative even when its older
         # record has no cached capabilities. remote_deploy performs the live
         # Docker check; this keeps pre-health-check nodes usable.
         if selected_node is None and requested_node:
             selected_node = next((n for n in candidates if n and n.get("enabled") and n.get("status") in {"ONLINE", "AUTHENTICATED"} and n.get("connection_type") == "ssh"), None)
-        if selected_node:
-            secret = _node_secret(selected_node.get("id", ""))
-            if not secret:
-                return _start_failure(b, "Selected VPS has no stored credential.")
+        deployment_secret = ""
+        deployment_error = "No healthy VPS worker accepted the deployment."
+        deployment_candidates = ready_candidates
+        if selected_node is None and requested_node:
+            deployment_candidates = [n for n in candidates if n and n.get("enabled") and n.get("status") in {"ONLINE", "AUTHENTICATED"} and n.get("connection_type") == "ssh"]
+        for candidate in deployment_candidates:
+            candidate_secret = _node_secret(candidate.get("id", ""))
+            if not candidate_secret:
+                deployment_error = f"VPS {candidate.get('name', candidate.get('id', 'worker'))} has no stored credential."
+                if requested_node:
+                    return _start_failure(b, deployment_error)
+                continue
             try:
-                remote_result = remote_deploy(
-                    selected_node, secret, bid, bot_dir, kind, entry,
+                attempt = remote_deploy(
+                    candidate, candidate_secret, bid, bot_dir, kind, entry,
                     str((owner or {}).get("plan", "free")), extra_env,
                     network=allow_network,
                 )
             except Exception as exc:
-                remote_result = {"ok": False, "error": str(exc)[:240]}
-            if not remote_result.get("ok"):
-                # A healthy local Docker daemon is a valid fallback when an
-                # auto-selected VPS becomes unavailable during deployment.
-                # An explicitly assigned node remains authoritative so a
-                # configuration error is not hidden by silently switching
-                # infrastructure.
-                if requested_node or not docker_available():
-                    return _start_failure(b, f"Remote deployment failed: {remote_result.get('error', 'unknown error')}")
-                selected_node = None
-            if selected_node is None:
+                attempt = {"ok": False, "error": str(exc)[:240]}
+            if attempt.get("ok"):
+                selected_node, remote_result, deployment_secret = candidate, attempt, candidate_secret
+                break
+            deployment_error = str(attempt.get("error", "remote deployment failed"))[:240]
+            if requested_node:
+                return _start_failure(b, f"Remote deployment failed: {deployment_error}")
+            # Mark only the failed worker stale; the next automatic attempt can
+            # use another healthy VPS without hiding the failure from admins.
+            try:
+                node_store = _nodes_load()
+                failed = node_store.get(str(candidate.get("id")))
+                if failed:
+                    failed["health_reason"] = f"Last deployment failed: {deployment_error}"
+                    failed["last_deploy_failure_at"] = ts_iso()
+                    _nodes_save(node_store)
+            except Exception:
                 pass
+        if selected_node is None:
+            # A healthy local Docker daemon is a valid fallback when every
+            # auto-selected VPS becomes unavailable during deployment.
+            if requested_node or not docker_available():
+                if not requested_node and bool(_bc_get("deployment_queue_enabled")):
+                    return _enqueue_deployment(b, deployment_error)
+                return _start_failure(b, f"Remote deployment failed: {deployment_error}")
+        else:
+            b["remote_node_id"] = selected_node.get("id"); b["remote_container_id"] = remote_result.get("container_id", ""); b["status"] = "running"; save_bot(b)
+            with _runner_lock:
+                RUNNING[bid] = {"proc": RemoteHandle(selected_node, deployment_secret, bid, remote_result.get("container_id", "")), "remote": True, "sandbox": True, "node_id": selected_node.get("id"), "dir": str(bot_dir), "log_ring": deque(maxlen=200), "started": time.time(), "manual_stop": False}
+                if sandbox_test:
+                    RUNNING[bid]["sandbox_expires_at"] = time.time() + SANDBOX_TEST_TTL_SECONDS
+                    RUNNING[bid]["sandbox_timer"] = threading.Timer(SANDBOX_TEST_TTL_SECONDS, _expire_sandbox_run, args=(bid,))
+                    RUNNING[bid]["sandbox_timer"].daemon = True
+                    RUNNING[bid]["sandbox_timer"].start()
+            if sandbox_test:
+                b["sandbox_expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=SANDBOX_TEST_TTL_SECONDS)).isoformat()
             else:
-                b["remote_node_id"] = selected_node.get("id"); b["remote_container_id"] = remote_result.get("container_id", ""); b["status"] = "running"; save_bot(b)
-                with _runner_lock:
-                    RUNNING[bid] = {"proc": RemoteHandle(selected_node, secret, bid, remote_result.get("container_id", "")), "remote": True, "sandbox": True, "node_id": selected_node.get("id"), "dir": str(bot_dir), "log_ring": deque(maxlen=200), "started": time.time(), "manual_stop": False}
-                    if sandbox_test:
-                        RUNNING[bid]["sandbox_expires_at"] = time.time() + SANDBOX_TEST_TTL_SECONDS
-                        RUNNING[bid]["sandbox_timer"] = threading.Timer(SANDBOX_TEST_TTL_SECONDS, _expire_sandbox_run, args=(bid,))
-                        RUNNING[bid]["sandbox_timer"].daemon = True
-                        RUNNING[bid]["sandbox_timer"].start()
-                if sandbox_test:
-                    b["sandbox_expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=SANDBOX_TEST_TTL_SECONDS)).isoformat()
-                else:
-                    b.pop("sandbox_expires_at", None)
-                save_bot(b)
-                result = {"ok": True, "pid": 0, "kind": kind, "remote": True, "node_id": selected_node.get("id")}
-                if sandbox_test:
-                    result["expires_in"] = SANDBOX_TEST_TTL_SECONDS
-                return result
+                b.pop("sandbox_expires_at", None)
+            save_bot(b)
+            result = {"ok": True, "pid": 0, "kind": kind, "remote": True, "node_id": selected_node.get("id")}
+            if sandbox_test:
+                result["expires_in"] = SANDBOX_TEST_TTL_SECONDS
+            return result
     if sandbox_on:
         if not docker_available():
             # Railway, Render, and Replit commonly provide a native runtime
@@ -6530,7 +6587,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         set_setting(f"bc_{flag_key}", not cur)
         audit(call.from_user.id, f"bc_toggle_{flag_key}", f"now={not cur}")
         ack(call, f"{flag_key}: {'ON' if not cur else 'OFF'}")
-        if flag_key in {"sandbox_network", "native_node_multiuser"}:
+        if flag_key in {"sandbox_network", "native_node_multiuser", "auto_failover_enabled", "deployment_queue_enabled"}:
             return render_adm_bc_sandbox(call)
         return render_adm_bot_cfg(call)
     # Currency preset quick-select buttons (e.g. adm_bc_set_currency_BDT_৳)
@@ -6857,6 +6914,15 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             f"{G['warn']} {sc('This REPLACES your current user_data.json entirely')}.\n"
             f"{sc('Send the exported .json file now, or')} /cancel.",
             parse_mode="HTML")
+        return
+    if data == "adm_import_recovery":
+        if not is_owner(call.from_user.id):
+            ack(call, "Owner only"); return
+        USER_STATES[call.from_user.id] = {"flow": "await_import_recovery"}
+        bot.send_message(call.message.chat.id,
+            f"<b>♻️ {sc('Import Complete Recovery')}</b>\n{G['div']}\n"
+            f"{G['warn']} {sc('This replaces storage and sandbox state with the encrypted backup')} .\n"
+            f"{sc('Send the .cipher-backup file now, or')} /cancel.", parse_mode="HTML")
         return
     if data == "adm_import_reset":
         if not is_owner(call.from_user.id): ack(call, "Owner only"); return
@@ -7902,6 +7968,8 @@ _BOT_CONFIG_DEFAULTS: Dict[str, Any] = {
     "env_strip_secrets":    True,   # strip BOT_TOKEN etc from child env
     "sandbox_network":      True,   # allow bots to use network
     "native_node_multiuser":False,  # allow unapproved Node bots without Docker
+    "auto_failover_enabled": True,  # move automatically placed bots to another worker
+    "deployment_queue_enabled": True, # queue deployments while all workers are unavailable
     "idle_timeout_mins":    0,      # 0 = no idle timeout
     "resource_check_secs":  30,     # interval for resource checks
 }
@@ -8835,6 +8903,8 @@ def render_adm_bc_sandbox(call: types.CallbackQuery) -> None:
     delay  = _bc_get("sandbox_wipe_delay")
     net    = bool(_bc_get("sandbox_network"))
     native_node = bool(_bc_get("native_node_multiuser"))
+    failover = bool(_bc_get("auto_failover_enabled"))
+    queue_on = bool(_bc_get("deployment_queue_enabled"))
     cap = (
         f"<b>🧱 {sc('Sandbox Settings')}</b>\n"
         f"{G['div_eq']}\n"
@@ -8842,6 +8912,8 @@ def render_adm_bc_sandbox(call: types.CallbackQuery) -> None:
         f"{bullet('Wipe Delay',  f'{delay}s after start')}\n"
         f"{bullet('Network',     '✅ Allowed' if net else '❌ Blocked')}\n"
         f"{bullet('Native Node (no Docker)', '✅ ON' if native_node else '❌ OFF')}\n"
+        f"{bullet('Automatic VPS Failover', '✅ ON' if failover else '❌ OFF')}\n"
+        f"{bullet('Deployment Queue', '✅ ON' if queue_on else '❌ OFF')}\n"
         f"{G['div']}\n"
         f"<i>{sc('File Wipe removes source .py/.js files after bot starts so child bots cannot read their own code.')}</i>\n"
         f"<i>{sc('Native Node runs unapproved JavaScript beside the panel; use only when you accept that risk.')}</i>{FOOTER}"
@@ -8860,6 +8932,10 @@ def render_adm_bc_sandbox(call: types.CallbackQuery) -> None:
         Btn(f"{'✅' if native_node else '❌'}  Nᴀᴛɪᴠᴇ Nᴏᴅᴇ",
             callback_data="adm_bc_toggle_native_node_multiuser",
             style="success" if native_node else "danger"),
+    )
+    kb.add(
+        Btn(f"{'✅' if failover else '❌'}  Fᴀɪʟᴏᴠᴇʀ", callback_data="adm_bc_toggle_auto_failover_enabled", style="success" if failover else "danger"),
+        Btn(f"{'✅' if queue_on else '❌'}  Qᴜᴇᴜᴇ", callback_data="adm_bc_toggle_deployment_queue_enabled", style="success" if queue_on else "danger"),
     )
     kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_config", PHOTOS["admin"]), cap, kb, call=call)
@@ -9907,7 +9983,7 @@ def render_adm_import_export(call: types.CallbackQuery) -> None:
         f"{bullet('Settings File',  fmt_bytes(settings_size))}\n"
         f"{bullet('Database File',  fmt_bytes(db_size))}\n"
         f"{G['div']}\n"
-        f"{sc('Export: download a full config backup (settings only, no user data). ')}\n"
+        f"{sc('Full Recovery exports encrypted storage, sandbox, database, settings, and key caches for disaster recovery. ')}\n"
         f"{sc('Import: upload a previously exported config to restore settings. ')}\n"
         f"{sc('User Export: CSV of all users.')}{FOOTER}"
     )
@@ -9915,6 +9991,10 @@ def render_adm_import_export(call: types.CallbackQuery) -> None:
     kb.add(
         Btn("📤  Exᴘᴏʀᴛ Cᴏɴꜰɪɢ",  callback_data="adm_export_full_cfg", style="success"),
         Btn("📥  Iᴍᴘᴏʀᴛ Cᴏɴꜰɪɢ",  callback_data="adm_import_cfg",      style="primary"),
+    )
+    kb.add(
+        Btn("🧳  Fᴜʟʟ Rᴇᴄᴏᴠᴇʀʏ", callback_data="adm_export_recovery", style="success"),
+        Btn("♻️  Iᴍᴘᴏʀᴛ Rᴇᴄᴏᴠᴇʀʏ", callback_data="adm_import_recovery", style="danger"),
     )
     kb.add(
         Btn("👥  Exᴘᴏʀᴛ Uꜱᴇʀꜱ CSV",callback_data="adm_user_export_csv", style="primary"),
@@ -9967,6 +10047,24 @@ def action_adm_export_full_cfg(call: types.CallbackQuery) -> None:
             except Exception:
                 pass
     threading.Thread(target=_bg, daemon=True).start()
+
+def action_adm_export_recovery(call: types.CallbackQuery) -> None:
+    if not is_owner(call.from_user.id):
+        ack(call, "Owner only"); return
+    ack(call, "Preparing encrypted complete recovery bundle…")
+    def _bg() -> None:
+        try:
+            data = export_portable_backup(BASE_DIR, _portable_recovery_passphrase())
+            import io
+            fname = f"cipher_recovery_{now_utc().strftime('%Y%m%d_%H%M%S')}.cipher-backup"
+            bot.send_document(call.message.chat.id, (fname, io.BytesIO(data)),
+                              caption=f"<b>🧳 Complete Cipher Recovery</b>\n{bullet('Size', fmt_bytes(len(data)))}\nKeep this file with the same bot token/owner identity, or set CIPHER_RECOVERY_PASSPHRASE before importing.",
+                              parse_mode="HTML")
+            audit(call.from_user.id, "export_portable_recovery", f"size={len(data)}")
+        except Exception as exc:
+            bot.send_message(call.message.chat.id, f"{G['no']} Recovery export failed: <code>{esc(exc)}</code>", parse_mode="HTML")
+    threading.Thread(target=_bg, daemon=True, name="portable-recovery-export").start()
+
 def render_adm_admin_2fa(call: types.CallbackQuery) -> None:
     enabled = bool(get_setting("admin_2fa_enabled", False))
     secret  = get_setting("admin_2fa_secret", "")
@@ -10704,6 +10802,28 @@ def on_document(m: types.Message) -> None:
             bot.reply_to(m, f"{G['ok']} {esc(msg)}", parse_mode="HTML")
         else:
             bot.reply_to(m, f"{G['no']} {sc('Import failed')}: <code>{esc(msg)}</code>", parse_mode="HTML")
+        return
+    if st.get("flow") == "await_import_recovery":
+        USER_STATES.pop(uid, None)
+        if not is_owner(uid):
+            return
+        try:
+            file_info = bot.get_file(m.document.file_id)
+            raw = bot.download_file(file_info.file_path)
+            result = import_portable_backup(BASE_DIR, raw, _portable_recovery_passphrase(), overwrite=True)
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc)}
+        if result.get("ok"):
+            try:
+                with KEYRING._lock:
+                    KEYRING._mem.clear()
+            except Exception:
+                pass
+            cache_clear_all()
+            audit(uid, "portable_recovery_import", f"files={result.get('fileCount', 0)}")
+            bot.reply_to(m, f"{G['ok']} <b>Complete recovery imported</b>\n{bullet('Files', result.get('fileCount', 0))}\n{bullet('Size', fmt_bytes(result.get('sizeBytes', 0)))}\nRestart the panel process to reload all restored state.", parse_mode="HTML")
+        else:
+            bot.reply_to(m, f"{G['no']} Recovery import failed: <code>{esc(result.get('error', 'unknown error'))}</code>", parse_mode="HTML")
         return
     # default: bot upload
     _handle_bot_upload(m)
@@ -14124,6 +14244,13 @@ def _export_full_db():
     }
     return _json.dumps(payload, indent=2, default=str).encode("utf-8")
 
+def _portable_recovery_passphrase() -> str:
+    """Return the stable secret used by the one-file recovery bundle."""
+    configured = str(os.getenv("CIPHER_RECOVERY_PASSPHRASE", "") or "").strip()
+    if len(configured) >= 12:
+        return configured
+    return f"{TOKEN}|{OWNER_ID}|cipher-portable-recovery"
+
 def _import_full_db(data):
     import json as _json
     try:
@@ -15003,6 +15130,7 @@ def _register_extra_routes(data, call):
     if data == "adm_webhook_log":            render_adm_webhook_log(call); return True
     if data == "adm_rate_stats":             render_adm_rate_stats(call); return True
     if data == "adm_export_full_db":         action_adm_export_full_db(call); return True
+    if data == "adm_export_recovery":        action_adm_export_recovery(call); return True
     if data == "adm_export_users_csv":       action_adm_export_users_csv(call); return True
     if data == "adm_export_bots_csv":        action_adm_export_bots_csv(call); return True
     if data == "adm_export_trans_csv":       action_adm_export_trans_csv(call); return True
@@ -21368,9 +21496,26 @@ def bot_health_monitor() -> None:
                 bdoc["remote_container_id"] = remote_proc.container_id
                 save_bot(bdoc)
             if getattr(remote_proc, "last_state", "") == "offline":
-                bdoc["status"] = "unavailable"
-                bdoc["last_error"] = "Remote VPS is unreachable."
-                save_bot(bdoc)
+                explicitly_assigned = bool(bdoc.get("node_id") or bdoc.get("assigned_node"))
+                if not explicitly_assigned and bool(_bc_get("auto_failover_enabled")):
+                    with _runner_lock:
+                        RUNNING.pop(bid, None)
+                    bdoc.pop("remote_node_id", None)
+                    bdoc.pop("remote_container_id", None)
+                    bdoc["status"] = "failover_pending"
+                    bdoc["last_error"] = "Remote VPS is unreachable; trying another worker."
+                    save_bot(bdoc)
+                    result = start_child(bdoc)
+                    if not result.get("ok"):
+                        bdoc["status"] = "unavailable"
+                        bdoc["last_error"] = f"Worker failover failed: {result.get('error', 'unknown error')}"
+                        save_bot(bdoc)
+                    else:
+                        log_notification("SYSTEM", f"Bot '{bdoc.get('name')}' failed over to another worker.", uid=bdoc.get("owner"))
+                else:
+                    bdoc["status"] = "unavailable"
+                    bdoc["last_error"] = "Remote VPS is unreachable."
+                    save_bot(bdoc)
                 continue
             if remote_rc is not None:
                 bdoc["status"] = "crashed" if remote_proc.last_state not in {"missing", "stopped"} else "stopped"
@@ -21432,6 +21577,7 @@ def cron_runner() -> None:
             now = time.time()
             downgrade_expired_users()
             expiry_reminders()
+            _process_deployment_queue()
             bot_health_monitor()
             # Scheduled broadcasts
             d = db_load()

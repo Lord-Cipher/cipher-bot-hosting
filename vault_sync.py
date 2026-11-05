@@ -24,12 +24,16 @@ from urllib.parse import quote
 
 import requests
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 # "backups" is excluded so vault snapshots never nest the platform's own
 # published backup artifacts (backup-of-backup growth on every sync).
 EXCLUDES = {"node_modules", ".deps", ".tmp_run", "__pycache__", ".git", "logs", "backups", ".cache"}
 VAULT_SYNC_LOCK = threading.Lock()
 REQUIRED_STATE_DIRS = ("storage", "sandbox")
+PORTABLE_FORMAT = "cipher-portable-backup-v1"
+PORTABLE_KDF_ITERATIONS = 390000
 
 
 def _safe_rel(path: Path, root: Path) -> str:
@@ -66,6 +70,56 @@ def _archive(base_dir: Path) -> tuple[bytes, Dict[str, Any]]:
                 entries.append({"path": rel, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
     payload = buf.getvalue()
     return payload, {"files": entries, "fileCount": len(entries), "sizeBytes": len(payload)}
+
+
+def _portable_key(passphrase: str, salt: bytes) -> bytes:
+    if not isinstance(passphrase, str) or len(passphrase) < 12:
+        raise ValueError("Recovery passphrase must be at least 12 characters.")
+    return base64.urlsafe_b64encode(PBKDF2HMAC(
+        algorithm=hashes.SHA256(), length=32, salt=salt,
+        iterations=PORTABLE_KDF_ITERATIONS,
+    ).derive(passphrase.encode("utf-8")))
+
+
+def export_portable_backup(base_dir: str | Path, passphrase: str) -> bytes:
+    """Create a self-contained encrypted backup of all restorable platform state."""
+    base = Path(base_dir)
+    missing = [name for name in REQUIRED_STATE_DIRS if not (base / name).is_dir()]
+    if missing:
+        raise ValueError(f"Required state directories missing: {', '.join(missing)}")
+    raw_archive, stats = _archive(base)
+    salt = os.urandom(16)
+    encrypted = Fernet(_portable_key(passphrase, salt)).encrypt(raw_archive)
+    payload = {
+        "format": PORTABLE_FORMAT,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "kdf": "PBKDF2-HMAC-SHA256",
+        "iterations": PORTABLE_KDF_ITERATIONS,
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "archiveSha256": hashlib.sha256(encrypted).hexdigest(),
+        **stats,
+        "archive": base64.b64encode(encrypted).decode("ascii"),
+    }
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def import_portable_backup(base_dir: str | Path, bundle: bytes, passphrase: str, overwrite: bool = True) -> Dict[str, Any]:
+    """Authenticate, decrypt, and safely restore a portable backup bundle."""
+    try:
+        payload = json.loads(bundle.decode("utf-8"))
+        if payload.get("format") != PORTABLE_FORMAT:
+            raise ValueError("Unsupported portable backup format.")
+        encrypted = base64.b64decode(str(payload.get("archive") or ""), validate=True)
+        if not encrypted or hashlib.sha256(encrypted).hexdigest() != payload.get("archiveSha256"):
+            raise ValueError("Portable backup integrity check failed.")
+        salt = base64.b64decode(str(payload.get("salt") or ""), validate=True)
+        portable_key = _portable_key(passphrase, salt)
+        result = materialize_snapshot(base_dir, encrypted, portable_key.decode("ascii"), overwrite=overwrite)
+        if result.get("ok"):
+            result.update({"fileCount": payload.get("fileCount", 0), "sizeBytes": payload.get("sizeBytes", 0), "createdAt": payload.get("createdAt")})
+        return result
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def _github(session: requests.Session, method: str, url: str, **kwargs: Any) -> requests.Response:
@@ -128,7 +182,9 @@ def _sync_vault_unlocked(base_dir: str | Path, token: str, repo: str, branch: st
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     snapshot_id = f"{now}-{hashlib.sha256(encrypted).hexdigest()[:12]}"
     manifest = {
-        "format": "cipher-vault-v1",
+        "format": "cipher-vault-v2",
+        "schemaVersion": 2,
+        "components": ["storage", "sandbox", "database", "settings", "encrypted-key-cache"],
         "snapshotId": snapshot_id,
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "encrypted": True,
