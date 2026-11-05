@@ -12,7 +12,8 @@ may run directly with that host runtime. This mode is not an isolation
 boundary, so unapproved user code remains blocked unless Docker Sandbox or a
 remote worker is available.
 
-Unapproved bots are never allowed to run natively beside the control plane.
-Multi-user hosting requires Docker Sandbox or a configured remote worker.
+The native multi-user Node.js fallback is controlled from **Admin → Bot Config
+→ Sandbox → Native Node** and defaults to OFF. It is not an isolation boundary;
+use Docker Sandbox or a remote worker for secure multi-user hosting.
 
 See the [Replit App Storage documentation](https://docs.replit.com/features/data-and-storage/object-storage) for persistent object storage options.

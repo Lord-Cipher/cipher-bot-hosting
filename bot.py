@@ -3607,8 +3607,10 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             # Railway, Render, and Replit commonly provide a native runtime
             # but do not expose a Docker daemon. Only a clean/approved bot may
             # use that fallback because it runs beside the control plane.
-            # Unapproved code must never run natively on a multi-user host.
-            if not trusted:
+            # Native multi-user Node execution is an explicit admin setting;
+            # it remains disabled by default because it is not isolation.
+            native_node_multiuser = kind == "node" and bool(_bc_get("native_node_multiuser"))
+            if not trusted and not native_node_multiuser:
                 return _start_failure(b, "This host has no Docker. Native hosting is limited to owner/approved bots; approve this bot or attach a Sandbox worker.")
             native_host_mode = True
         if native_host_mode:
@@ -3617,6 +3619,8 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             extra_env = dict(extra_env)
             extra_env.setdefault("CIPHER_RUNTIME_DATA", str(runtime_data))
             native_reason = "Docker unavailable; running approved bot with the host runtime."
+            if native_node_multiuser and not trusted:
+                native_reason = "Docker unavailable; admin enabled multi-user native Node.js hosting."
             b["preflight"] = {"verdict": "NATIVE_HOST", "reason": native_reason, "checked": ts_iso()}
             save_bot(b)
             if not install_deps(bot_dir, kind, log):
@@ -6512,11 +6516,13 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_bc_env":              return render_adm_bc_env(call)
     if data.startswith("adm_bc_toggle_"):
         flag_key = data[len("adm_bc_toggle_"):]
+        if flag_key == "native_node_multiuser" and not admin_only_call(call, "full_access"):
+            return
         cur = bool(_bc_get(flag_key))
         set_setting(f"bc_{flag_key}", not cur)
         audit(call.from_user.id, f"bc_toggle_{flag_key}", f"now={not cur}")
         ack(call, f"{flag_key}: {'ON' if not cur else 'OFF'}")
-        if flag_key == "sandbox_network":
+        if flag_key in {"sandbox_network", "native_node_multiuser"}:
             return render_adm_bc_sandbox(call)
         return render_adm_bot_cfg(call)
     # Currency preset quick-select buttons (e.g. adm_bc_set_currency_BDT_৳)
@@ -7887,6 +7893,7 @@ _BOT_CONFIG_DEFAULTS: Dict[str, Any] = {
     "zip_max_files":        50,     # max files in a zip upload
     "env_strip_secrets":    True,   # strip BOT_TOKEN etc from child env
     "sandbox_network":      True,   # allow bots to use network
+    "native_node_multiuser":False,  # allow unapproved Node bots without Docker
     "idle_timeout_mins":    0,      # 0 = no idle timeout
     "resource_check_secs":  30,     # interval for resource checks
 }
@@ -8819,14 +8826,17 @@ def render_adm_bc_sandbox(call: types.CallbackQuery) -> None:
     wipe   = _ff_get("sandbox_wipe")
     delay  = _bc_get("sandbox_wipe_delay")
     net    = bool(_bc_get("sandbox_network"))
+    native_node = bool(_bc_get("native_node_multiuser"))
     cap = (
         f"<b>🧱 {sc('Sandbox Settings')}</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('File Wipe',   '✅ ON' if wipe else '❌ OFF')}\n"
         f"{bullet('Wipe Delay',  f'{delay}s after start')}\n"
         f"{bullet('Network',     '✅ Allowed' if net else '❌ Blocked')}\n"
+        f"{bullet('Native Node (no Docker)', '✅ ON' if native_node else '❌ OFF')}\n"
         f"{G['div']}\n"
-        f"<i>{sc('File Wipe removes source .py/.js files after bot starts so child bots cannot read their own code.')}</i>{FOOTER}"
+        f"<i>{sc('File Wipe removes source .py/.js files after bot starts so child bots cannot read their own code.')}</i>\n"
+        f"<i>{sc('Native Node runs unapproved JavaScript beside the panel; use only when you accept that risk.')}</i>{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -8839,6 +8849,9 @@ def render_adm_bc_sandbox(call: types.CallbackQuery) -> None:
         Btn(f"{'✅' if net else '❌'}  Nᴇᴛᴡᴏʀᴋ",
             callback_data="adm_bc_toggle_sandbox_network",
             style="success" if net else "danger"),
+        Btn(f"{'✅' if native_node else '❌'}  Nᴀᴛɪᴠᴇ Nᴏᴅᴇ",
+            callback_data="adm_bc_toggle_native_node_multiuser",
+            style="success" if native_node else "danger"),
     )
     kb.add(Btn(f"{G['back']}  Bᴏᴛ Cᴏɴꜰɪɢ", callback_data="adm_bot_cfg", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("bot_config", PHOTOS["admin"]), cap, kb, call=call)

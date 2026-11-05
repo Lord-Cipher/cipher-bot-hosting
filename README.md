@@ -117,10 +117,12 @@ remain blocked unless a Docker Sandbox or authenticated remote worker is
 available. Railway builds include both Python and Node.js through
 `nixpacks.toml`; Render and Replit should use their native runtimes.
 
-Unapproved bots are never allowed to run natively beside the control plane.
-Multi-user hosting therefore requires Docker Sandbox or a dedicated remote
-worker; native host mode is restricted to owner-owned or administrator-approved
-bots.
+Native multi-user Node.js hosting is controlled from **Admin → Bot Config →
+Sandbox → Native Node** and is OFF by default. When enabled, unapproved Node.js
+bots may run on the host if Docker and a remote worker are unavailable. This is
+not isolation; use the switch only when you accept that risk. Python and shell
+workloads remain blocked in this mode. Docker Sandbox or a dedicated remote
+worker remains the secure multi-user option.
 
 WhatsApp clients need outbound network access. Keep the global Sandbox network
 setting and the individual bot's **Sandbox Network** switch enabled only for

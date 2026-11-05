@@ -39,10 +39,11 @@ Python control process. This host-native fallback is intentionally limited to
 owner-owned or administrator-approved bots; untrusted user code still requires
 Docker Sandbox or a configured remote worker.
 
-Unapproved bots are never allowed to run natively beside the control plane.
-Multi-user hosting requires Docker Sandbox or a configured remote worker. The
-Railway native fallback is restricted to owner-owned or administrator-approved
-bots.
+The Railway native fallback is controlled from **Admin → Bot Config → Sandbox
+→ Native Node** and defaults to OFF. Turn it ON only if you intentionally want
+unapproved users' Node.js bots to run beside the control plane when no Docker or
+remote worker is available. This is not isolation; Docker Sandbox or a remote
+worker is recommended for secure multi-user hosting.
 
 ### Cipher Vault key management
 

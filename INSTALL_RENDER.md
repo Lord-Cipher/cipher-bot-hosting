@@ -13,7 +13,9 @@ service. This is host-native execution rather than a security sandbox; users'
 unapproved code remains blocked unless Docker Sandbox or a remote worker is
 configured.
 
-Unapproved bots are never allowed to run natively beside the control plane.
-Multi-user hosting requires Docker Sandbox or a configured remote worker.
+The native multi-user Node.js fallback is controlled from **Admin → Bot Config
+→ Sandbox → Native Node** and defaults to OFF. It runs unapproved Node.js bots
+beside the control plane when enabled, so use Docker Sandbox or a remote worker
+for secure multi-user hosting.
 
 See the [Render persistent disk documentation](https://render.com/docs/disks) for disk setup and limitations.
