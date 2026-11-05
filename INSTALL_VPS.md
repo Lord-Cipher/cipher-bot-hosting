@@ -140,7 +140,8 @@ dnf, or yum package manager, starts the service, verifies the daemon, adds the
 SSH user to the Docker group when possible, and pulls the pinned
 `node:22-slim` and `python:3.11-slim` images. It requires root or passwordless
 sudo and does not use an unverified remote shell installer. A new SSH session
-may be required before Docker-group membership takes effect.
+may be required before Docker-group membership takes effect. For non-root SSH
+accounts, commands run through the non-interactive `sudo -n su -c` root shell.
 
 When upstream publishes a new runtime image, use **Admin → Infrastructure Nodes
 → Update Images** to pull and verify the newest `node:22-slim` and

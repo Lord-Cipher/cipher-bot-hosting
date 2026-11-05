@@ -344,44 +344,43 @@ def bootstrap_docker_worker(node: Dict[str, Any], secret: str, pull_images: bool
     pulls only the pinned runtime image tags used by this project. The caller
     must be an authorized administrator.
     """
-    pull_cmd = "$DOCKER pull node:22-slim && $DOCKER pull python:3.11-slim" if pull_images else ":"
+    pull_cmd = "root_cmd docker pull node:22-slim\nroot_cmd docker pull python:3.11-slim" if pull_images else ":"
     script = r'''set -eu
-if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo -n"; fi
-if [ "$(id -u)" -ne 0 ] && ! $SUDO true >/dev/null 2>&1; then
+root_cmd() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo -n su -c "$(printf '%q ' "$@")"
+  fi
+}
+if [ "$(id -u)" -ne 0 ] && ! sudo -n su -c true >/dev/null 2>&1; then
   echo "ERROR: root or passwordless sudo is required" >&2; exit 20
 fi
 if ! command -v docker >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io ca-certificates
+    root_cmd env DEBIAN_FRONTEND=noninteractive apt-get update
+    root_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io ca-certificates
   elif command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y docker ca-certificates
+    root_cmd dnf install -y docker ca-certificates
   elif command -v yum >/dev/null 2>&1; then
-    $SUDO yum install -y docker ca-certificates
+    root_cmd yum install -y docker ca-certificates
   else
     echo "ERROR: unsupported Linux package manager (need apt-get, dnf, or yum)" >&2; exit 21
   fi
 fi
 if command -v systemctl >/dev/null 2>&1; then
-  $SUDO systemctl enable --now docker
+  root_cmd systemctl enable --now docker
 elif command -v service >/dev/null 2>&1; then
-  $SUDO service docker start || true
-fi
-if ! docker info >/dev/null 2>&1; then
-  if [ "$(id -u)" -ne 0 ]; then
-    $SUDO docker info >/dev/null
-  else
-    docker info >/dev/null
-  fi
+  root_cmd service docker start || true
 fi
 if [ "$(id -u)" -ne 0 ]; then
-  $SUDO usermod -aG docker "$USER" || true
+  root_cmd usermod -aG docker "$USER" || true
 fi
-if [ "$(id -u)" -eq 0 ]; then DOCKER="docker"; else DOCKER="$SUDO docker"; fi
+root_cmd docker info >/dev/null
 ''' + pull_cmd + r'''
-$DOCKER run --rm --network none node:22-slim node --version
-$DOCKER run --rm --network none python:3.11-slim python --version
-$DOCKER info --format 'DOCKER_VERSION={{.ServerVersion}}'
+root_cmd docker run --rm --network none node:22-slim node --version
+root_cmd docker run --rm --network none python:3.11-slim python --version
+root_cmd docker info --format 'DOCKER_VERSION={{.ServerVersion}}'
 echo 'CIPHER_DOCKER_WORKER_READY'
 '''
     code, out, err = _run_fresh(node, secret, "bash -lc " + shlex.quote(script), timeout=900)
@@ -398,13 +397,22 @@ echo 'CIPHER_DOCKER_WORKER_READY'
 def refresh_docker_images(node: Dict[str, Any], secret: str) -> Dict[str, Any]:
     """Fetch current registry updates for the pinned worker runtime images."""
     script = r'''set -eu
-if [ "$(id -u)" -eq 0 ]; then DOCKER="docker"; else DOCKER="sudo -n docker"; fi
-$DOCKER info >/dev/null
-$DOCKER pull node:22-slim
-$DOCKER pull python:3.11-slim
-$DOCKER run --rm --network none node:22-slim node --version
-$DOCKER run --rm --network none python:3.11-slim python --version
-$DOCKER info --format 'DOCKER_VERSION={{.ServerVersion}}'
+root_cmd() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo -n su -c "$(printf '%q ' "$@")"
+  fi
+}
+if [ "$(id -u)" -ne 0 ] && ! sudo -n su -c true >/dev/null 2>&1; then
+  echo "ERROR: root or passwordless sudo is required" >&2; exit 20
+fi
+root_cmd docker info >/dev/null
+root_cmd docker pull node:22-slim
+root_cmd docker pull python:3.11-slim
+root_cmd docker run --rm --network none node:22-slim node --version
+root_cmd docker run --rm --network none python:3.11-slim python --version
+root_cmd docker info --format 'DOCKER_VERSION={{.ServerVersion}}'
 echo 'CIPHER_DOCKER_IMAGES_READY'
 '''
     code, out, err = _run_fresh(node, secret, "bash -lc " + shlex.quote(script), timeout=900)

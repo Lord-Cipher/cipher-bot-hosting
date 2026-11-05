@@ -279,8 +279,9 @@ assert _bootstrap_calls and _bootstrap_calls[0][1] == 900
 bootstrap_command = _bootstrap_calls[0][0]
 assert "apt-get install -y docker.io" in bootstrap_command
 assert "dnf install -y docker" in bootstrap_command
-assert "$DOCKER pull node:22-slim" in bootstrap_command
-assert "$DOCKER pull python:3.11-slim" in bootstrap_command
+assert "root_cmd docker pull node:22-slim" in bootstrap_command
+assert "root_cmd docker pull python:3.11-slim" in bootstrap_command
+assert "sudo -n su -c" in bootstrap_command
 assert "curl | sh" not in bootstrap_command
 
 _refresh_calls = []
@@ -298,5 +299,6 @@ finally:
     remote_worker._run_fresh = _old_run_fresh
 assert refreshed["ok"] is True, refreshed
 assert refreshed["docker_version"] == "26.0.1", refreshed
-assert "$DOCKER pull node:22-slim" in _refresh_calls[0][0]
-assert "$DOCKER pull python:3.11-slim" in _refresh_calls[0][0]
+assert "root_cmd docker pull node:22-slim" in _refresh_calls[0][0]
+assert "root_cmd docker pull python:3.11-slim" in _refresh_calls[0][0]
+assert "sudo -n su -c" in _refresh_calls[0][0]
