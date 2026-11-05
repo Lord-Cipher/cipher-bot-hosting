@@ -681,6 +681,7 @@ _OMEGATECH_MODELS: Dict[str, Tuple[str, Callable[[str], Dict[str, Any]]]] = {
     "qwen-80b":       ("Agents", lambda p: {"action": "chat", "message": p, "model": "qwen7b", "slug": "freeai", "auto_approve": "true", "voice": "kokoro"}),
     # Docs-confirmed and live-smoke-tested conversational routes.
     "chatgpt-v2":     ("Chatgpt-v2",        lambda p: {"action": "chat", "message": p}),
+    "gemini-pro":     ("gemini-pro",        lambda p: {"text": p}),
     "deepai-deepseek-v3-2": ("Deep-ai", lambda p: {"action": "chat", "message": p, "model": "deepseek-v3.2"}),
     "deepai-gemini-flash-lite": ("Deep-ai", lambda p: {"action": "chat", "message": p, "model": "gemini-2.5-flash-lite"}),
     "deepai-llama-3-3-70b": ("Deep-ai", lambda p: {"action": "chat", "message": p, "model": "llama-3.3-70b-instruct"}),
@@ -727,20 +728,16 @@ for _agent_id, _agent_key in _AGENTS_INTERNAL_KEYS.items():
     )
 
 # This bot is intentionally a coding/reasoning assistant, not a general
-# media-model browser. Keep only the requested GPT, DeepSeek, and Claude
-# families in the selectable catalog. Provider routes outside this allowlist
-# are not exposed to users, admins, plan pools, or fallback chains.
+# Keep only text routes that returned usable answers in the latest live smoke
+# test. Provider routes outside this allowlist are not exposed to users,
+# admins, plan pools, or fallback chains.
 _AI_TARGET_LEGACY_KEYS = frozenset({
-    "claude", "chatbot", "gpt-4o-mini", "deepseek-cli",
-    "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2",
-    "deepai-gemini-flash-lite", "deepai-gpt-oss-120b", "deepai-gpt-5-nano",
+    "gpt-4o-mini", "deepseek-cli", "chatgpt-v2", "gemini-pro",
 })
-_AI_TARGET_AGENT_IDS = frozenset({
-    "deepseek-r1", "deepseek-r1-7b", "deepseek-coder",
-    "claude-sonnet-4", "claude-opus-4", "gpt-4o", "qwen7b",
-    "qwen3-8b", "qwen-coder", "qwen3-coder", "qwen-coder-32b",
-    "gemini-2.5-pro",
-})
+# The documented Agents route currently returns HTTP 500 for both its chat
+# and coder request contracts, so no Agents model is active until it passes a
+# fresh live smoke test.
+_AI_TARGET_AGENT_IDS = frozenset()
 _OMEGATECH_MODELS = {
     key: route for key, route in _OMEGATECH_MODELS.items()
     if key in _AI_TARGET_LEGACY_KEYS or key in {
@@ -897,10 +894,10 @@ def _call_kaalix_model(model_name: str, prompt: str) -> Optional[str]:
 def _ai_scan_code(code: str, filename: str = "file.py") -> Optional[Dict[str, Any]]:
     """Run the configured AI security scanner with safe fallbacks."""
     prompt = f"{_AI_SCAN_PROMPT}\n{code[:4000]}"
-    selected = str(get_setting("ai_scanner_model", "claude") or "claude").strip().lower()
+    selected = str(get_setting("ai_scanner_model", "gpt-4o-mini") or "gpt-4o-mini").strip().lower()
     if selected not in _AI_OPERATIVE_KEYS:
-        selected = "claude"
-    candidates = [selected] + [m for m in ("gpt-4o-mini", "deepseek-cli", "claude") if m != selected]
+        selected = "gpt-4o-mini"
+    candidates = [selected] + [m for m in ("gpt-4o-mini", "deepseek-cli", "chatgpt-v2", "gemini-pro") if m != selected]
     res_text = None
     used_model = None
     for model in candidates:
@@ -22065,7 +22062,7 @@ def _ai_selected_model(uid: int, user_plan: str, mode: str = "chat") -> Optional
 
 def ai_model_tag(uid: int, plan: str) -> str:
     """Return the stable public model-family tag for the operative that answered."""
-    model = AI_LAST_MODEL_USED.get(uid) or _ai_selected_model(uid, plan) or "claude"
+    model = AI_LAST_MODEL_USED.get(uid) or _ai_selected_model(uid, plan) or "gpt-4o-mini"
     return _public_ai_model_name(model).upper()
 
 def _call_ai_chain(
@@ -22511,7 +22508,7 @@ def handle_ai_chat_message(m: types.Message) -> None:
                 del session[:-(AI_MEMORY_TURNS * 2)]
             _remember_ai_turn(m.from_user.id, m.text, clean_res)
             
-            model_key = AI_LAST_MODEL_USED.get(m.from_user.id) or _ai_selected_model(m.from_user.id, plan, mode) or "claude"
+            model_key = AI_LAST_MODEL_USED.get(m.from_user.id) or _ai_selected_model(m.from_user.id, plan, mode) or "gpt-4o-mini"
             final_text = (
                 f"🤖 <b>{esc(_public_ai_model_name(model_key))}</b>\n"
                 f"{G['div']}\n"
@@ -23310,22 +23307,11 @@ def action_bot_reject_fix(call: types.CallbackQuery, bot_id: str) -> None:
     show_text(call.message.chat.id, text, kb, call=call)
 
 _AI_OPERATIVE_LABELS = {
-    # Legacy OmegaTech endpoints confirmed usable in live checks.
-    "claude": "Claude",
-    "claude-haiku": "Claude Haiku",
-    "chatbot": "Claude Chat",
+    # OmegaTech text routes confirmed usable in the latest live checks.
     "gpt-4o-mini": "GPT-4o Mini",
     "deepseek-cli": "DeepSeek R1",
-    "qwen-80b": "Qwen7B Coding",
-    # Each Secret catalog model is a separate user/admin-selectable operative.
-    "claude-fable-5": "Claude Fable 5",
-    "gpt-5-5": "GPT-5.5",
     "chatgpt-v2": "ChatGPT v2",
-    "deepai-deepseek-v3-2": "DeepSeek V3.2",
-    "deepai-gemini-flash-lite": "Gemini 2.5 Flash Lite",
-    "deepai-llama-3-3-70b": "Llama 3.3 70B",
-    "deepai-gpt-oss-120b": "GPT OSS 120B",
-    "deepai-gpt-5-nano": "GPT-5 Nano",
+    "gemini-pro": "Gemini Pro",
 }
 _AI_OPERATIVE_LABELS = {
     key: label for key, label in _AI_OPERATIVE_LABELS.items()
@@ -23349,12 +23335,12 @@ def _public_ai_model_name(model: str) -> str:
     return "Cipher AI"
 
 _AI_PLAN_DEFAULT_MODELS = {
-    "free":       ["gpt-4o-mini", "chatbot", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite"],
-    "starter":    ["gpt-4o-mini", "chatbot", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b"],
-    "basic":      ["claude", "deepseek-cli", "claude-haiku", "gpt-4o-mini", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b"],
-    "pro":        ["claude-fable-5", "gpt-5-5", "deepseek-cli", "claude", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b", "deepai-gpt-5-nano"],
-    "enterprise": ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b", "deepai-gpt-5-nano"],
-    "lifetime":   ["claude-fable-5", "gpt-5-5", "claude", "deepseek-cli", "gpt-4o-mini", "claude-haiku", "qwen-80b", "chatgpt-v2", "deepai-deepseek-v3-2", "deepai-gemini-flash-lite", "deepai-llama-3-3-70b", "deepai-gpt-oss-120b", "deepai-gpt-5-nano"],
+    "free":       ["gpt-4o-mini", "chatgpt-v2"],
+    "starter":    ["gpt-4o-mini", "chatgpt-v2", "deepseek-cli"],
+    "basic":      ["gpt-4o-mini", "chatgpt-v2", "deepseek-cli", "gemini-pro"],
+    "pro":        ["gpt-4o-mini", "chatgpt-v2", "deepseek-cli", "gemini-pro"],
+    "enterprise": ["gpt-4o-mini", "chatgpt-v2", "deepseek-cli", "gemini-pro"],
+    "lifetime":   ["gpt-4o-mini", "chatgpt-v2", "deepseek-cli", "gemini-pro"],
 }
 # Moondream is retained in the auditable catalog for admin assignment, but the
 # provider currently returns HTTP 500 for text-only action=chat requests, so it
@@ -23688,9 +23674,9 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     
     cap += f"\n{G['div']}{FOOTER}"
     kb.add(Btn("🧠  Pʟᴀɴ-Mᴏᴅᴇʟ Rᴏᴜᴛɪɴɢ", callback_data="adm_ai_routing_menu", style="success"))
-    scanner_model = str(get_setting("ai_scanner_model", "claude") or "claude")
+    scanner_model = str(get_setting("ai_scanner_model", "gpt-4o-mini") or "gpt-4o-mini")
     if scanner_model not in _AI_OPERATIVE_KEYS:
-        scanner_model = "claude"
+        scanner_model = "gpt-4o-mini"
     kb.add(Btn(f"🛡️  File Scanner AI: {ai_label(scanner_model)}",
                callback_data="adm_ai_scanner_model", style="success"))
     kb.add(Btn("📢 Update AI System News", callback_data="adm_ai_news_prompt", style="primary"))
@@ -23699,9 +23685,9 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
 
 def render_adm_ai_scanner_model(call: types.CallbackQuery) -> None:
     """Choose the independent AI operative used for malware scanning."""
-    selected = str(get_setting("ai_scanner_model", "claude") or "claude")
+    selected = str(get_setting("ai_scanner_model", "gpt-4o-mini") or "gpt-4o-mini")
     if selected not in _AI_OPERATIVE_KEYS:
-        selected = "claude"
+        selected = "gpt-4o-mini"
     cap = (
         f"<b>🛡️ {sc('File Scanner AI')}</b>\n"
         f"{G['div_eq']}\n"
@@ -23848,7 +23834,7 @@ def get_ai_model(uid: int) -> str:
 def get_plan_primary_model(plan: str) -> str:
     """First operative in the plan pool."""
     pool = get_plan_ai_models(plan)
-    return pool[0] if pool else "claude"
+    return pool[0] if pool else "gpt-4o-mini"
 
 def get_plan_fallback_model(plan: str) -> str:
     """Second operative in the plan pool (or the primary when the pool has one entry)."""
@@ -23933,7 +23919,7 @@ def action_ai_file_fix(call: types.CallbackQuery, token: str) -> None:
         out_name = f"edited_{Path(fname).name or 'file.py'}"
         out_path = Path(out_dir) / out_name
         out_path.write_text(code, encoding="utf-8")
-        model_key = used or AI_LAST_MODEL_USED.get(uid) or "claude"
+        model_key = used or AI_LAST_MODEL_USED.get(uid) or "gpt-4o-mini"
         caption = (
             f"🛠 <b>{sc('AI Edited File')}</b>\n"
             f"🤖 <b>{esc(_public_ai_model_name(model_key))}</b>\n"
@@ -24034,7 +24020,7 @@ def _handle_ai_chat_document(m: types.Message) -> None:
             clean_res = clean_res.strip()
             if not clean_res:
                 clean_res = _ai_unavailable_reply()
-            model_key = AI_LAST_MODEL_USED.get(m.from_user.id) or _ai_selected_model(m.from_user.id, plan) or "claude"
+            model_key = AI_LAST_MODEL_USED.get(m.from_user.id) or _ai_selected_model(m.from_user.id, plan) or "gpt-4o-mini"
             final_text = (
                 f"🤖 <b>{esc(_public_ai_model_name(model_key))}</b> — {sc('AI File Analysis')}\n"
                 f"📂 <code>{esc(fname)}</code>\n"

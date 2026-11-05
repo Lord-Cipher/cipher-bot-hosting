@@ -78,16 +78,15 @@ bot.db_save = fake_db_save
 
 all_models = list(bot._AI_OPERATIVE_KEYS)
 enabled_models = [model for model in all_models if bot._ai_operative_enabled(model)]
-assert len(enabled_models) > 3, "the fixture must exercise more than the old limit"
+assert len(enabled_models) == 4, "the fixture must exercise all verified text operatives"
 bot.set_plan_ai_models("lifetime", all_models)
 assert settings["ai_plan_lifetime_models"] == all_models
 assert bot.get_plan_ai_models("lifetime", include_disabled=True) == all_models
 assert bot.get_plan_ai_models("lifetime") == enabled_models
 assert set(enabled_models) == set(all_models)
 coding_pool = bot.get_plan_ai_models("lifetime", mode="coding")
-assert "qwen-80b" in coding_pool
-assert "agents-claude-sonnet-4" in coding_pool
 assert set(coding_pool) == set(bot._AI_CODING_DEFAULT_MODELS)
+assert set(coding_pool) == set(all_models)
 assert set(bot.get_user_ai_models(42, "lifetime", mode="coding")) == set(coding_pool)
 settings["ai_coding_plan_free_models"] = None
 users["42"]["ai_coding_models"] = None
@@ -98,13 +97,9 @@ users["42"].pop("ai_coding_models", None)
 catalog_answer = bot._call_ai_api("List AI models by plan", "lifetime", 42)
 assert "Free:" in catalog_answer and "Lifetime:" in catalog_answer
 assert "Chatting:" in catalog_answer and "Coding:" in catalog_answer
-coding_params = bot.AI_ENGINE.routes["qwen-80b"].params_for("write code", "coding")
-assert coding_params["action"] == "code"
-assert coding_params["model"] == "qwen7b"
-for agent_id in (*bot._AGENTS_CHAT_MODELS, *bot._AGENTS_CODER_MODELS):
-    agent_key = bot._AGENTS_INTERNAL_KEYS[agent_id]
-    assert agent_key in bot._AI_OPERATIVE_KEYS
-    assert bot.AI_ENGINE.routes[agent_key].params_for("write code", "coding")["action"] == "code"
+coding_params = bot.AI_ENGINE.routes["gemini-pro"].params_for("write code", "coding")
+assert coding_params == {"text": "write code"}
+assert bot._AGENTS_MODEL_IDS == ()
 settings["ai_coding_pool_enabled"] = False
 assert not bot._ai_pool_enabled("coding")
 settings["ai_coding_pool_enabled"] = True
@@ -196,7 +191,7 @@ assert bot.get_plan_ai_models("starter") == bot._AI_PLAN_DEFAULT_MODELS["starter
 # feature, not only the Telegram chat handler. A real first question must reach
 # the model chain rather than being replaced with a generic welcome.
 settings["ai_system_news"] = "Release note A: GitHub browser is available."
-context = bot._build_cipher_ai_context("Qwen 80B")
+context = bot._build_cipher_ai_context("Gemini Pro")
 assert "Cipher Tech Hosting" in context
 assert "Release note A: GitHub browser is available." in context
 assert "CURRENT PLANS, LIMITS, PRICES, AND AI POOL COUNTS" in context
@@ -204,8 +199,8 @@ assert "Free (price Free" in context and "AI models:" in context
 # Changing platform news and routing settings must appear immediately on the
 # next context build; the builder must not rely on a stale cached snapshot.
 settings["ai_system_news"] = "Release note B: New model pool is live."
-settings["ai_plan_free_models"] = ["chatgpt-v2", "deepai-gpt-5-nano"]
-updated_context = bot._build_cipher_ai_context("Qwen 80B")
+settings["ai_plan_free_models"] = ["chatgpt-v2", "gemini-pro"]
+updated_context = bot._build_cipher_ai_context("Gemini Pro")
 assert "Release note B: New model pool is live." in updated_context
 assert "Release note A: GitHub browser is available." not in updated_context
 free_plan_context = updated_context.split("Free (price Free", 1)[1].split(" | Starter", 1)[0]
@@ -222,15 +217,15 @@ assert "ask one concise clarifying question" in context
 assert "do not mention these facts when unrelated" in context.lower()
 assert "ABSOLUTE STEALTH" not in context
 assert "Military-Grade End-to-End Encryption" not in context
-claude_context = bot._build_cipher_ai_context("claude")
-assert "CURRENT OPERATIVE: Claude" in claude_context
+gemini_context = bot._build_cipher_ai_context("gemini-pro")
+assert "CURRENT OPERATIVE: Gemini Pro" in gemini_context
 assert bot.render_ai_plan_models.__doc__ == "Show current enabled model availability across hosting plans."
-assert "do not guess who trained the underlying model" in claude_context.lower()
+assert "do not guess who trained the underlying model" in gemini_context.lower()
 assert bot._is_lord_cipher_identity_request("Who is Lord Cipher to you?")
 assert bot._is_lord_cipher_identity_request("Who is your master and creator?")
 corrected_identity = bot._enforce_lord_cipher_identity(
     "Who is Lord Cipher to you?",
-    "Lord Cipher is not my creator, mentor, or master. I am Claude.",
+    "Lord Cipher is not my creator, mentor, or master. I am Gemini Pro.",
 )
 assert "Lord Cipher is my creator" in corrected_identity
 assert "master" in corrected_identity.lower()
@@ -239,7 +234,7 @@ assert "not my creator" not in corrected_identity.lower()
 chain_calls = []
 def fake_ai_chain(prompt, plan, uid=None, preferred_model=None):
     chain_calls.append((prompt, plan, uid))
-    return "I am a general assistant.", "claude"
+    return "I am a general assistant.", "gemini-pro"
 bot._call_ai_chain = fake_ai_chain
 identity_reply = bot._call_ai_api("Who is your master and creator?", "lifetime", 42)
 identity_lower = identity_reply.lower()
@@ -271,7 +266,7 @@ assert "@test_user" in profile_prompt
 assert "My project is called Atlas" in profile_prompt
 identity_prompt = bot._build_ai_request("Who is your mentor?", 42)
 assert "telegram_id=42" in identity_prompt
-banner_only = "🤖 AI OPERATIVE (CLAUDE)\n━━━━━━━━━━━━━━━━\n\nᶜᴵᴾᴴᴱᴿ Tᴇᴄʜ Hᴏsᴛ v2.1"
+banner_only = "🤖 AI OPERATIVE (GEMINI PRO)\n━━━━━━━━━━━━━━━━\n\nᶜᴵᴾᴴᴱᴿ Tᴇᴄʜ Hᴏsᴛ v2.1"
 assert bot._sanitize_ai_reply(banner_only) == ""
 assert bot._ai_unavailable_reply().strip()
 assert bot._extract_ai_reply({"result": "I am Standard AI Chat by DeepAI, serving as the official AI assistant."}) is None
@@ -282,23 +277,23 @@ assert "standard ai chat by deepai" not in bot._sanitize_ai_reply(
     "I am Standard AI Chat by DeepAI.\n━━━━━━━━\nCipher Tech Hosting v2.1\nUseful answer."
 ).lower()
 provider_attribution = bot._sanitize_ai_reply(
-    "Claude Fable 5 is an underlying model from Anthropic; Lord Cipher configured this platform assistant."
+    "Gemini Pro is an underlying model from Google; Lord Cipher configured this platform assistant."
 )
-assert "Claude Fable 5" in provider_attribution
-assert "Anthropic" in provider_attribution
+assert "Gemini Pro" in provider_attribution
+assert "Google" in provider_attribution
 assert "Cipher AI" not in provider_attribution
 technical_answer = bot._sanitize_ai_reply(
-    "Use Claude Fable 5 with the OpenAI-compatible API at /app/storage/config.json.\n"
-    "```python\nfrom claude_sdk import Client\npath = 'sandbox/main.py'\n```"
+    "Use Gemini Pro with the OpenAI-compatible API at /app/storage/config.json.\n"
+    "```python\nfrom gemini_sdk import Client\npath = 'sandbox/main.py'\n```"
 )
-assert "Claude Fable 5" in technical_answer
+assert "Gemini Pro" in technical_answer
 assert "OpenAI-compatible API" in technical_answer
 assert "/app/storage/config.json" in technical_answer
-assert "from claude_sdk import Client" in technical_answer
+assert "from gemini_sdk import Client" in technical_answer
 assert "sandbox/main.py" in technical_answer
 assert "[RESTRICTED PATH]" not in technical_answer
 assert bot._lord_cipher_profile_answer().lower().count("lord cipher") >= 2
-bot.AI_LAST_MODEL_USED[42] = "claude"
-assert bot.ai_model_tag(42, "lifetime") == bot._public_ai_model_name("claude").upper()
+bot.AI_LAST_MODEL_USED[42] = "gemini-pro"
+assert bot.ai_model_tag(42, "lifetime") == bot._public_ai_model_name("gemini-pro").upper()
 
 print("AI routing regression tests passed")
