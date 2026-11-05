@@ -282,3 +282,21 @@ assert "dnf install -y docker" in bootstrap_command
 assert "$DOCKER pull node:22-slim" in bootstrap_command
 assert "$DOCKER pull python:3.11-slim" in bootstrap_command
 assert "curl | sh" not in bootstrap_command
+
+_refresh_calls = []
+_old_run_fresh = remote_worker._run_fresh
+remote_worker._run_fresh = lambda node, secret, command, timeout=60: (
+    _refresh_calls.append((command, timeout)) or
+    (0, "DOCKER_VERSION=26.0.1\nCIPHER_DOCKER_IMAGES_READY\n", "")
+)
+try:
+    refreshed = remote_worker.refresh_docker_images(
+        {"hostname": "2001:db8::25", "username": "cipherbot", "auth_method": "key"},
+        "ED25519",
+    )
+finally:
+    remote_worker._run_fresh = _old_run_fresh
+assert refreshed["ok"] is True, refreshed
+assert refreshed["docker_version"] == "26.0.1", refreshed
+assert "$DOCKER pull node:22-slim" in _refresh_calls[0][0]
+assert "$DOCKER pull python:3.11-slim" in _refresh_calls[0][0]

@@ -393,3 +393,26 @@ echo 'CIPHER_DOCKER_WORKER_READY'
         if line.startswith("DOCKER_VERSION="):
             version = line.split("=", 1)[1].strip()
     return {"ok": "CIPHER_DOCKER_WORKER_READY" in out, "docker_version": version, "output": combined[-4000:], "reconnect_required": True}
+
+
+def refresh_docker_images(node: Dict[str, Any], secret: str) -> Dict[str, Any]:
+    """Fetch current registry updates for the pinned worker runtime images."""
+    script = r'''set -eu
+if [ "$(id -u)" -eq 0 ]; then DOCKER="docker"; else DOCKER="sudo -n docker"; fi
+$DOCKER info >/dev/null
+$DOCKER pull node:22-slim
+$DOCKER pull python:3.11-slim
+$DOCKER run --rm --network none node:22-slim node --version
+$DOCKER run --rm --network none python:3.11-slim python --version
+$DOCKER info --format 'DOCKER_VERSION={{.ServerVersion}}'
+echo 'CIPHER_DOCKER_IMAGES_READY'
+'''
+    code, out, err = _run_fresh(node, secret, "bash -lc " + shlex.quote(script), timeout=900)
+    combined = (out + "\n" + err).strip()
+    if code != 0:
+        return {"ok": False, "error": combined[-1200:] or f"image refresh exited with code {code}", "output": combined[-4000:]}
+    version = ""
+    for line in out.splitlines():
+        if line.startswith("DOCKER_VERSION="):
+            version = line.split("=", 1)[1].strip()
+    return {"ok": "CIPHER_DOCKER_IMAGES_READY" in out, "docker_version": version, "output": combined[-4000:]}

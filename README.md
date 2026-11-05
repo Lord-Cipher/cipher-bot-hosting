@@ -107,6 +107,10 @@ starts Docker, verifies the daemon, adds a non-root SSH user to the Docker
 group when possible, and pulls the pinned `node:22-slim` and `python:3.11-slim`
 runtime images. It requires root or passwordless sudo and supports apt, dnf,
 and yum; it never uses an unverified `curl | sh` installer.
+After a runtime image receives an upstream update, use the same node's
+**Update Images** button to pull and verify the newest image digests for those
+pinned tags. The refresh time is stored on the node and recorded in the audit
+log; it does not switch to an unreviewed floating `latest` tag.
 
 ## Node.js and WhatsApp bots
 

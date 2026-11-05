@@ -142,6 +142,11 @@ SSH user to the Docker group when possible, and pulls the pinned
 sudo and does not use an unverified remote shell installer. A new SSH session
 may be required before Docker-group membership takes effect.
 
+When upstream publishes a new runtime image, use **Admin → Infrastructure Nodes
+→ Update Images** to pull and verify the newest `node:22-slim` and
+`python:3.11-slim` images. The action is explicit, audited, and keeps the
+project's major runtime tags pinned instead of silently switching to `latest`.
+
 Create a dedicated key on a trusted machine with `ssh-keygen -t ed25519 -f ~/.ssh/cipher-sandbox -N '' -C cipher-sandbox`. The current panel accepts unencrypted Ed25519, ECDSA, and RSA private keys; it does not accept a passphrase-protected private key. Keep the private key private and use it only for this worker.
 
 Add the one-line public key from `~/.ssh/cipher-sandbox.pub` to `/home/cipherbot/.ssh/authorized_keys`, then set permissions:

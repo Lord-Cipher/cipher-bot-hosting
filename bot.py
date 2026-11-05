@@ -40,7 +40,7 @@ from flask import Flask, jsonify, request
 from vault_sync import download_latest_snapshot, materialize_snapshot, sync_vault
 from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
-from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle, bootstrap_docker_worker
+from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle, bootstrap_docker_worker, refresh_docker_images
 from ai_preflight import run_preflight
 from community_products import (
     award_for_event, create_product, developer_level, ensure_db as ensure_community_db,
@@ -5768,6 +5768,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return action_adm_node_test(call, data.split(":", 1)[1])
     if data.startswith("adm_node_bootstrap:"):
         return action_adm_node_bootstrap(call, data.split(":", 1)[1])
+    if data.startswith("adm_node_refresh_images:"):
+        return action_adm_node_refresh_images(call, data.split(":", 1)[1])
     if data.startswith("adm_node_edit:"):
         if not admin_only_call(call, "full_access"): return
         USER_STATES[call.from_user.id] = {"flow": "await_adm_node_edit", "node_id": data.split(":", 1)[1]}
@@ -19841,6 +19843,8 @@ def _node_health_card(call: types.CallbackQuery, node_id: str) -> None:
                 lines.append(f"{label_name}: <code>{esc(caps[key])}</code>")
     if node.get("last_test"):
         lines.append(f"Last check: <code>{esc(node['last_test'])}</code>")
+    if node.get("last_image_refresh"):
+        lines.append(f"Images refreshed: <code>{esc(node['last_image_refresh'])}</code>")
     if node.get("health_reason"):
         lines.append(f"Details: <blockquote>{esc(str(node['health_reason'])[:300])}</blockquote>")
     lines.append("Health checks use read-only SSH capability probes; they do not deploy or change VPS files.")
@@ -19849,6 +19853,7 @@ def _node_health_card(call: types.CallbackQuery, node_id: str) -> None:
            Btn("🔄 Test now", callback_data=f"adm_node_test:{node_id}", style="success"))
     if node_id != "local":
         kb.add(Btn("🐳 Prepare Docker", callback_data=f"adm_node_bootstrap:{node_id}", style="success"))
+        kb.add(Btn("🔄 Update Images", callback_data=f"adm_node_refresh_images:{node_id}", style="primary"))
         kb.add(Btn("🔐 Credentials", callback_data=f"adm_node_cred:{node_id}", style="primary"),
                Btn("Edit", callback_data=f"adm_node_edit:{node_id}", style="primary"))
     kb.add(Btn(f"{G['back']} Nodes", callback_data="adm_nodes", style="danger"))
@@ -19986,6 +19991,7 @@ def render_adm_nodes(call: types.CallbackQuery) -> None:
         kb.add(Btn(f"{'🟢' if healthy else '🔴'} {label[:18]}", callback_data=f"adm_node_health:{nid}", style="success" if healthy else "danger"),
                Btn("🔄 Test", callback_data=f"adm_node_test:{nid}", style="primary"))
         kb.add(Btn("🐳 Prepare Docker", callback_data=f"adm_node_bootstrap:{nid}", style="success"))
+        kb.add(Btn("🔄 Update Images", callback_data=f"adm_node_refresh_images:{nid}", style="primary"))
         kb.add(Btn("Edit", callback_data=f"adm_node_edit:{nid}", style="primary"),
                Btn("Disable" if node.get('enabled', True) else "Enable", callback_data=f"adm_node_disable:{nid}", style="danger"),
                Btn("Remove", callback_data=f"adm_node_remove:{nid}", style="danger"),
@@ -20123,6 +20129,54 @@ def action_adm_node_bootstrap(call: types.CallbackQuery, node_id: str) -> None:
         with NODE_TEST_LOCK:
             NODE_TESTING.discard(test_key)
         bot.send_message(call.message.chat.id, f"Docker preparation could not start: {esc(exc)}", parse_mode="HTML")
+
+def action_adm_node_refresh_images(call: types.CallbackQuery, node_id: str) -> None:
+    """Refresh the current pinned Node.js and Python images on a VPS worker."""
+    if not admin_only_call(call, "full_access"):
+        return
+    if node_id == "local":
+        ack(call, "Use the local Docker image update process for the local node.", show_alert=True)
+        return
+    node = _nodes_load().get(node_id)
+    if not node or node.get("connection_type") != "ssh":
+        ack(call, "SSH VPS node not found.", show_alert=True)
+        return
+    secret = _node_secret(node_id)
+    if not secret:
+        ack(call, "Save the node credentials first.", show_alert=True)
+        return
+    test_key = f"refresh-images:{node_id}"
+    with NODE_TEST_LOCK:
+        if test_key in NODE_TESTING:
+            ack(call, "Image update is already running.", show_alert=True)
+            return
+        NODE_TESTING.add(test_key)
+    ack(call, "Docker image update started; this may take several minutes.")
+
+    def _run_refresh() -> None:
+        try:
+            result = refresh_docker_images(node, secret)
+            if not result.get("ok"):
+                audit(call.from_user.id, "node_docker_image_refresh_failed", f"node={node_id}")
+                bot.send_message(call.message.chat.id, f"🔴 Docker image update failed:\n<code>{esc(result.get('error', 'unknown error')[-1200:])}</code>", parse_mode="HTML")
+                return
+            nodes = _nodes_load()
+            if node_id in nodes:
+                nodes[node_id]["last_image_refresh"] = ts_iso()
+                nodes[node_id]["docker_image_versions"] = {"node": "node:22-slim", "python": "python:3.11-slim"}
+                if result.get("docker_version"):
+                    nodes[node_id].setdefault("capabilities", {})["dockerVersion"] = result["docker_version"]
+                _nodes_save(nodes)
+            audit(call.from_user.id, "node_docker_image_refresh", f"node={node_id}")
+            bot.send_message(call.message.chat.id, f"🟢 Docker images updated on <b>{esc(node.get('name', node_id))}</b>. Refreshed <code>node:22-slim</code> and <code>python:3.11-slim</code>.", parse_mode="HTML")
+            _node_health_card(call, node_id)
+        except Exception as exc:
+            bot.send_message(call.message.chat.id, f"🔴 Docker image update failed: <code>{esc(str(exc)[:1200])}</code>", parse_mode="HTML")
+        finally:
+            with NODE_TEST_LOCK:
+                NODE_TESTING.discard(test_key)
+
+    threading.Thread(target=_run_refresh, daemon=True).start()
 
 def render_adm_vault(call: types.CallbackQuery) -> None:
     if not admin_only_call(call, "full_access"):
