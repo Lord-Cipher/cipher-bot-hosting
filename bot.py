@@ -3607,7 +3607,10 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             # Railway, Render, and Replit commonly provide a native runtime
             # but do not expose a Docker daemon. Only a clean/approved bot may
             # use that fallback because it runs beside the control plane.
-            if not trusted:
+            # Operators who deliberately accept that boundary may opt in to
+            # multi-user Node hosting; Python/shell workloads remain blocked.
+            native_node_multiuser = kind == "node" and str(os.environ.get("ALLOW_UNTRUSTED_NATIVE_NODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+            if not trusted and not native_node_multiuser:
                 return _start_failure(b, "This host has no Docker. Native hosting is limited to owner/approved bots; approve this bot or attach a Sandbox worker.")
             native_host_mode = True
         if native_host_mode:
@@ -3615,8 +3618,15 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             runtime_data.mkdir(parents=True, exist_ok=True)
             extra_env = dict(extra_env)
             extra_env.setdefault("CIPHER_RUNTIME_DATA", str(runtime_data))
-            b["preflight"] = {"verdict": "NATIVE_HOST", "reason": "Docker unavailable; running approved bot with the host runtime.", "checked": ts_iso()}
+            native_node_multiuser = kind == "node" and str(os.environ.get("ALLOW_UNTRUSTED_NATIVE_NODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+            native_reason = "Docker unavailable; running approved bot with the host runtime."
+            if native_node_multiuser and not trusted:
+                native_reason = "Docker unavailable; operator enabled multi-user native Node.js hosting."
+            b["preflight"] = {"verdict": "NATIVE_HOST", "reason": native_reason, "checked": ts_iso()}
             save_bot(b)
+            if not install_deps(bot_dir, kind, log):
+                if kind == "node":
+                    return _start_failure(b, "Node.js dependency installation failed. Ensure package.json is valid and Node.js/npm are installed on this host.")
         else:
             plan_key = str((owner or {}).get("plan", "free")).lower()
             runtime_env_file = bot_dir / ".cipher-runtime.env"

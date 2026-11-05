@@ -13,4 +13,9 @@ service. This is host-native execution rather than a security sandbox; users'
 unapproved code remains blocked unless Docker Sandbox or a remote worker is
 configured.
 
+If you intentionally accept host-native execution for every user's Node.js
+bot, set `ALLOW_UNTRUSTED_NATIVE_NODE=true` in the service environment. This
+does not make Render a security sandbox; use Docker Sandbox or a remote worker
+for secure multi-user hosting.
+
 See the [Render persistent disk documentation](https://render.com/docs/disks) for disk setup and limitations.

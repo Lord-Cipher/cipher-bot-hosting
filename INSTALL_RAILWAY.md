@@ -39,6 +39,13 @@ Python control process. This host-native fallback is intentionally limited to
 owner-owned or administrator-approved bots; untrusted user code still requires
 Docker Sandbox or a configured remote worker.
 
+To deliberately allow every user's Node.js bot to use Railway's native runtime
+without Docker, add `ALLOW_UNTRUSTED_NATIVE_NODE=true` to Railway Variables
+and redeploy. This is host-native execution, not isolation: Node.js bots may be
+able to read the control-plane filesystem or environment. Do not enable this
+for a public multi-tenant installation unless the risk is acceptable. Use a
+Docker Sandbox or remote worker for secure multi-user hosting.
+
 ### Cipher Vault key management
 
 When a Cipher Vault token is configured through the panel, the bot generates
