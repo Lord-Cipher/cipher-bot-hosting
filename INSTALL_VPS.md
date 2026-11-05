@@ -133,6 +133,15 @@ sudo usermod -aG docker cipherbot
 sudo install -d -m 700 -o cipherbot -g cipherbot /home/cipherbot/.ssh
 ```
 
+Alternatively, after registering the SSH node and saving its verified host key
+and credentials in the panel, the owner can use **Admin → Infrastructure Nodes
+→ Prepare Docker**. This idempotent action installs Docker with the VPS's apt,
+dnf, or yum package manager, starts the service, verifies the daemon, adds the
+SSH user to the Docker group when possible, and pulls the pinned
+`node:22-slim` and `python:3.11-slim` images. It requires root or passwordless
+sudo and does not use an unverified remote shell installer. A new SSH session
+may be required before Docker-group membership takes effect.
+
 Create a dedicated key on a trusted machine with `ssh-keygen -t ed25519 -f ~/.ssh/cipher-sandbox -N '' -C cipher-sandbox`. The current panel accepts unencrypted Ed25519, ECDSA, and RSA private keys; it does not accept a passphrase-protected private key. Keep the private key private and use it only for this worker.
 
 Add the one-line public key from `~/.ssh/cipher-sandbox.pub` to `/home/cipherbot/.ssh/authorized_keys`, then set permissions:

@@ -100,6 +100,14 @@ curl -6 -sS -o /dev/null -w 'HTTP %{http_code} via %{remote_ip}\n' \
 
 For adding a separate VPS as an Infrastructure/Sandbox node—including the Freestyle `known_hosts` fix—follow [INSTALL_VPS.md](INSTALL_VPS.md).
 
+After an SSH VPS is registered and its host key and credentials are saved, the
+owner can open **Admin → Infrastructure Nodes**, select the node, and press
+**Prepare Docker**. The idempotent bootstrap uses the VPS package manager,
+starts Docker, verifies the daemon, adds a non-root SSH user to the Docker
+group when possible, and pulls the pinned `node:22-slim` and `python:3.11-slim`
+runtime images. It requires root or passwordless sudo and supports apt, dnf,
+and yum; it never uses an unverified `curl | sh` installer.
+
 ## Node.js and WhatsApp bots
 
 Node.js bots are supported alongside Python bots. A project should contain an

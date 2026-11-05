@@ -40,7 +40,7 @@ from flask import Flask, jsonify, request
 from vault_sync import download_latest_snapshot, materialize_snapshot, sync_vault
 from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
-from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle
+from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle, bootstrap_docker_worker
 from ai_preflight import run_preflight
 from community_products import (
     award_for_event, create_product, developer_level, ensure_db as ensure_community_db,
@@ -5766,6 +5766,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return
     if data.startswith("adm_node_test:"):
         return action_adm_node_test(call, data.split(":", 1)[1])
+    if data.startswith("adm_node_bootstrap:"):
+        return action_adm_node_bootstrap(call, data.split(":", 1)[1])
     if data.startswith("adm_node_edit:"):
         if not admin_only_call(call, "full_access"): return
         USER_STATES[call.from_user.id] = {"flow": "await_adm_node_edit", "node_id": data.split(":", 1)[1]}
@@ -19846,6 +19848,7 @@ def _node_health_card(call: types.CallbackQuery, node_id: str) -> None:
     kb.add(Btn(f"{'🟢' if healthy else '🔴'} {label}", callback_data="noop", style="success" if healthy else "danger"),
            Btn("🔄 Test now", callback_data=f"adm_node_test:{node_id}", style="success"))
     if node_id != "local":
+        kb.add(Btn("🐳 Prepare Docker", callback_data=f"adm_node_bootstrap:{node_id}", style="success"))
         kb.add(Btn("🔐 Credentials", callback_data=f"adm_node_cred:{node_id}", style="primary"),
                Btn("Edit", callback_data=f"adm_node_edit:{node_id}", style="primary"))
     kb.add(Btn(f"{G['back']} Nodes", callback_data="adm_nodes", style="danger"))
@@ -19982,6 +19985,7 @@ def render_adm_nodes(call: types.CallbackQuery) -> None:
         healthy, label = _node_health_state(node)
         kb.add(Btn(f"{'🟢' if healthy else '🔴'} {label[:18]}", callback_data=f"adm_node_health:{nid}", style="success" if healthy else "danger"),
                Btn("🔄 Test", callback_data=f"adm_node_test:{nid}", style="primary"))
+        kb.add(Btn("🐳 Prepare Docker", callback_data=f"adm_node_bootstrap:{nid}", style="success"))
         kb.add(Btn("Edit", callback_data=f"adm_node_edit:{nid}", style="primary"),
                Btn("Disable" if node.get('enabled', True) else "Enable", callback_data=f"adm_node_disable:{nid}", style="danger"),
                Btn("Remove", callback_data=f"adm_node_remove:{nid}", style="danger"),
@@ -20052,6 +20056,73 @@ def action_adm_node_test(call: types.CallbackQuery, node_id: str) -> None:
             NODE_TESTING.discard(test_key)
         print(f"[node_health] could not start probe: {exc}", flush=True)
         bot.send_message(call.message.chat.id, "Health check could not start. Try again.")
+
+def action_adm_node_bootstrap(call: types.CallbackQuery, node_id: str) -> None:
+    """Prepare a verified SSH VPS for isolated Docker Sandbox workloads."""
+    if not admin_only_call(call, "full_access"):
+        return
+    if node_id == "local":
+        ack(call, "Use the local Docker installation for the local node.", show_alert=True)
+        return
+    node = _nodes_load().get(node_id)
+    if not node:
+        ack(call, "Node not found", show_alert=True)
+        return
+    if node.get("connection_type") != "ssh":
+        ack(call, "Docker bootstrap currently supports SSH VPS nodes only.", show_alert=True)
+        return
+    secret = _node_secret(node_id)
+    if not secret:
+        ack(call, "Save the node credentials first.", show_alert=True)
+        return
+    test_key = f"bootstrap:{node_id}"
+    with NODE_TEST_LOCK:
+        if test_key in NODE_TESTING:
+            ack(call, "Docker preparation is already running.", show_alert=True)
+            return
+        NODE_TESTING.add(test_key)
+    ack(call, "Docker preparation started; this may take several minutes.")
+    bot.send_message(call.message.chat.id, f"🐳 Preparing <b>{esc(node.get('name', node_id))}</b>. The VPS package manager will be used; runtime images are pinned to <code>node:22-slim</code> and <code>python:3.11-slim</code>.", parse_mode="HTML")
+
+    def _run_bootstrap() -> None:
+        try:
+            result = bootstrap_docker_worker(node, secret, pull_images=True)
+            if not result.get("ok"):
+                audit(call.from_user.id, "node_docker_bootstrap_failed", f"node={node_id}")
+                bot.send_message(call.message.chat.id, f"🔴 Docker preparation failed for <b>{esc(node.get('name', node_id))}</b>:\n<code>{esc(result.get('error', 'unknown error')[-1200:])}</code>", parse_mode="HTML")
+                return
+            current = _nodes_load().get(node_id)
+            if not current:
+                bot.send_message(call.message.chat.id, "Node was removed before Docker preparation completed.")
+                return
+            probe = test_node(current, secret=secret, timeout=12)
+            current["status"] = probe.get("state", "AUTHENTICATED")
+            current["capabilities"] = probe.get("capabilities", {})
+            current["health_reason"] = "Docker worker prepared; reconnect may be required for docker-group membership."
+            current["last_test"] = ts_iso()
+            nodes = _nodes_load()
+            if node_id in nodes:
+                nodes[node_id].update(current)
+                _nodes_save(nodes)
+            audit(call.from_user.id, "node_docker_bootstrap", f"node={node_id} docker={result.get('docker_version', '')}")
+            bot.send_message(call.message.chat.id, f"🟢 Docker worker ready on <b>{esc(node.get('name', node_id))}</b>. Docker {esc(result.get('docker_version') or 'available')} verified; Node and Python runtime images pulled.", parse_mode="HTML")
+            _node_health_card(call, node_id)
+        except Exception as exc:
+            print(f"[node_bootstrap] failed for {node_id}: {exc}", flush=True)
+            try:
+                bot.send_message(call.message.chat.id, f"🔴 Docker preparation failed: <code>{esc(str(exc)[:1200])}</code>", parse_mode="HTML")
+            except Exception:
+                pass
+        finally:
+            with NODE_TEST_LOCK:
+                NODE_TESTING.discard(test_key)
+
+    try:
+        threading.Thread(target=_run_bootstrap, daemon=True).start()
+    except Exception as exc:
+        with NODE_TEST_LOCK:
+            NODE_TESTING.discard(test_key)
+        bot.send_message(call.message.chat.id, f"Docker preparation could not start: {esc(exc)}", parse_mode="HTML")
 
 def render_adm_vault(call: types.CallbackQuery) -> None:
     if not admin_only_call(call, "full_access"):

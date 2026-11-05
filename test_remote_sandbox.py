@@ -257,3 +257,28 @@ network_button = next(
 assert network_button.style == "success"
 
 print("Remote Sandbox VPS regression tests passed")
+
+
+_bootstrap_calls = []
+_old_run_fresh = remote_worker._run_fresh
+remote_worker._run_fresh = lambda node, secret, command, timeout=60: (
+    _bootstrap_calls.append((command, timeout)) or
+    (0, "DOCKER_VERSION=26.0.0\nCIPHER_DOCKER_WORKER_READY\n", "")
+)
+try:
+    bootstrap = remote_worker.bootstrap_docker_worker(
+        {"hostname": "2001:db8::25", "username": "cipherbot", "auth_method": "key"},
+        "ED25519",
+    )
+finally:
+    remote_worker._run_fresh = _old_run_fresh
+assert bootstrap["ok"] is True, bootstrap
+assert bootstrap["docker_version"] == "26.0.0", bootstrap
+assert bootstrap["reconnect_required"] is True, bootstrap
+assert _bootstrap_calls and _bootstrap_calls[0][1] == 900
+bootstrap_command = _bootstrap_calls[0][0]
+assert "apt-get install -y docker.io" in bootstrap_command
+assert "dnf install -y docker" in bootstrap_command
+assert "$DOCKER pull node:22-slim" in bootstrap_command
+assert "$DOCKER pull python:3.11-slim" in bootstrap_command
+assert "curl | sh" not in bootstrap_command

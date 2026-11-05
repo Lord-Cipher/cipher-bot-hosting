@@ -334,3 +334,62 @@ def control(node: Dict[str, Any], secret: str, bot_id: str, action: str) -> Dict
 
 clear = control
 def deploy_remote(*args, **kwargs): return deploy(*args, **kwargs)
+
+
+def bootstrap_docker_worker(node: Dict[str, Any], secret: str, pull_images: bool = True) -> Dict[str, Any]:
+    """Install and verify Docker on a supported SSH VPS.
+
+    This is explicit and idempotent. It uses the VPS package manager (never an
+    unverified ``curl | sh`` installer), requires root or passwordless sudo, and
+    pulls only the pinned runtime image tags used by this project. The caller
+    must be an authorized administrator.
+    """
+    pull_cmd = "$DOCKER pull node:22-slim && $DOCKER pull python:3.11-slim" if pull_images else ":"
+    script = r'''set -eu
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo -n"; fi
+if [ "$(id -u)" -ne 0 ] && ! $SUDO true >/dev/null 2>&1; then
+  echo "ERROR: root or passwordless sudo is required" >&2; exit 20
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io ca-certificates
+  elif command -v dnf >/dev/null 2>&1; then
+    $SUDO dnf install -y docker ca-certificates
+  elif command -v yum >/dev/null 2>&1; then
+    $SUDO yum install -y docker ca-certificates
+  else
+    echo "ERROR: unsupported Linux package manager (need apt-get, dnf, or yum)" >&2; exit 21
+  fi
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  $SUDO systemctl enable --now docker
+elif command -v service >/dev/null 2>&1; then
+  $SUDO service docker start || true
+fi
+if ! docker info >/dev/null 2>&1; then
+  if [ "$(id -u)" -ne 0 ]; then
+    $SUDO docker info >/dev/null
+  else
+    docker info >/dev/null
+  fi
+fi
+if [ "$(id -u)" -ne 0 ]; then
+  $SUDO usermod -aG docker "$USER" || true
+fi
+if [ "$(id -u)" -eq 0 ]; then DOCKER="docker"; else DOCKER="$SUDO docker"; fi
+''' + pull_cmd + r'''
+$DOCKER run --rm --network none node:22-slim node --version
+$DOCKER run --rm --network none python:3.11-slim python --version
+$DOCKER info --format 'DOCKER_VERSION={{.ServerVersion}}'
+echo 'CIPHER_DOCKER_WORKER_READY'
+'''
+    code, out, err = _run_fresh(node, secret, "bash -lc " + shlex.quote(script), timeout=900)
+    combined = (out + "\n" + err).strip()
+    if code != 0:
+        return {"ok": False, "error": combined[-1200:] or f"bootstrap exited with code {code}", "output": combined[-4000:]}
+    version = ""
+    for line in out.splitlines():
+        if line.startswith("DOCKER_VERSION="):
+            version = line.split("=", 1)[1].strip()
+    return {"ok": "CIPHER_DOCKER_WORKER_READY" in out, "docker_version": version, "output": combined[-4000:], "reconnect_required": True}
