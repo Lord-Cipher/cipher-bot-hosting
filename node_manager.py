@@ -167,11 +167,31 @@ def test_ssh_node(node: Dict[str, Any], secret: str, timeout: int = 8) -> Dict[s
                 return {"state": "NEEDS CREDENTIALS", "reason": f"Invalid private key: {exc}"}
             kwargs["pkey"] = key
         client.connect(**kwargs)
-        command = "uname -s; uname -m; getconf _NPROCESSORS_ONLN; awk '/MemTotal/ {print $2}' /proc/meminfo; df -Pk / | tail -1; docker info --format '{{.ServerVersion}}' 2>/dev/null || echo ''; python3 --version 2>/dev/null || echo ''; node --version 2>/dev/null || echo ''"
+        command = "uname -s; uname -m; getconf _NPROCESSORS_ONLN; awk '/MemTotal/ {print $2}' /proc/meminfo; df -Pk / | tail -1; docker info --format '{{.ServerVersion}}' 2>/dev/null || echo ''; python3 --version 2>/dev/null || echo ''; node --version 2>/dev/null || echo ''; awk '{print $1}' /proc/loadavg; free -b 2>/dev/null | awk '/Mem:/ {print $2, $3, $7}' || true; df -Pk / 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $5}' || true"
         _, stdout, _ = client.exec_command(command, timeout=timeout)
         lines = [line.strip() for line in stdout.read().decode("utf-8", "replace").splitlines()]
         docker_version = lines[5] if len(lines) > 5 else ""
-        return {"state": "AUTHENTICATED", "capabilities": {"os": lines[0] if len(lines)>0 else "", "architecture": lines[1] if len(lines)>1 else "", "cpuCores": lines[2] if len(lines)>2 else "", "ramKb": lines[3] if len(lines)>3 else "", "disk": lines[4] if len(lines)>4 else "", "docker": bool(docker_version), "dockerVersion": docker_version, "python": lines[6] if len(lines)>6 else "", "node": lines[7] if len(lines)>7 else ""}}
+        caps = {"os": lines[0] if len(lines)>0 else "", "architecture": lines[1] if len(lines)>1 else "", "cpuCores": lines[2] if len(lines)>2 else "", "ramKb": lines[3] if len(lines)>3 else "", "disk": lines[4] if len(lines)>4 else "", "docker": bool(docker_version), "dockerVersion": docker_version, "python": lines[6] if len(lines)>6 else "", "node": lines[7] if len(lines)>7 else ""}
+        if len(lines) > 8:
+            caps["load1"] = lines[8]
+        if len(lines) > 9:
+            mem = lines[9].split()
+            if len(mem) >= 3:
+                caps["ramTotalBytes"], caps["ramUsedBytes"], caps["ramAvailableBytes"] = mem[:3]
+        if len(lines) > 10 and lines[10].isdigit():
+            caps["diskUsedPct"] = lines[10]
+        try:
+            cores = max(1, int(caps.get("cpuCores") or 1))
+            caps["loadPct"] = round(float(caps.get("load1", 0) or 0) / cores * 100, 1)
+        except (TypeError, ValueError):
+            pass
+        try:
+            total, available = int(caps.get("ramTotalBytes", 0)), int(caps.get("ramAvailableBytes", 0))
+            if total > 0:
+                caps["ramUsedPct"] = round(max(0, total - available) / total * 100, 1)
+        except (TypeError, ValueError):
+            pass
+        return {"state": "AUTHENTICATED", "capabilities": caps}
     except (paramiko.AuthenticationException, paramiko.BadAuthenticationType):
         return {"state": "AUTHENTICATION FAILED", "reason": "SSH authentication failed"}
     except (paramiko.SSHException, OSError, socket.timeout) as exc:

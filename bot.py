@@ -3555,6 +3555,8 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
         requested_node = b.get("node_id") or b.get("assigned_node")
         candidates = [nodes.get(requested_node)] if requested_node and nodes.get(requested_node) else list(nodes.values())
         ready_candidates = [n for n in candidates if n and n.get("enabled") and n.get("status") in {"ONLINE", "AUTHENTICATED"} and n.get("connection_type") == "ssh" and (n.get("capabilities") or {}).get("docker") is True]
+        if not requested_node:
+            ready_candidates.sort(key=_node_load_score)
         selected_node = next(iter(ready_candidates), None)
         # A specifically assigned node is authoritative even when its older
         # record has no cached capabilities. remote_deploy performs the live
@@ -5766,6 +5768,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return
     if data.startswith("adm_node_test:"):
         return action_adm_node_test(call, data.split(":", 1)[1])
+    if data == "adm_nodes_refresh_all":
+        return action_adm_nodes_refresh_all(call)
     if data.startswith("adm_node_bootstrap:"):
         return action_adm_node_bootstrap(call, data.split(":", 1)[1])
     if data.startswith("adm_node_refresh_images:"):
@@ -19818,6 +19822,35 @@ def _node_health_state(node: Dict[str, Any]) -> Tuple[bool, str]:
         return True, "READY"
     return False, status
 
+def _node_resource_bar(value: Any, width: int = 12) -> str:
+    try:
+        pct = max(0.0, min(100.0, float(value)))
+    except (TypeError, ValueError):
+        return "⬜" * width
+    filled = int(round(pct / 100 * width))
+    icon = "🟥" if pct >= 90 else "🟨" if pct >= 70 else "🟩"
+    return icon * filled + "⬜" * (width - filled)
+
+def _node_resource_line(label: str, value: Any) -> str:
+    try:
+        pct = float(value)
+    except (TypeError, ValueError):
+        return f"{label}: unavailable"
+    return f"{label}: {_node_resource_bar(pct)} {pct:.1f}%"
+
+def _node_pct(value: Any) -> float:
+    try:
+        return max(0.0, min(100.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+def _node_load_score(node: Dict[str, Any]) -> float:
+    caps = node.get("capabilities") or {}
+    # Prefer lower CPU/RAM pressure, with disk pressure as a smaller factor.
+    return (_node_pct(caps.get("loadPct")) * 0.5
+            + _node_pct(caps.get("ramUsedPct")) * 0.4
+            + _node_pct(caps.get("diskUsedPct")) * 0.1)
+
 def _node_health_card(call: types.CallbackQuery, node_id: str) -> None:
     if not admin_only_call(call, "full_access"):
         return
@@ -19838,6 +19871,13 @@ def _node_health_card(call: types.CallbackQuery, node_id: str) -> None:
         lines.append(f"Host: <code>{esc(host)}</code>:<code>{esc(node.get('ssh_port', 22))}</code>")
     if caps:
         lines.append(f"Docker: {'🟢' if caps.get('docker') else '🔴'} <code>{esc(caps.get('dockerVersion') or ('available' if caps.get('docker') else 'not detected'))}</code>")
+        if any(key in caps for key in ("loadPct", "ramUsedPct", "diskUsedPct")):
+            lines.append("<b>Live resources</b>")
+            lines.append(_node_resource_line("CPU load", caps.get("loadPct")))
+            lines.append(_node_resource_line("RAM used", caps.get("ramUsedPct")))
+            lines.append(_node_resource_line("Disk used", caps.get("diskUsedPct")))
+            if caps.get("load1"):
+                lines.append(f"Load average: <code>{esc(caps['load1'])}</code>")
         for label_name, key in (("OS", "os"), ("Architecture", "architecture"), ("CPU cores", "cpuCores"), ("Python", "python"), ("Node.js", "node")):
             if caps.get(key):
                 lines.append(f"{label_name}: <code>{esc(caps[key])}</code>")
@@ -19967,6 +20007,20 @@ def action_adm_vps_wizard_auth(call: types.CallbackQuery, auth_method: str) -> N
     bot.send_message(call.message.chat.id, f"🟢 <b>VPS node added</b>: {esc(node['name'])}\nNext, save the password or private key using Credentials. Before testing, verify the VPS SSH host-key fingerprint independently and trust/pin it on the panel host; strict host-key checking will reject unknown keys. The health test is read-only and reports SSH and Docker readiness.", parse_mode="HTML", reply_markup=kb)
     ack(call, "VPS node created")
 
+def action_adm_nodes_refresh_all(call: types.CallbackQuery) -> None:
+    if not admin_only_call(call, "full_access"):
+        return
+    nodes = _nodes_load()
+    if not nodes:
+        ack(call, "No VPS nodes are configured.", show_alert=True)
+        return
+    started = 0
+    for node_id in nodes:
+        before = len(NODE_TESTING)
+        action_adm_node_test(call, node_id)
+        started += 1 if len(NODE_TESTING) > before else 0
+    ack(call, f"Refreshing metrics for {started} VPS node(s).")
+
 def render_adm_nodes(call: types.CallbackQuery) -> None:
     if not admin_only_call(call, "full_access"):
         return
@@ -19978,6 +20032,10 @@ def render_adm_nodes(call: types.CallbackQuery) -> None:
         healthy, label = _node_health_state(node)
         lines.append(f"• <b>{esc(node.get('name', nid))}</b> — {'🟢' if healthy else '🔴'} <b>{esc(label)}</b> ({esc(node.get('connection_type', 'unknown'))})")
         caps = node.get("capabilities") or {}
+        if any(key in caps for key in ("loadPct", "ramUsedPct", "diskUsedPct")):
+            cpu_pct, ram_pct, disk_pct = (_node_pct(caps.get(key)) for key in ("loadPct", "ramUsedPct", "diskUsedPct"))
+            lines.append(f"  CPU {_node_resource_bar(cpu_pct)} {cpu_pct:.1f}% · RAM {_node_resource_bar(ram_pct)} {ram_pct:.1f}%")
+            lines.append(f"  Disk {_node_resource_bar(disk_pct)} {disk_pct:.1f}%")
         if node.get("last_test"):
             docker = "ready" if caps.get("docker") else "not detected"
             lines.append(f"  Docker: <code>{docker}</code> · Last check: <code>{esc(node['last_test'])}</code>")
@@ -19986,6 +20044,7 @@ def render_adm_nodes(call: types.CallbackQuery) -> None:
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn("🧭 VPS Setup Wizard", callback_data="adm_node_wizard", style="success"),
            Btn("Add/Edit JSON", callback_data="adm_node_add", style="primary"))
+    kb.add(Btn("🔄 Refresh All Metrics", callback_data="adm_nodes_refresh_all", style="success"))
     for nid, node in list(nodes.items())[:12]:
         healthy, label = _node_health_state(node)
         kb.add(Btn(f"{'🟢' if healthy else '🔴'} {label[:18]}", callback_data=f"adm_node_health:{nid}", style="success" if healthy else "danger"),

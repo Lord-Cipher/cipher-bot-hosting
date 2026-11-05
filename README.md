@@ -100,6 +100,12 @@ curl -6 -sS -o /dev/null -w 'HTTP %{http_code} via %{remote_ip}\n' \
 
 For adding a separate VPS as an Infrastructure/Sandbox node—including the Freestyle `known_hosts` fix—follow [INSTALL_VPS.md](INSTALL_VPS.md).
 
+Multiple VPS workers can be registered under **Admin → Infrastructure Nodes**.
+The panel shows live CPU-load, RAM, disk, Docker, and load-average data with
+colored bars. **Refresh All Metrics** probes every enabled worker, while new
+automatically placed bots prefer the healthy worker with the lowest measured
+resource pressure. An explicit bot-to-node assignment remains authoritative.
+
 After an SSH VPS is registered and its host key and credentials are saved, the
 owner can open **Admin → Infrastructure Nodes**, select the node, and press
 **Prepare Docker**. The idempotent bootstrap uses the VPS package manager,

@@ -106,6 +106,21 @@ assert no_docker_probe["capabilities"]["docker"] is False
 assert no_docker_probe["capabilities"]["python"] == "Python 3.11.0"
 _AuthSSHClient.docker_line = b"26.0.0"
 
+_old_exec_command = _AuthSSHClient.exec_command
+def _resource_exec_command(self, command, timeout=0):
+    info = b"Linux\nx86_64\n4\n8000000000\n/dev/vda1 100000 1000 99000 1% /\n26.0.0\nPython 3.11.0\nv22.0.0\n1.50\n8000000000 4000000000 4000000000\n63\n"
+    return None, _Stream(info), _Stream()
+_AuthSSHClient.exec_command = _resource_exec_command
+resource_probe = node_manager.test_ssh_node(
+    {"connection_type": "ssh", "ipv6": "2001:db8::25", "username": "cipherbot", "auth_method": "key"},
+    "ED25519",
+)
+_AuthSSHClient.exec_command = _old_exec_command
+resource_caps = resource_probe["capabilities"]
+assert resource_caps["loadPct"] == 37.5, resource_caps
+assert resource_caps["ramUsedPct"] == 50.0, resource_caps
+assert resource_caps["diskUsedPct"] == "63", resource_caps
+
 if _original_paramiko is None:
     sys.modules.pop("paramiko", None)
 else:

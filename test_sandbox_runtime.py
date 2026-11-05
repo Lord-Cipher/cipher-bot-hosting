@@ -22,6 +22,9 @@ assert 'native_node_multiuser":False' in bot_source
 assert 'if not install_deps(bot_dir, kind, log):' in bot_source
 assert 'os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")' in bot_source
 assert 'CIPHER_RUNTIME_DATA' in bot_source
+assert '_node_resource_bar' in bot_source
+assert 'adm_nodes_refresh_all' in bot_source
+assert 'ready_candidates.sort(key=_node_load_score)' in bot_source
 assert 'providers = ["...", "python", "node"]' in Path(__file__).with_name("nixpacks.toml").read_text(encoding="utf-8")
 
 old_which = sandbox_runtime.shutil.which

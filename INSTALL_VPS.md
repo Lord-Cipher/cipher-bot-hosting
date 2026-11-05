@@ -115,6 +115,12 @@ sudo journalctl -u cipherbot -f
 
 These steps are for adding a **separate VPS as a worker node** from the running Telegram control panel. They are different from installing the control panel itself above. The control panel initiates SSH **outbound** to the worker's IPv6 address; the worker must accept SSH **inbound** from the control panel.
 
+You can repeat the registration process for multiple VPS workers. The
+Infrastructure Nodes screen displays colored live CPU-load, RAM, disk, Docker,
+and load-average indicators. Use **Refresh All Metrics** to probe the pool;
+automatic bot placement then prefers the healthy worker with the lowest
+measured pressure, while an explicit bot assignment remains fixed.
+
 ### 1. Prepare the worker VPS
 
 On an Ubuntu/Debian worker, install SSH and Docker:
