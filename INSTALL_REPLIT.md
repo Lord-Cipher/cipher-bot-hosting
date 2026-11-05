@@ -12,9 +12,7 @@ may run directly with that host runtime. This mode is not an isolation
 boundary, so unapproved user code remains blocked unless Docker Sandbox or a
 remote worker is available.
 
-To opt in to all-user native Node.js execution when no Docker worker is
-available, set `ALLOW_UNTRUSTED_NATIVE_NODE=true` in the deployment
-environment. This is not isolation and may expose the control-plane process;
-use a Docker Sandbox or remote worker for untrusted multi-user workloads.
+Unapproved bots are never allowed to run natively beside the control plane.
+Multi-user hosting requires Docker Sandbox or a configured remote worker.
 
 See the [Replit App Storage documentation](https://docs.replit.com/features/data-and-storage/object-storage) for persistent object storage options.
