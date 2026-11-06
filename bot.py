@@ -10996,10 +10996,29 @@ def on_text(m: types.Message) -> None:
             result = AI_ENGINE.complete(model_key, prompt)
             elapsed = time.monotonic() - started
             if result.ok:
-                # Match Omega's website-style chat result: the user sees the
-                # generated answer only. Model, prompt, timing, and raw API
-                # envelope details stay out of the successful response bubble.
-                bot.reply_to(m, result.text[:6000])
+                # Match Omega's website-style answer while preserving the
+                # provider envelope in Telegram's expandable quote style.
+                answer = result.text[:6000]
+                raw = result.raw_payload
+                try:
+                    raw_json = json.dumps(raw, ensure_ascii=False, indent=2, default=str)
+                except Exception:
+                    raw_json = str(raw)
+                if not raw_json or raw_json == "null":
+                    bot.reply_to(m, answer)
+                else:
+                    # Telegram messages are limited to 4096 characters. Keep
+                    # every raw JSON character by sending additional quote
+                    # blocks when a provider returns a large envelope.
+                    chunks = [raw_json[i:i + 3400] for i in range(0, len(raw_json), 3400)]
+                    first = (
+                        f"{esc(answer)}\n\n"
+                        f"<b>Raw Omega Response</b>\n"
+                        f"<blockquote expandable>{esc(chunks[0])}</blockquote>"
+                    )
+                    bot.reply_to(m, first, parse_mode="HTML")
+                    for chunk in chunks[1:]:
+                        bot.send_message(m.chat.id, f"<blockquote expandable>{esc(chunk)}</blockquote>", parse_mode="HTML")
             else:
                 bot.reply_to(
                     m,

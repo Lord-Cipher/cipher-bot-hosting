@@ -41,6 +41,7 @@ class ModelResult:
     model: str
     text: Optional[str] = None
     error: Optional[str] = None
+    raw_payload: Any = None
 
     @property
     def ok(self) -> bool:
@@ -446,7 +447,7 @@ class AIEngine:
                 with self.lock:
                     self.failure_counts.pop(model, None)
                     self.circuit_open_until.pop(model, None)
-                return ModelResult(model, text=text)
+                return ModelResult(model, text=text, raw_payload=payload)
 
         self._record_failure(model, last_error)
         return ModelResult(model, error=last_error)
