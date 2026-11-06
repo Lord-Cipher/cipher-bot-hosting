@@ -6402,15 +6402,40 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_ai_config":           return render_adm_ai_config(call)
     if data == "adm_ai_omega_browser":    return render_adm_ai_omega_browser(call)
     if data == "adm_ai_omega_add":
-        USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_runtime_model"}
-        bot.send_message(
-            call.message.chat.id,
-            "Send: <code>key|display name|endpoint|format|model_id</code>\n"
-            "Formats: <code>omega_text</code>, <code>model_message</code>, or <code>openai</code>.\n"
-            "Example: <code>gemini25|Gemini 2.5|v1/chat/completions|openai|gemini-2.5-pro</code>",
-            parse_mode="HTML",
-        )
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for key in _AI_TARGET_LEGACY_KEYS:
+            if key in _OMEGATECH_MODELS:
+                kb.add(Btn(f"Use {ai_label(key)} endpoint", callback_data=f"adm_ai_omega_use_{key}", style="primary"))
+        kb.add(Btn("🌐 Enter another Omega endpoint", callback_data="adm_ai_omega_custom_endpoint", style="success"))
+        kb.add(Btn(f"{G['back']} Omega Browser", callback_data="adm_ai_omega_browser", style="danger"))
+        bot.send_message(call.message.chat.id, "<b>Choose an Omega endpoint</b>\n\nYou can reuse one endpoint for multiple models, or enter another Omega route.", parse_mode="HTML", reply_markup=kb)
         return
+    if data == "adm_ai_omega_custom_endpoint":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_model_endpoint"}
+        bot.send_message(call.message.chat.id, "Send the Omega endpoint path or full HTTPS URL.\n\nExample: <code>v1/chat/completions</code>", parse_mode="HTML")
+        return
+    if data == "adm_ai_omega_use_name":
+        st = USER_STATES.get(call.from_user.id) or {}
+        st["model_id"] = st.get("label", "").strip().lower().replace(" ", "-")
+        USER_STATES[call.from_user.id] = st
+        return _show_ai_model_format_choices(call.message.chat.id)
+    if data == "adm_ai_omega_custom_model_id":
+        USER_STATES[call.from_user.id] = {**(USER_STATES.get(call.from_user.id) or {}), "flow": "await_adm_ai_model_id"}
+        bot.send_message(call.message.chat.id, "What model ID should Omega receive?\n\nExample: <code>gemini-2.5-pro</code>", parse_mode="HTML")
+        return
+    if data.startswith("adm_ai_omega_use_"):
+        endpoint_key = data[len("adm_ai_omega_use_"):].lower()
+        route = _OMEGATECH_MODELS.get(endpoint_key)
+        if not route:
+            ack(call, "Unknown Omega endpoint", show_alert=True); return render_adm_ai_omega_browser(call)
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_model_name", "endpoint": route[0], "format": "omega_text", "model_id": endpoint_key}
+        bot.send_message(call.message.chat.id, "What should this model be called in the bot?\n\nExample: <b>Gemini Pro</b>", parse_mode="HTML")
+        return
+    if data.startswith("adm_ai_omega_format_"):
+        fmt = data[len("adm_ai_omega_format_"):].lower()
+        if fmt not in {"omega_text", "model_message", "openai"}:
+            ack(call, "Unknown request format", show_alert=True); return
+        return _save_runtime_ai_model(call.from_user.id, fmt, call.message.chat.id)
     if data == "adm_ai_omega_reload":
         reload_ai_runtime(); ack(call, "AI runtime reloaded"); return render_adm_ai_omega_browser(call)
     if data.startswith("adm_ai_omega_test_"):
@@ -10952,38 +10977,40 @@ def on_text(m: types.Message) -> None:
         bot.reply_to(m, "No Add/Edit Node step is active. Open Admin → Infrastructure Nodes → Add Node again, then send the JSON. The setup step resets after a bot restart.")
         return
     try:
-        if flow == "await_adm_ai_runtime_model":
-            USER_STATES.pop(uid, None)
-            parts = [part.strip() for part in text.split("|", 4)]
-            if len(parts) != 5:
-                bot.reply_to(m, "Use: key|display name|endpoint|format|model_id"); return
-            key, label, endpoint, fmt, model_id = parts
-            key = key.lower()
-            fmt = fmt.lower()
-            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,48}", key):
-                bot.reply_to(m, "Invalid model key. Use letters, numbers, dots, underscores, or hyphens."); return
-            if fmt not in {"omega_text", "model_message", "openai"}:
-                bot.reply_to(m, "Format must be omega_text, model_message, or openai."); return
-            if not label or not model_id or len(label) > 80 or len(model_id) > 120:
-                bot.reply_to(m, "Display name and model ID are required."); return
+        if flow == "await_adm_ai_model_endpoint":
+            endpoint = text.strip()
             if endpoint.startswith(("http://", "https://")):
                 from urllib.parse import urlparse
                 parsed = urlparse(endpoint)
                 if parsed.scheme != "https" or parsed.hostname not in {"api.omegatech.app", "www.api.omegatech.app"}:
-                    bot.reply_to(m, "For the Omega browser, use api.omegatech.app or a relative Omega endpoint."); return
-            endpoint = endpoint.strip().strip("/")
+                    bot.reply_to(m, "Please use an HTTPS Omega endpoint or a relative Omega path."); return
+            endpoint = endpoint.strip("/")
             if endpoint.startswith("api/ai/"):
                 endpoint = endpoint[len("api/ai/"):]
-            if endpoint.startswith("/api/ai/"):
-                endpoint = endpoint[len("/api/ai/"):]
             if not endpoint:
-                bot.reply_to(m, "Endpoint cannot be empty."); return
-            custom = _custom_ai_models()
-            custom[key] = {"label": label, "endpoint": endpoint, "format": fmt, "model_id": model_id}
-            set_setting("ai_custom_models", custom)
-            reload_ai_runtime()
-            audit(uid, "ai_runtime_model_save", f"key={key} endpoint={endpoint} format={fmt}")
-            bot.reply_to(m, f"{G['ok']} Runtime model saved: {label}\nUse the Omega browser to test it and add it to plan pools.")
+                bot.reply_to(m, "The endpoint cannot be empty. Please try again."); return
+            USER_STATES[uid] = {"flow": "await_adm_ai_model_name", "endpoint": endpoint}
+            bot.reply_to(m, "What should this model be called in the bot?\n\nExample: Gemini Pro")
+            return
+        if flow == "await_adm_ai_model_name":
+            label = text.strip()
+            if not label or len(label) > 80:
+                bot.reply_to(m, "Please send a model name up to 80 characters."); return
+            st["label"] = label
+            st["flow"] = "await_adm_ai_model_id"
+            USER_STATES[uid] = st
+            kb = types.InlineKeyboardMarkup(row_width=1)
+            kb.add(Btn(f"Use {label} as the model ID", callback_data="adm_ai_omega_use_name", style="success"))
+            kb.add(Btn("Enter a different model ID", callback_data="adm_ai_omega_custom_model_id", style="primary"))
+            bot.send_message(m.chat.id, "What model ID should Omega receive?", reply_markup=kb)
+            return
+        if flow == "await_adm_ai_model_id":
+            model_id = text.strip()
+            if not model_id or len(model_id) > 120:
+                bot.reply_to(m, "Please send a valid model ID."); return
+            st["model_id"] = model_id
+            USER_STATES[uid] = st
+            _show_ai_model_format_choices(m.chat.id)
             return
         if flow == "await_adm_node_cred":
             USER_STATES.pop(uid, None)
@@ -23773,6 +23800,28 @@ def _omega_endpoint_label(endpoint: str) -> str:
     value = str(endpoint or "").strip()
     return value if value.startswith("http") else f"/api/ai/{value.strip('/')}"
 
+def _show_ai_model_format_choices(chat_id: int) -> None:
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("📝 Omega text", callback_data="adm_ai_omega_format_omega_text", style="primary"))
+    kb.add(Btn("💬 Model + message", callback_data="adm_ai_omega_format_model_message", style="primary"))
+    kb.add(Btn("🔌 OpenAI-compatible", callback_data="adm_ai_omega_format_openai", style="success"))
+    bot.send_message(chat_id, "How should the request be sent?\n\nChoose the format used by this Omega endpoint.", reply_markup=kb)
+
+def _save_runtime_ai_model(uid: int, fmt: str, chat_id: int) -> None:
+    st = USER_STATES.pop(uid, None) or {}
+    label = str(st.get("label", "")).strip()
+    model_id = str(st.get("model_id", "")).strip()
+    endpoint = str(st.get("endpoint", "")).strip().strip("/")
+    key = re.sub(r"[^a-z0-9._-]+", "-", label.lower()).strip("-._")[:48]
+    if not label or not model_id or not endpoint or not key:
+        bot.send_message(chat_id, f"{G['no']} The model details were incomplete. Please start again."); return
+    custom = _custom_ai_models()
+    custom[key] = {"label": label, "endpoint": endpoint, "format": fmt, "model_id": model_id}
+    set_setting("ai_custom_models", custom)
+    reload_ai_runtime()
+    audit(uid, "ai_runtime_model_save", f"key={key} endpoint={endpoint} format={fmt}")
+    bot.send_message(chat_id, f"{G['ok']} <b>{esc(label)}</b> was added to the Omega catalog.\n\nYou can test it now, then add it to a plan pool.", parse_mode="HTML")
+
 def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
     custom = _custom_ai_models()
     cap = (
@@ -23791,8 +23840,7 @@ def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
             cap += f"• <b>{esc(spec.get('label', key))}</b> — <code>{esc(_omega_endpoint_label(spec.get('endpoint', '')))}</code>\n"
             kb.add(Btn(f"🧪 Test {str(spec.get('label', key))[:22]}", callback_data=f"adm_ai_omega_test_{key}", style="success"))
             kb.add(Btn(f"🗑️ Remove {str(spec.get('label', key))[:18]}", callback_data=f"adm_ai_omega_delete_{key}", style="danger"))
-    cap += f"\n{sc('Add format')}: <code>key|label|endpoint|format|model_id</code>\n"
-    cap += f"<code>gemini25|Gemini 2.5|v1/chat/completions|openai|gemini-2.5-pro</code>{FOOTER}"
+    cap += f"\n{sc('Choose an endpoint, then follow the guided setup. One endpoint can serve many models.')}{FOOTER}"
     kb.add(Btn("➕ Add / Update Runtime Model", callback_data="adm_ai_omega_add", style="success"))
     kb.add(Btn("🔄 Reload AI Runtime", callback_data="adm_ai_omega_reload", style="primary"))
     kb.add(Btn(f"{G['back']}  Aɪ Cᴏᴍᴍᴀɴᴅ Cᴇɴᴛᴇʀ", callback_data="adm_ai_config", style="danger"))

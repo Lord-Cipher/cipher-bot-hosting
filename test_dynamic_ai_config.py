@@ -40,8 +40,10 @@ assert session.params["model"] == "gemini-2.5-pro"
 
 source = Path("bot.py").read_text(encoding="utf-8")
 assert "adm_ai_omega_browser" in source
-assert "await_adm_ai_runtime_model" in source
+assert "await_adm_ai_model_endpoint" in source
+assert "adm_ai_omega_format_openai" in source
+assert "Choose an Omega endpoint" in source
 assert "ai_custom_models" in source
 assert "reload_ai_runtime" in source
-assert "openai" in source
+assert "key|display name|endpoint|format|model_id" not in source
 print("dynamic AI configuration tests passed")
