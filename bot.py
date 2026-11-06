@@ -6400,6 +6400,37 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         )
         return
     if data == "adm_ai_config":           return render_adm_ai_config(call)
+    if data == "adm_ai_omega_browser":    return render_adm_ai_omega_browser(call)
+    if data == "adm_ai_omega_add":
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_runtime_model"}
+        bot.send_message(
+            call.message.chat.id,
+            "Send: <code>key|display name|endpoint|format|model_id</code>\n"
+            "Formats: <code>omega_text</code>, <code>model_message</code>, or <code>openai</code>.\n"
+            "Example: <code>gemini25|Gemini 2.5|v1/chat/completions|openai|gemini-2.5-pro</code>",
+            parse_mode="HTML",
+        )
+        return
+    if data == "adm_ai_omega_reload":
+        reload_ai_runtime(); ack(call, "AI runtime reloaded"); return render_adm_ai_omega_browser(call)
+    if data.startswith("adm_ai_omega_test_"):
+        model_key = data[len("adm_ai_omega_test_"):].lower()
+        if model_key not in _AI_OPERATIVE_KEYS:
+            ack(call, "Unknown model", show_alert=True); return render_adm_ai_omega_browser(call)
+        ack(call, "Testing model…")
+        result = AI_ENGINE.complete(model_key, "Reply with exactly: API connection successful")
+        if result.ok:
+            bot.send_message(call.message.chat.id, f"✅ <b>{esc(ai_label(model_key))}</b> passed.\n<code>{esc(result.text[:300])}</code>", parse_mode="HTML")
+        else:
+            bot.send_message(call.message.chat.id, f"❌ <b>{esc(ai_label(model_key))}</b> failed.\n<code>{esc(result.error or 'No usable response')}</code>", parse_mode="HTML")
+        return
+    if data.startswith("adm_ai_omega_delete_"):
+        model_key = data[len("adm_ai_omega_delete_"):].lower()
+        custom = _custom_ai_models()
+        if model_key in custom:
+            custom.pop(model_key, None); set_setting("ai_custom_models", custom); reload_ai_runtime()
+            audit(call.from_user.id, "ai_runtime_model_delete", model_key); ack(call, "Runtime model removed")
+        return render_adm_ai_omega_browser(call)
     if data == "adm_ai_scanner_model":    return render_adm_ai_scanner_model(call)
     if data.startswith("adm_ai_scanner_"):
         scanner_model = data[len("adm_ai_scanner_"):]
@@ -10921,6 +10952,39 @@ def on_text(m: types.Message) -> None:
         bot.reply_to(m, "No Add/Edit Node step is active. Open Admin → Infrastructure Nodes → Add Node again, then send the JSON. The setup step resets after a bot restart.")
         return
     try:
+        if flow == "await_adm_ai_runtime_model":
+            USER_STATES.pop(uid, None)
+            parts = [part.strip() for part in text.split("|", 4)]
+            if len(parts) != 5:
+                bot.reply_to(m, "Use: key|display name|endpoint|format|model_id"); return
+            key, label, endpoint, fmt, model_id = parts
+            key = key.lower()
+            fmt = fmt.lower()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,48}", key):
+                bot.reply_to(m, "Invalid model key. Use letters, numbers, dots, underscores, or hyphens."); return
+            if fmt not in {"omega_text", "model_message", "openai"}:
+                bot.reply_to(m, "Format must be omega_text, model_message, or openai."); return
+            if not label or not model_id or len(label) > 80 or len(model_id) > 120:
+                bot.reply_to(m, "Display name and model ID are required."); return
+            if endpoint.startswith(("http://", "https://")):
+                from urllib.parse import urlparse
+                parsed = urlparse(endpoint)
+                if parsed.scheme != "https" or parsed.hostname not in {"api.omegatech.app", "www.api.omegatech.app"}:
+                    bot.reply_to(m, "For the Omega browser, use api.omegatech.app or a relative Omega endpoint."); return
+            endpoint = endpoint.strip().strip("/")
+            if endpoint.startswith("api/ai/"):
+                endpoint = endpoint[len("api/ai/"):]
+            if endpoint.startswith("/api/ai/"):
+                endpoint = endpoint[len("/api/ai/"):]
+            if not endpoint:
+                bot.reply_to(m, "Endpoint cannot be empty."); return
+            custom = _custom_ai_models()
+            custom[key] = {"label": label, "endpoint": endpoint, "format": fmt, "model_id": model_id}
+            set_setting("ai_custom_models", custom)
+            reload_ai_runtime()
+            audit(uid, "ai_runtime_model_save", f"key={key} endpoint={endpoint} format={fmt}")
+            bot.reply_to(m, f"{G['ok']} Runtime model saved: {label}\nUse the Omega browser to test it and add it to plan pools.")
+            return
         if flow == "await_adm_node_cred":
             USER_STATES.pop(uid, None)
             if not is_owner(uid) and not _admin_menu_role_ok(uid, "adm_node_cred"):
@@ -23379,6 +23443,50 @@ _AI_MODE_DEFAULT_MODELS = {
     "coding": {plan: list(_AI_CODING_DEFAULT_MODELS) for plan in _AI_PLAN_DEFAULT_MODELS},
 }
 
+def _custom_ai_models() -> Dict[str, Dict[str, Any]]:
+    """Return admin-configured runtime models stored in settings.json."""
+    raw = get_setting("ai_custom_models", {}) or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(key).strip().lower(): value
+        for key, value in raw.items()
+        if str(key).strip() and isinstance(value, dict)
+    }
+
+def _refresh_ai_catalog_state() -> None:
+    """Merge persisted custom models into the in-memory catalog."""
+    global _AI_OPERATIVE_KEYS, _AI_CODING_MODEL_KEYS
+    for key, spec in _custom_ai_models().items():
+        _AI_OPERATIVE_LABELS[key] = str(spec.get("label") or key)
+    _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
+    _AI_CODING_MODEL_KEYS = _AI_OPERATIVE_KEYS
+
+def _template_value(value: Any, prompt: str, model_id: str, mode: str) -> Any:
+    if isinstance(value, str):
+        return (value.replace("{prompt}", prompt)
+                     .replace("{model}", model_id)
+                     .replace("{mode}", str(mode or "chat")))
+    if isinstance(value, list):
+        return [_template_value(item, prompt, model_id, mode) for item in value]
+    if isinstance(value, dict):
+        return {key: _template_value(item, prompt, model_id, mode) for key, item in value.items()}
+    return value
+
+def _custom_model_builder(spec: Dict[str, Any]) -> Callable[[str], Dict[str, Any]]:
+    model_id = str(spec.get("model_id") or spec.get("key") or "")
+    fmt = str(spec.get("format") or "omega_text").lower()
+    template = spec.get("template")
+    def build(prompt: str, _model_id=model_id, _fmt=fmt, _template=template) -> Dict[str, Any]:
+        if isinstance(_template, dict):
+            return _template_value(_template, prompt, _model_id, "chat")
+        if _fmt in {"openai", "openai_compatible"}:
+            return {"model": _model_id, "messages": [{"role": "user", "content": prompt}]}
+        if _fmt in {"model_message", "action_model"}:
+            return {"action": "chat", "model": _model_id, "message": prompt}
+        return {"text": prompt}
+    return build
+
 def _ai_operative_enabled(key: str) -> bool:
     default_enabled = True
     return key in _AI_OPERATIVE_KEYS and bool(
@@ -23394,6 +23502,7 @@ def _ai_mode_allowed_keys(mode: str = "chat") -> Tuple[str, ...]:
 
 def _create_ai_engine() -> AIEngine:
     """Wire the provider-independent runtime to the current operative catalog."""
+    _refresh_ai_catalog_state()
     routes = {
         key: ModelRoute(endpoint, build_params, public_label=_AI_OPERATIVE_LABELS.get(key, key))
         for key, (endpoint, build_params) in _OMEGATECH_MODELS.items()
@@ -23436,6 +23545,15 @@ def _create_ai_engine() -> AIEngine:
             },
             public_label=_AI_OPERATIVE_LABELS.get(key, key),
         )
+    for key, spec in _custom_ai_models().items():
+        endpoint = str(spec.get("endpoint") or "").strip()
+        if not endpoint:
+            continue
+        routes[key] = ModelRoute(
+            endpoint,
+            _custom_model_builder(spec),
+            public_label=_AI_OPERATIVE_LABELS.get(key, key),
+        )
     return AIEngine(
         session=AI_HTTP,
         base_urls=_OMEGATECH_HOSTS,
@@ -23459,11 +23577,20 @@ AI_LOCK = AI_ENGINE.lock
 AI_MODEL_FAILURE_COUNT = AI_ENGINE.failure_counts
 AI_MODEL_CIRCUIT_OPEN_UNTIL = AI_ENGINE.circuit_open_until
 
+def reload_ai_runtime() -> None:
+    """Rebuild routes and catalog from persisted settings without restarting."""
+    global AI_ENGINE, AI_LOCK, AI_MODEL_FAILURE_COUNT, AI_MODEL_CIRCUIT_OPEN_UNTIL
+    AI_ENGINE = _create_ai_engine()
+    AI_LOCK = AI_ENGINE.lock
+    AI_MODEL_FAILURE_COUNT = AI_ENGINE.failure_counts
+    AI_MODEL_CIRCUIT_OPEN_UNTIL = AI_ENGINE.circuit_open_until
+
 def ai_label(key: str) -> str:
     return _AI_OPERATIVE_LABELS.get(key, key.upper())
 
 def get_plan_ai_models(plan: str, include_disabled: bool = False, mode: str = "chat") -> List[str]:
     """Return the ordered operative pool for a plan and task mode."""
+    _refresh_ai_catalog_state()
     plan = (plan or "free").lower()
     mode = str(mode or "chat").lower()
     if mode not in _AI_MODE_LABELS:
@@ -23642,6 +23769,35 @@ def render_ai_plan_models(call: types.CallbackQuery) -> None:
     kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
 
+def _omega_endpoint_label(endpoint: str) -> str:
+    value = str(endpoint or "").strip()
+    return value if value.startswith("http") else f"/api/ai/{value.strip('/')}"
+
+def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
+    custom = _custom_ai_models()
+    cap = (
+        f"<b>🌐 {sc('Omega API Browser')}</b>\n{G['div_eq']}\n"
+        f"{sc('Verified Omega routes and your runtime-configured models')}:\n"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for key in _AI_TARGET_LEGACY_KEYS:
+        route = _OMEGATECH_MODELS.get(key)
+        if route:
+            cap += f"• <b>{esc(ai_label(key))}</b> — <code>{esc(_omega_endpoint_label(route[0]))}</code>\n"
+            kb.add(Btn(f"🧪 Test {ai_label(key)[:24]}", callback_data=f"adm_ai_omega_test_{key}", style="primary"))
+    if custom:
+        cap += f"\n<b>{sc('Runtime models')}</b>:\n"
+        for key, spec in custom.items():
+            cap += f"• <b>{esc(spec.get('label', key))}</b> — <code>{esc(_omega_endpoint_label(spec.get('endpoint', '')))}</code>\n"
+            kb.add(Btn(f"🧪 Test {str(spec.get('label', key))[:22]}", callback_data=f"adm_ai_omega_test_{key}", style="success"))
+            kb.add(Btn(f"🗑️ Remove {str(spec.get('label', key))[:18]}", callback_data=f"adm_ai_omega_delete_{key}", style="danger"))
+    cap += f"\n{sc('Add format')}: <code>key|label|endpoint|format|model_id</code>\n"
+    cap += f"<code>gemini25|Gemini 2.5|v1/chat/completions|openai|gemini-2.5-pro</code>{FOOTER}"
+    kb.add(Btn("➕ Add / Update Runtime Model", callback_data="adm_ai_omega_add", style="success"))
+    kb.add(Btn("🔄 Reload AI Runtime", callback_data="adm_ai_omega_reload", style="primary"))
+    kb.add(Btn(f"{G['back']}  Aɪ Cᴏᴍᴍᴀɴᴅ Cᴇɴᴛᴇʀ", callback_data="adm_ai_config", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
 def render_adm_ai_config(call: types.CallbackQuery) -> None:
     """Admin UI to manage AI Command Center and Operatives."""
     global_on = bool(get_setting("ai_global_enabled", True))
@@ -23682,6 +23838,7 @@ def render_adm_ai_config(call: types.CallbackQuery) -> None:
     
     cap += f"\n{G['div']}{FOOTER}"
     kb.add(Btn("🧠  Pʟᴀɴ-Mᴏᴅᴇʟ Rᴏᴜᴛɪɴɢ", callback_data="adm_ai_routing_menu", style="success"))
+    kb.add(Btn("🌐  Oᴍᴇɢᴀ Aᴘɪ Bʀᴏᴡꜱᴇʀ", callback_data="adm_ai_omega_browser", style="success"))
     scanner_model = str(get_setting("ai_scanner_model", "gpt-4o-mini") or "gpt-4o-mini")
     if scanner_model not in _AI_OPERATIVE_KEYS:
         scanner_model = "gpt-4o-mini"

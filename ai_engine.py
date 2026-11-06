@@ -397,7 +397,11 @@ class AIEngine:
 
         last_error = "provider returned no usable text"
         for base_url in self.base_urls:
-            url = f"{base_url}/api/ai/{route.endpoint.strip('/')}"
+            endpoint = str(route.endpoint or "").strip()
+            if endpoint.startswith(("http://", "https://")):
+                url = endpoint
+            else:
+                url = f"{base_url}/api/ai/{endpoint.strip('/')}"
             for attempt in range(self.transient_retries + 1):
                 try:
                     response = self.session.get(url, params=params, timeout=route.timeout)
