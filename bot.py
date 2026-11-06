@@ -6438,6 +6438,13 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return _save_runtime_ai_model(call.from_user.id, fmt, call.message.chat.id)
     if data == "adm_ai_omega_reload":
         reload_ai_runtime(); ack(call, "AI runtime reloaded"); return render_adm_ai_omega_browser(call)
+    if data.startswith("adm_ai_omega_try_"):
+        model_key = data[len("adm_ai_omega_try_"):].lower()
+        if model_key not in _AI_OPERATIVE_KEYS:
+            ack(call, "Unknown model", show_alert=True); return render_adm_ai_omega_browser(call)
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_endpoint_prompt", "model": model_key}
+        bot.send_message(call.message.chat.id, f"Send a prompt for <b>{esc(ai_label(model_key))}</b>.\n\nThe bot will send it to the endpoint and show the real response.", parse_mode="HTML")
+        return
     if data.startswith("adm_ai_omega_test_"):
         model_key = data[len("adm_ai_omega_test_"):].lower()
         if model_key not in _AI_OPERATIVE_KEYS:
@@ -10977,6 +10984,37 @@ def on_text(m: types.Message) -> None:
         bot.reply_to(m, "No Add/Edit Node step is active. Open Admin → Infrastructure Nodes → Add Node again, then send the JSON. The setup step resets after a bot restart.")
         return
     try:
+        if flow == "await_adm_ai_endpoint_prompt":
+            USER_STATES.pop(uid, None)
+            model_key = str(st.get("model", "")).lower()
+            if model_key not in _AI_OPERATIVE_KEYS:
+                bot.reply_to(m, f"{G['no']} That model is no longer available."); return
+            prompt = text.strip()
+            if not prompt or len(prompt) > 12000:
+                bot.reply_to(m, "Please send a prompt between 1 and 12,000 characters."); return
+            started = time.monotonic()
+            result = AI_ENGINE.complete(model_key, prompt)
+            elapsed = time.monotonic() - started
+            if result.ok:
+                bot.reply_to(
+                    m,
+                    f"<b>✅ Endpoint response</b>\n"
+                    f"{bullet('Model', ai_label(model_key))}\n"
+                    f"{bullet('Response time', f'{elapsed:.2f}s')}\n\n"
+                    f"<b>Prompt</b>\n<code>{esc(prompt[:1200])}</code>\n\n"
+                    f"<b>Response</b>\n{esc(result.text[:6000])}",
+                    parse_mode="HTML",
+                )
+            else:
+                bot.reply_to(
+                    m,
+                    f"<b>❌ Endpoint request failed</b>\n"
+                    f"{bullet('Model', ai_label(model_key))}\n"
+                    f"{bullet('Response time', f'{elapsed:.2f}s')}\n"
+                    f"{bullet('Reason', result.error or 'No usable response')}",
+                    parse_mode="HTML",
+                )
+            return
         if flow == "await_adm_ai_model_endpoint":
             endpoint = text.strip()
             if endpoint.startswith(("http://", "https://")):
@@ -23833,12 +23871,12 @@ def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
         route = _OMEGATECH_MODELS.get(key)
         if route:
             cap += f"• <b>{esc(ai_label(key))}</b> — <code>{esc(_omega_endpoint_label(route[0]))}</code>\n"
-            kb.add(Btn(f"🧪 Test {ai_label(key)[:24]}", callback_data=f"adm_ai_omega_test_{key}", style="primary"))
+            kb.add(Btn(f"💬 Try {ai_label(key)[:22]}", callback_data=f"adm_ai_omega_try_{key}", style="primary"))
     if custom:
         cap += f"\n<b>{sc('Runtime models')}</b>:\n"
         for key, spec in custom.items():
             cap += f"• <b>{esc(spec.get('label', key))}</b> — <code>{esc(_omega_endpoint_label(spec.get('endpoint', '')))}</code>\n"
-            kb.add(Btn(f"🧪 Test {str(spec.get('label', key))[:22]}", callback_data=f"adm_ai_omega_test_{key}", style="success"))
+            kb.add(Btn(f"💬 Try {str(spec.get('label', key))[:20]}", callback_data=f"adm_ai_omega_try_{key}", style="success"))
             kb.add(Btn(f"🗑️ Remove {str(spec.get('label', key))[:18]}", callback_data=f"adm_ai_omega_delete_{key}", style="danger"))
     cap += f"\n{sc('Choose an endpoint, then follow the guided setup. One endpoint can serve many models.')}{FOOTER}"
     kb.add(Btn("➕ Add / Update Runtime Model", callback_data="adm_ai_omega_add", style="success"))
