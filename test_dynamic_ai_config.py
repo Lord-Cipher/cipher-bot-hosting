@@ -44,7 +44,7 @@ assert "await_adm_ai_model_endpoint" in source
 assert "adm_ai_omega_format_openai" in source
 assert "await_adm_ai_endpoint_prompt" in source
 assert "adm_ai_omega_try_" in source
-assert "Response time" in source
+assert "generated answer only" in source
 assert "Choose an Omega endpoint" in source
 assert "ai_custom_models" in source
 assert "reload_ai_runtime" in source

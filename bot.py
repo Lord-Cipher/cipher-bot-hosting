@@ -10996,15 +10996,10 @@ def on_text(m: types.Message) -> None:
             result = AI_ENGINE.complete(model_key, prompt)
             elapsed = time.monotonic() - started
             if result.ok:
-                bot.reply_to(
-                    m,
-                    f"<b>✅ Endpoint response</b>\n"
-                    f"{bullet('Model', ai_label(model_key))}\n"
-                    f"{bullet('Response time', f'{elapsed:.2f}s')}\n\n"
-                    f"<b>Prompt</b>\n<code>{esc(prompt[:1200])}</code>\n\n"
-                    f"<b>Response</b>\n{esc(result.text[:6000])}",
-                    parse_mode="HTML",
-                )
+                # Match Omega's website-style chat result: the user sees the
+                # generated answer only. Model, prompt, timing, and raw API
+                # envelope details stay out of the successful response bubble.
+                bot.reply_to(m, result.text[:6000])
             else:
                 bot.reply_to(
                     m,
