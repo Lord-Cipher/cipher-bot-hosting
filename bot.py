@@ -6438,6 +6438,33 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return _save_runtime_ai_model(call.from_user.id, fmt, call.message.chat.id)
     if data == "adm_ai_omega_reload":
         reload_ai_runtime(); ack(call, "AI runtime reloaded"); return render_adm_ai_omega_browser(call)
+    if data == "adm_ai_omega_health_toggle":
+        enabled = not bool(get_setting("ai_health_enabled", False))
+        set_setting("ai_health_enabled", enabled)
+        ack(call, f"Automatic health checks {'ON' if enabled else 'OFF'}")
+        return render_adm_ai_omega_browser(call)
+    if data == "adm_ai_omega_discover":
+        discovered = _discover_omega_models()
+        text = "<b>🔍 Omega discovery</b>\n\n"
+        if discovered:
+            text += "Live catalog entries found:\n" + "\n".join(
+                f"• <b>{esc(item['name'])}</b> — <code>{esc(item['endpoint'])}</code>" for item in discovered[:20]
+            )
+        else:
+            text += "Omega did not expose a readable machine catalog at this time.\n"
+            text += "The verified routes remain available in the browser."
+        text += "\n\nUse <b>Add / Update Runtime Model</b> to save a discovered endpoint."
+        bot.send_message(call.message.chat.id, text, parse_mode="HTML")
+        return render_adm_ai_omega_browser(call)
+    if data == "adm_ai_omega_test_all":
+        results = []
+        for model_key in list(_AI_OPERATIVE_KEYS):
+            started = time.monotonic()
+            outcome = AI_ENGINE.complete(model_key, "Reply with exactly: API connection successful")
+            elapsed = time.monotonic() - started
+            results.append(f"{'✅' if outcome.ok else '❌'} {esc(ai_label(model_key))} — {elapsed:.2f}s")
+        bot.send_message(call.message.chat.id, "<b>🧪 Model test results</b>\n\n" + "\n".join(results), parse_mode="HTML")
+        return render_adm_ai_omega_browser(call)
     if data.startswith("adm_ai_omega_try_"):
         model_key = data[len("adm_ai_omega_try_"):].lower()
         if model_key not in _AI_OPERATIVE_KEYS:
@@ -11007,16 +11034,24 @@ def on_text(m: types.Message) -> None:
                 if not raw_json or raw_json == "null":
                     bot.reply_to(m, answer)
                 else:
+                    route = AI_ENGINE.routes.get(model_key)
+                    request_info = {"method": "GET", "model": model_key, "endpoint": getattr(route, "endpoint", ""), "prompt": prompt}
+                    try:
+                        request_info["params"] = dict(route.params_for(prompt)) if route else {}
+                    except Exception:
+                        request_info["params"] = {}
+                    request_json = json.dumps(request_info, ensure_ascii=False, indent=2, default=str)
                     # Telegram messages are limited to 4096 characters. Keep
                     # every raw JSON character by sending additional quote
                     # blocks when a provider returns a large envelope.
                     chunks = [raw_json[i:i + 3400] for i in range(0, len(raw_json), 3400)]
-                    first = (
-                        f"{esc(answer)}\n\n"
-                        f"<b>Raw Omega Response</b>\n"
-                        f"<blockquote expandable>{esc(chunks[0])}</blockquote>"
+                    bot.reply_to(
+                        m,
+                        f"{esc(answer)}\n\n<b>Request Details</b>\n"
+                        f"<blockquote expandable>{esc(request_json[:3000])}</blockquote>",
+                        parse_mode="HTML",
                     )
-                    bot.reply_to(m, first, parse_mode="HTML")
+                    bot.send_message(m.chat.id, f"<b>Raw Omega Response</b>\n<blockquote expandable>{esc(chunks[0])}</blockquote>", parse_mode="HTML")
                     for chunk in chunks[1:]:
                         bot.send_message(m.chat.id, f"<blockquote expandable>{esc(chunk)}</blockquote>", parse_mode="HTML")
             else:
@@ -21401,6 +21436,14 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_stats":    render_user_stats(call); return
     if data == "menu_ai_chat":  render_ai_chat(call); return
     if data == "menu_ai_models": render_ai_modes(call); return
+    if data == "ai_history": render_ai_history(call); return
+    if data == "ai_history_clear":
+        d = db_load(); user = d.setdefault("users", {}).setdefault(str(call.from_user.id), {})
+        user["ai_memory"] = []; user.pop("ai_last_chat", None); db_save(d)
+        with AI_CHAT_SESSION_LOCK:
+            AI_CHAT_SESSIONS.pop(int(call.from_user.id), None)
+        ack(call, "Conversation history cleared")
+        return render_ai_history(call)
     if data == "menu_ai_plan_models": render_ai_plan_models(call); return
     if data.startswith("ai_mode_"):
         render_ai_models(call, data[len("ai_mode_"):]); return
@@ -21727,6 +21770,10 @@ def cron_runner() -> None:
             expiry_reminders()
             _process_deployment_queue()
             bot_health_monitor()
+            try:
+                _ai_health_check()
+            except Exception as health_error:
+                print(f"[ai_health] {health_error}", flush=True)
             # Scheduled broadcasts
             d = db_load()
             sb = d.get("scheduled_broadcasts", [])
@@ -23767,7 +23814,27 @@ def render_ai_modes(call: types.CallbackQuery) -> None:
     if not available:
         cap += f"\n⚠️ {sc('No AI pools are currently enabled for your plan.')}"
     cap += f"\n{G['div']}{FOOTER}"
+    kb.add(Btn("🗂️ Conversation History", callback_data="ai_history", style="primary"))
     kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
+
+def render_ai_history(call: types.CallbackQuery) -> None:
+    uid = int(call.from_user.id)
+    profile = (db_load_ro().get("users", {}) or {}).get(str(uid), {}) or {}
+    memory = list(profile.get("ai_memory", []) or [])
+    if not memory:
+        cap = f"<b>🗂️ Conversation History</b>\n{G['div_eq']}\nNo saved conversations yet.{FOOTER}"
+    else:
+        lines = []
+        for turn in memory[-(AI_MEMORY_TURNS * 2):]:
+            role = "You" if turn.get("role") == "user" else "AI"
+            lines.append(f"<b>{role}:</b> {esc(str(turn.get('text', ''))[:500])}")
+        cap = f"<b>🗂️ Conversation History</b>\n{G['div_eq']}\n" + "\n\n".join(lines) + FOOTER
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if memory:
+        kb.add(Btn("🗑️ Clear History", callback_data="ai_history_clear", style="danger"))
+    kb.add(Btn("↩️ AI Models", callback_data="menu_ai_models", style="primary"))
+    kb.add(Btn(f"{G['back']} Main Menu", callback_data="menu_main", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("ai_assistant", PHOTOS["main"]), cap, kb, call=call)
 
 def render_ai_models(call: types.CallbackQuery, mode: str = "chat") -> None:
@@ -23874,8 +23941,56 @@ def _save_runtime_ai_model(uid: int, fmt: str, chat_id: int) -> None:
     audit(uid, "ai_runtime_model_save", f"key={key} endpoint={endpoint} format={fmt}")
     bot.send_message(chat_id, f"{G['ok']} <b>{esc(label)}</b> was added to the Omega catalog.\n\nYou can test it now, then add it to a plan pool.", parse_mode="HTML")
 
+def _ai_health_check(force: bool = False) -> None:
+    """Check configured models periodically and persist safe health metadata."""
+    if not force and not bool(get_setting("ai_health_enabled", False)):
+        return
+    now = time.time()
+    last = float(get_setting("ai_health_last_run", 0) or 0)
+    if not force and now - last < 900:
+        return
+    health = get_setting("ai_health", {}) or {}
+    for model_key in list(_AI_OPERATIVE_KEYS):
+        started = time.monotonic()
+        outcome = AI_ENGINE.complete(model_key, "Reply with exactly: API connection successful")
+        record = health.setdefault(model_key, {})
+        record.update({"checked_at": ts_iso(), "latency": round(time.monotonic() - started, 2), "ok": bool(outcome.ok), "error": outcome.error or ""})
+    set_setting("ai_health", health)
+    set_setting("ai_health_last_run", now)
+
+def _discover_omega_models() -> List[Dict[str, str]]:
+    """Best-effort discovery from Omega's public catalog without executing it."""
+    found: List[Dict[str, str]] = []
+    try:
+        response = AI_HTTP.get("https://api.omegatech.app/api", timeout=8)
+        payload = response.json()
+    except Exception:
+        return found
+    def walk(value: Any) -> None:
+        if len(found) >= 40:
+            return
+        if isinstance(value, dict):
+            endpoint = value.get("endpoint") or value.get("path") or value.get("route")
+            name = value.get("name") or value.get("title") or value.get("model")
+            if endpoint and name and any(token in str(endpoint).lower() for token in ("ai", "chat", "gemini", "gpt", "deepseek")):
+                found.append({"name": str(name)[:80], "endpoint": str(endpoint)[:200]})
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+    walk(payload)
+    unique = {}
+    for item in found:
+        unique[f"{item['name']}|{item['endpoint']}"] = item
+    return list(unique.values())
+
 def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
     custom = _custom_ai_models()
+    health = get_setting("ai_health", {}) or {}
+    grouped = {}
+    for key, spec in custom.items():
+        grouped.setdefault(str(spec.get("endpoint") or ""), []).append(key)
     cap = (
         f"<b>🌐 {sc('Omega API Browser')}</b>\n{G['div_eq']}\n"
         f"{sc('Verified Omega routes and your runtime-configured models')}:\n"
@@ -23888,12 +24003,21 @@ def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
             kb.add(Btn(f"💬 Try {ai_label(key)[:22]}", callback_data=f"adm_ai_omega_try_{key}", style="primary"))
     if custom:
         cap += f"\n<b>{sc('Runtime models')}</b>:\n"
+        for endpoint, keys in grouped.items():
+            if len(keys) > 1:
+                cap += f"<i>Shared endpoint ({len(keys)} models):</i> <code>{esc(_omega_endpoint_label(endpoint))}</code>\n"
         for key, spec in custom.items():
-            cap += f"• <b>{esc(spec.get('label', key))}</b> — <code>{esc(_omega_endpoint_label(spec.get('endpoint', '')))}</code>\n"
+            check = health.get(key, {}) if isinstance(health, dict) else {}
+            status = "✅" if check.get("ok") else ("❌" if check else "⚪")
+            cap += f"• {status} <b>{esc(spec.get('label', key))}</b> — <code>{esc(_omega_endpoint_label(spec.get('endpoint', '')))}</code>\n"
             kb.add(Btn(f"💬 Try {str(spec.get('label', key))[:20]}", callback_data=f"adm_ai_omega_try_{key}", style="success"))
             kb.add(Btn(f"🗑️ Remove {str(spec.get('label', key))[:18]}", callback_data=f"adm_ai_omega_delete_{key}", style="danger"))
     cap += f"\n{sc('Choose an endpoint, then follow the guided setup. One endpoint can serve many models.')}{FOOTER}"
     kb.add(Btn("➕ Add / Update Runtime Model", callback_data="adm_ai_omega_add", style="success"))
+    kb.add(Btn("🧪 Test All Models", callback_data="adm_ai_omega_test_all", style="primary"))
+    kb.add(Btn("🔍 Discover Omega Models", callback_data="adm_ai_omega_discover", style="primary"))
+    health_on = bool(get_setting("ai_health_enabled", False))
+    kb.add(Btn(f"{'🟢' if health_on else '🔴'} Auto Health Checks: {'ON' if health_on else 'OFF'}", callback_data="adm_ai_omega_health_toggle", style="success" if health_on else "danger"))
     kb.add(Btn("🔄 Reload AI Runtime", callback_data="adm_ai_omega_reload", style="primary"))
     kb.add(Btn(f"{G['back']}  Aɪ Cᴏᴍᴍᴀɴᴅ Cᴇɴᴛᴇʀ", callback_data="adm_ai_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
