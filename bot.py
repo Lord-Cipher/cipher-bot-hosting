@@ -5556,10 +5556,18 @@ def cmd_menu(m: types.Message) -> None:
         return
     if banned_block(m):
         return
+    uid = m.from_user.id
     get_or_create_user(m.from_user)
-    if not require_verified(m.chat.id, m.from_user.id):
+    if maintenance_block(uid):
+        bot.send_message(
+            m.chat.id,
+            f"<b>{G['warn']} {sc('Panel under maintenance')}</b>\n\n"
+            f"We will be back shortly. {SUPPORT_USR} for urgent issues.",
+        )
         return
-    render_main_menu(m.chat.id, m.from_user.id)
+    if not require_verified(m.chat.id, uid):
+        return
+    render_main_menu(m.chat.id, uid)
 @bot.message_handler(commands=["id"])
 def cmd_id(m: types.Message) -> None:
     if not _is_private(m):
