@@ -6401,6 +6401,31 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return
     if data == "adm_ai_config":           return render_adm_ai_config(call)
     if data == "adm_ai_omega_browser":    return render_adm_ai_omega_browser(call)
+    if data == "adm_ai_omega_categories": return render_adm_ai_omega_categories(call)
+    if data == "adm_ai_omega_category_ai": return render_adm_ai_omega_ai(call)
+    if data in {"adm_ai_omega_category_media", "adm_ai_omega_category_tools"}:
+        ack(call, "No verified endpoints in this category yet", show_alert=True)
+        return render_adm_ai_omega_categories(call)
+    if data.startswith("adm_ai_omega_endpoint_") and not data.startswith("adm_ai_omega_endpoint_try_") and not data.startswith("adm_ai_omega_endpoint_add_"):
+        return render_adm_ai_omega_endpoint(call, data[len("adm_ai_omega_endpoint_"):])
+    if data.startswith("adm_ai_omega_inspect_"):
+        card = _omega_card(data[len("adm_ai_omega_inspect_"):])
+        if not card: ack(call, "Endpoint not found", show_alert=True); return
+        body = {"method": card["method"], "url": card["url"], "type": card["kind"], "response_field": "answer / result", "request": {"model": "{model}", "messages": [{"role": "user", "content": "{prompt}"}]}} if card["method"] == "POST" else {"method": "GET", "url": card["url"], "params": {"text": "{prompt}"}, "response_field": "answer"}
+        bot.send_message(call.message.chat.id, f"<b>🔍 Endpoint inspection</b>\n\n<pre>{esc(json.dumps(body, indent=2))}</pre>", parse_mode="HTML")
+        return render_adm_ai_omega_endpoint(call, card["slug"])
+    if data.startswith("adm_ai_omega_endpoint_add_"):
+        card = _omega_card(data[len("adm_ai_omega_endpoint_add_"):])
+        if not card: ack(call, "Endpoint not found", show_alert=True); return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_model_name", "endpoint": card["url"], "format": card["format"], "model_id": card["model_id"]}
+        bot.send_message(call.message.chat.id, f"What should <code>{esc(card['path'])}</code> be called in the bot?", parse_mode="HTML")
+        return
+    if data.startswith("adm_ai_omega_endpoint_try_"):
+        card = _omega_card(data[len("adm_ai_omega_endpoint_try_"):])
+        if not card: ack(call, "Endpoint not found", show_alert=True); return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_catalog_prompt", "endpoint_card": card}
+        bot.send_message(call.message.chat.id, f"Send a prompt to <b>{esc(card['name'])}</b>.\n\nThe endpoint response will be shown with its raw JSON.", parse_mode="HTML")
+        return
     if data == "adm_ai_omega_add":
         kb = types.InlineKeyboardMarkup(row_width=1)
         for key in _AI_TARGET_LEGACY_KEYS:
@@ -11011,6 +11036,28 @@ def on_text(m: types.Message) -> None:
         bot.reply_to(m, "No Add/Edit Node step is active. Open Admin → Infrastructure Nodes → Add Node again, then send the JSON. The setup step resets after a bot restart.")
         return
     try:
+        if flow == "await_adm_ai_catalog_prompt":
+            USER_STATES.pop(uid, None)
+            card = st.get("endpoint_card") or {}
+            prompt = text.strip()
+            if not prompt or not card.get("url"):
+                bot.reply_to(m, "Please send a prompt for the selected endpoint."); return
+            try:
+                if str(card.get("method")) == "POST":
+                    response = AI_HTTP.post(card["url"], json={"model": card.get("model_id", "gpt-4o-mini"), "messages": [{"role": "user", "content": prompt}]}, timeout=45)
+                else:
+                    response = AI_HTTP.get(card["url"], params={"text": prompt}, timeout=45)
+                try:
+                    payload = response.json()
+                    raw = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+                    answer = str(payload.get("answer") or payload.get("result") or payload.get("response") or payload.get("text") or payload.get("message") or payload) if isinstance(payload, dict) else str(payload)
+                except Exception:
+                    raw = response.text
+                    answer = response.text
+                bot.reply_to(m, f"{esc(answer[:6000])}\n\n<b>Raw Omega Response</b>\n<blockquote expandable>{esc(raw[:3600])}</blockquote>", parse_mode="HTML")
+            except Exception as error:
+                bot.reply_to(m, f"❌ Endpoint request failed: <code>{esc(str(error)[:800])}</code>", parse_mode="HTML")
+            return
         if flow == "await_adm_ai_endpoint_prompt":
             USER_STATES.pop(uid, None)
             model_key = str(st.get("model", "")).lower()
@@ -23985,6 +24032,74 @@ def _discover_omega_models() -> List[Dict[str, str]]:
         unique[f"{item['name']}|{item['endpoint']}"] = item
     return list(unique.values())
 
+def _omega_ai_catalog() -> List[Dict[str, Any]]:
+    """Stable AI endpoint cards used when Omega's catalog is unavailable."""
+    cards = [{
+        "slug": "chat-completions",
+        "name": "Chat Completions",
+        "path": "/v1/chat/completions",
+        "url": "https://api.omegatech.app/v1/chat/completions",
+        "method": "POST", "format": "openai", "kind": "AI Chat",
+        "model_id": "gpt-4o-mini",
+    }]
+    for key in _AI_TARGET_LEGACY_KEYS:
+        route = _OMEGATECH_MODELS.get(key)
+        if not route:
+            continue
+        endpoint = str(route[0])
+        path = endpoint if endpoint.startswith("/") else f"/api/ai/{endpoint.strip('/')}"
+        cards.append({
+            "slug": re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-"),
+            "name": ai_label(key), "path": path,
+            "url": endpoint if endpoint.startswith("http") else f"https://api.omegatech.app{path}",
+            "method": "GET", "format": "omega_text", "kind": "AI Chat",
+            "model_id": key,
+        })
+    return cards
+
+def _omega_card(slug: str) -> Optional[Dict[str, Any]]:
+    return next((item for item in _omega_ai_catalog() if item["slug"] == slug), None)
+
+def render_adm_ai_omega_categories(call: types.CallbackQuery) -> None:
+    cap = f"<b>🌐 Omega API Browser</b>\n{G['div_eq']}\nBrowse endpoints by category, like a repository.\n\nChoose a category to view its paths.{FOOTER}"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🤖 AI", callback_data="adm_ai_omega_category_ai", style="success"))
+    kb.add(Btn("🖼️ Image / Media", callback_data="adm_ai_omega_category_media", style="primary"))
+    kb.add(Btn("🛠️ Tools", callback_data="adm_ai_omega_category_tools", style="primary"))
+    kb.add(Btn(f"{G['back']} Omega Manager", callback_data="adm_ai_omega_browser", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
+def render_adm_ai_omega_ai(call: types.CallbackQuery) -> None:
+    cards = _omega_ai_catalog()
+    cap = f"<b>🤖 Omega / AI</b>\n{G['div_eq']}\nSelect an endpoint to inspect its path, method, request format, and response.\n\n"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for card in cards:
+        cap += f"• <b>{esc(card['name'])}</b> — <code>{esc(card['path'])}</code>\n"
+        kb.add(Btn(f"{card['name'][:24]}  {card['path'][:24]}", callback_data=f"adm_ai_omega_endpoint_{card['slug']}", style="primary"))
+    cap += FOOTER
+    kb.add(Btn(f"{G['back']} Categories", callback_data="adm_ai_omega_categories", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
+def render_adm_ai_omega_endpoint(call: types.CallbackQuery, slug: str) -> None:
+    card = _omega_card(slug)
+    if not card:
+        ack(call, "Endpoint not found", show_alert=True); return render_adm_ai_omega_ai(call)
+    path_line = bullet("Path", f"<code>{esc(card['path'])}</code>")
+    url_line = bullet("Full URL", f"<code>{esc(card['url'])}</code>")
+    cap = (
+        f"<b>🤖 {esc(card['name'])}</b>\n{G['div_eq']}\n"
+        f"{path_line}{url_line}"
+        f"{bullet('Method', card['method'])}{bullet('Type', card['kind'])}"
+        f"{bullet('Request', 'JSON body' if card['method'] == 'POST' else 'text parameter')}"
+        f"\n{G['div']}Select an action.{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🔍 Inspect Endpoint", callback_data=f"adm_ai_omega_inspect_{slug}", style="primary"))
+    kb.add(Btn("🧪 Try Endpoint", callback_data=f"adm_ai_omega_endpoint_try_{slug}", style="success"))
+    kb.add(Btn("➕ Add to AI Catalog", callback_data=f"adm_ai_omega_endpoint_add_{slug}", style="success"))
+    kb.add(Btn(f"{G['back']} AI Endpoints", callback_data="adm_ai_omega_category_ai", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
 def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
     custom = _custom_ai_models()
     health = get_setting("ai_health", {}) or {}
@@ -24014,6 +24129,7 @@ def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
             kb.add(Btn(f"🗑️ Remove {str(spec.get('label', key))[:18]}", callback_data=f"adm_ai_omega_delete_{key}", style="danger"))
     cap += f"\n{sc('Choose an endpoint, then follow the guided setup. One endpoint can serve many models.')}{FOOTER}"
     kb.add(Btn("➕ Add / Update Runtime Model", callback_data="adm_ai_omega_add", style="success"))
+    kb.add(Btn("📚 Browse Omega Categories", callback_data="adm_ai_omega_categories", style="primary"))
     kb.add(Btn("🧪 Test All Models", callback_data="adm_ai_omega_test_all", style="primary"))
     kb.add(Btn("🔍 Discover Omega Models", callback_data="adm_ai_omega_discover", style="primary"))
     health_on = bool(get_setting("ai_health_enabled", False))
