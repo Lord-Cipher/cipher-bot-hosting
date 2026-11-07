@@ -6406,6 +6406,13 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         group = data[len("adm_ai_omega_category_"):]
         if group in _OMEGA_SYNC_GROUPS:
             return render_adm_ai_omega_group(call, group)
+    if data.startswith("adm_ai_omega_page_"):
+        parts = data[len("adm_ai_omega_page_"):].rsplit("_", 1)
+        if len(parts) == 2 and parts[0] in _OMEGA_SYNC_GROUPS:
+            try:
+                return render_adm_ai_omega_group(call, parts[0], max(0, int(parts[1])))
+            except ValueError:
+                pass
     if data == "adm_ai_omega_sync":
         ack(call, "Synchronizing Omega catalogue…")
         try:
@@ -6423,7 +6430,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data.startswith("adm_ai_omega_inspect_"):
         card = _omega_card(data[len("adm_ai_omega_inspect_"):])
         if not card: ack(call, "Endpoint not found", show_alert=True); return
-        body = {"method": card["method"], "url": card["url"], "type": card["kind"], "response_field": "answer / result", "request": {"model": "{model}", "messages": [{"role": "user", "content": "{prompt}"}]}} if card["method"] == "POST" else {"method": "GET", "url": card["url"], "params": {"text": "{prompt}"}, "response_field": "answer"}
+        body = {"method": card["method"], "url": card["url"], "type": card.get("kind") or card.get("category", "Omega endpoint"), "response_field": "answer / result", "request": {"model": "{model}", "messages": [{"role": "user", "content": "{prompt}"}]}} if card["method"] == "POST" else {"method": "GET", "url": card["url"], "params": {"text": "{prompt}"}, "response_field": "answer"}
         bot.send_message(call.message.chat.id, f"<b>🔍 Endpoint inspection</b>\n\n<pre>{esc(json.dumps(body, indent=2))}</pre>", parse_mode="HTML")
         return render_adm_ai_omega_endpoint(call, card["slug"])
     if data.startswith("adm_ai_omega_endpoint_add_"):
@@ -24072,7 +24079,12 @@ def _omega_sync_group(item: Dict[str, Any]) -> Optional[str]:
     return None
 
 def _omega_catalog_key(item: Dict[str, Any]) -> str:
-    return f"{item.get('method', 'GET').upper()}|{str(item.get('path') or item.get('url') or '').rstrip('/').lower()}|{item.get('model_id', '')}"
+    return f"{str(item.get('path') or item.get('url') or '').rstrip('/').lower()}|{item.get('model_id', '')}"
+
+def _omega_catalog_signature(item: Dict[str, Any]) -> Dict[str, Any]:
+    value = dict(item)
+    value.pop("synced_at", None)
+    return value
 
 def _sync_omega_catalog() -> Dict[str, Any]:
     """Fetch Omega's live OpenAPI-style index and persist only approved groups."""
@@ -24094,28 +24106,27 @@ def _sync_omega_catalog() -> Dict[str, Any]:
             continue
         path = str(raw.get("route") or raw.get("url") or "").strip()
         url = str(raw.get("url") or f"https://api.omegatech.app{path if path.startswith('/') else '/' + path}")
-        methods = raw.get("methods") or [raw.get("method") or "GET"]
-        for method in methods[:4]:
-            method = str(method).upper()
-            item = {
-                "slug": re.sub(r"[^a-z0-9]+", "-", f"{group}-{path}-{method}".lower()).strip("-")[:48],
-                "name": str(raw.get("name") or path.rsplit("/", 1)[-1])[:100],
-                "description": str(raw.get("description") or "")[:500],
-                "category": group, "path": path, "url": url, "method": method,
-                "format": "openai" if group == "ai" and "chat/completions" in path else "omega_text",
-                "model_id": str(raw.get("model_id") or ""),
-                "params": raw.get("paramsSchema") or {},
-                "maintenance": bool(raw.get("isMaintenance", False)),
-                "synced_at": ts_iso(),
-            }
-            new_map[_omega_catalog_key(item)] = item
+        methods = [str(x).upper() for x in (raw.get("methods") or [raw.get("method") or "GET"])]
+        item = {
+            "slug": re.sub(r"[^a-z0-9]+", "-", f"{group}-{path}".lower()).strip("-")[:48],
+            "name": str(raw.get("name") or path.rsplit("/", 1)[-1])[:100],
+            "description": str(raw.get("description") or "")[:500],
+            "category": group, "path": path, "url": url,
+            "method": "POST" if "POST" in methods else methods[0], "methods": methods,
+            "format": "openai" if group == "ai" and "chat/completions" in path else "omega_text",
+            "model_id": str(raw.get("model_id") or ""),
+            "params": raw.get("paramsSchema") or {},
+            "maintenance": bool(raw.get("isMaintenance", False)),
+            "synced_at": ts_iso(),
+        }
+        new_map[_omega_catalog_key(item)] = item
     new_items = list(new_map.values())
     new_keys, old_keys = set(new_map), set(old_map)
     counts = {group: sum(1 for x in new_items if x.get("category") == group) for group in _OMEGA_SYNC_GROUPS}
     meta = {
         "items": new_items, "counts": counts, "total": len(new_items),
         "last_sync": ts_iso(), "source_total": len(source),
-        "new": len(new_keys - old_keys), "updated": sum(1 for key in new_keys & old_keys if new_map[key] != old_map[key]),
+        "new": len(new_keys - old_keys), "updated": sum(1 for key in new_keys & old_keys if _omega_catalog_signature(new_map[key]) != _omega_catalog_signature(old_map[key])),
         "unavailable": len(old_keys - new_keys),
     }
     set_setting("ai_omega_catalog", meta)
@@ -24174,14 +24185,25 @@ def render_adm_ai_omega_categories(call: types.CallbackQuery) -> None:
     kb.add(Btn(f"{G['back']} Omega Manager", callback_data="adm_ai_omega_browser", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
-def render_adm_ai_omega_group(call: types.CallbackQuery, group: str) -> None:
+def render_adm_ai_omega_group(call: types.CallbackQuery, group: str, page: int = 0) -> None:
     cards = [x for x in _omega_ai_catalog() if x.get("category") == group]
     label = _OMEGA_SYNC_GROUPS.get(group, group.title())
-    cap = f"<b>📂 Omega / {esc(label)}</b>\n{G['div_eq']}\n<b>{len(cards)} endpoints</b>\nSelect an endpoint to inspect its path, method, request format, and response.\n\n"
+    page_size = 12
+    pages = max(1, (len(cards) + page_size - 1) // page_size)
+    page = min(max(0, page), pages - 1)
+    shown = cards[page * page_size:(page + 1) * page_size]
+    cap = f"<b>📂 Omega / {esc(label)}</b>\n{G['div_eq']}\n<b>{len(cards)} endpoints</b> · Page {page + 1}/{pages}\nSelect an endpoint to inspect its path, method, request format, and response.\n\n"
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for card in cards:
+    for card in shown:
         cap += f"• <b>{esc(card['name'])}</b> — <code>{esc(card['path'])}</code>\n"
         kb.add(Btn(f"{card['name'][:24]}  {card['path'][:24]}", callback_data=f"adm_ai_omega_endpoint_{card['slug']}", style="primary"))
+    nav = []
+    if page > 0:
+        nav.append(Btn("◀ Previous", callback_data=f"adm_ai_omega_page_{group}_{page - 1}", style="primary"))
+    if page < pages - 1:
+        nav.append(Btn("Next ▶", callback_data=f"adm_ai_omega_page_{group}_{page + 1}", style="primary"))
+    if nav:
+        kb.row(*nav)
     cap += FOOTER
     kb.add(Btn(f"{G['back']} Categories", callback_data="adm_ai_omega_categories", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
@@ -24198,7 +24220,7 @@ def render_adm_ai_omega_endpoint(call: types.CallbackQuery, slug: str) -> None:
     cap = (
         f"<b>🤖 {esc(card['name'])}</b>\n{G['div_eq']}\n"
         f"{path_line}{url_line}"
-        f"{bullet('Method', card['method'])}{bullet('Type', card['kind'])}"
+        f"{bullet('Method', ', '.join(card.get('methods') or [card.get('method', 'GET')]))}{bullet('Type', card.get('kind') or card.get('category', 'Omega endpoint'))}"
         f"{bullet('Request', 'JSON body' if card['method'] == 'POST' else 'text parameter')}"
         f"\n{G['div']}Select an action.{FOOTER}"
     )
@@ -24206,7 +24228,8 @@ def render_adm_ai_omega_endpoint(call: types.CallbackQuery, slug: str) -> None:
     kb.add(Btn("🔍 Inspect Endpoint", callback_data=f"adm_ai_omega_inspect_{slug}", style="primary"))
     kb.add(Btn("🧪 Try Endpoint", callback_data=f"adm_ai_omega_endpoint_try_{slug}", style="success"))
     kb.add(Btn("➕ Add to AI Catalog", callback_data=f"adm_ai_omega_endpoint_add_{slug}", style="success"))
-    kb.add(Btn(f"{G['back']} AI Endpoints", callback_data="adm_ai_omega_category_ai", style="danger"))
+    group = card.get("category", "ai")
+    kb.add(Btn(f"{G['back']} {_OMEGA_SYNC_GROUPS.get(group, 'AI')} Endpoints", callback_data=f"adm_ai_omega_category_{group}", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
 def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
