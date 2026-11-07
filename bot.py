@@ -4337,6 +4337,40 @@ def _redacted_backup_settings(raw: bytes) -> bytes:
             return [redact(v) for v in value]
         return value
     return json.dumps(redact(data), indent=2, ensure_ascii=False).encode()
+def _backup_inventory() -> Dict[str, Any]:
+    """Describe the state included in a full archive without exposing data."""
+    included = []
+    total_bytes = 0
+    file_count = 0
+    for root_name in ("storage", "sandbox"):
+        root = BASE_DIR / root_name
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(BASE_DIR).as_posix()
+            leaf = path.name.lower()
+            if leaf in {".env", "cipher_vault.json"} or leaf.endswith((".pem", ".key")):
+                continue
+            if rel == "storage/data/panel_settings.json":
+                size = len(_redacted_backup_settings(path.read_bytes()))
+            else:
+                size = path.stat().st_size
+            included.append(rel)
+            total_bytes += size
+            file_count += 1
+    return {
+        "format": "cipher-platform-backup-inventory-v1",
+        "generatedAt": ts_iso(),
+        "roots": ["storage", "sandbox"],
+        "fileCount": file_count,
+        "includedBytes": total_bytes,
+        "included": included,
+        "redactedFiles": ["storage/data/panel_settings.json"],
+        "excludedSecrets": [".env", "cipher_vault.json", "*.pem", "*.key"],
+        "completeSecrets": "Cipher Vault encrypted snapshot when configured",
+    }
 def _make_tarball() -> Path:
     tmp = Path(tempfile.gettempdir()) / f"panel-backup-{int(time.time())}.tar.gz"
     excludes = ("node_modules", ".deps", ".tmp_run", "__pycache__")
@@ -4368,6 +4402,12 @@ def _make_tarball() -> Path:
         sandbox_dir = BASE_DIR / "sandbox"
         if sandbox_dir.exists():
             tf.add(str(sandbox_dir), arcname="sandbox", filter=_filter)
+        inventory = json.dumps(_backup_inventory(), indent=2, ensure_ascii=False).encode("utf-8")
+        info = tarfile.TarInfo("BACKUP_INVENTORY.json")
+        info.size = len(inventory)
+        info.mode = 0o600
+        info.mtime = int(time.time())
+        tf.addfile(info, io.BytesIO(inventory))
     return tmp
 def _gh_publish_full_state(raw_archive: bytes, timestamp: str) -> Dict[str, Any]:
     """Publish the complete storage+sandbox archive in GitHub-safe chunks."""
@@ -4386,7 +4426,8 @@ def _gh_publish_full_state(raw_archive: bytes, timestamp: str) -> Dict[str, Any]
         "format": "cipher-platform-full-state-v1",
         "createdAt": ts_iso(), "archiveSha256": digest,
         "sizeBytes": len(raw_archive), "partCount": len(parts),
-        "parts": parts, "includes": ["storage", "sandbox"],
+        "parts": parts, "includes": ["storage", "sandbox", "BACKUP_INVENTORY.json"],
+        "secretHandling": "Operational settings are redacted; Cipher Vault stores the complete encrypted state when configured.",
     }
     manifest_path = f"{prefix}/manifest.json"
     if not _gh_put_file(manifest_path, json.dumps(manifest, indent=2).encode(),
@@ -4455,6 +4496,10 @@ def gh_backup_now() -> Dict[str, Any]:
         size_mb = len(buf) / 1024 / 1024
         backup_stamp = ts_iso().replace(":", "-").replace(".", "-")
         full_manifest = _gh_publish_full_state(buf, backup_stamp)
+        # Publish the complete encrypted snapshot as well. The GitHub-safe
+        # archive redacts credential-shaped settings; Cipher Vault preserves
+        # those settings and generated key references for disaster recovery.
+        vault_result = cipher_vault_sync_now()
         tar_ok = True
 
         ts_now = ts_iso()
@@ -4470,6 +4515,11 @@ def gh_backup_now() -> Dict[str, Any]:
             "users": len(db.get("users", {})),
             "tar_ok": tar_ok,
             "full_state": full_manifest,
+            "cipher_vault": {
+                "ok": bool(vault_result.get("ok")),
+                "snapshotId": vault_result.get("snapshotId"),
+                "error": vault_result.get("error", "") if not vault_result.get("ok") else "",
+            },
         }
     except Exception as e:
         GH["lastError"] = str(e)
@@ -24249,24 +24299,40 @@ _OMEGA_SYNC_GROUPS = {
 }
 
 def _omega_sync_group(item: Dict[str, Any]) -> Optional[str]:
-    """Map Omega's live categories into the four catalogues we support."""
+    """Map Omega's authoritative category into our four catalogues.
+
+    The API's category is authoritative. In particular, Maker must never fall
+    through to AI merely because its name contains words such as "AI" or
+    "generator". Text is used only for the intentional image/media splits.
+    """
     category = str(item.get("category") or "").strip().lower()
     text = f"{item.get('name', '')} {item.get('description', '')} {item.get('route', '')}".lower()
-    image_terms = ("image generator", "image generation", "image editor", "text to image", "text-to-image", "image ai", "logo generator", "artgen", "image maker")
-    media_terms = ("video", "audio", "music", "media", "transcri", "converter", "upscaler", "downloader", "stream", "subtitle")
-    if category in {"ai", "maker"}:
+    image_terms = ("image generator", "image generation", "image editor", "text to image", "text-to-image", "image ai", "logo generator", "artgen", "image maker", "image synthesis")
+    media_terms = ("video generator", "video", "audio", "music", "media", "transcri", "downloader", "stream", "subtitle")
+    image_tool_terms = ("image converter", "image upscaler", "image-upscaler", "watermark", "photo editor")
+    if category in {"ai", "ai ", "ai-agent"}:
         if any(term in text for term in image_terms):
             return "image_generation"
         if any(term in text for term in media_terms):
             return "media"
         return "ai"
-    if category == "tools":
-        if any(term in text for term in ("image converter", "upscaler", "watermark", "image editor", "video enhancer", "audio transcri")):
-            return "image_generation" if "image" in text or "upscal" in text or "watermark" in text else "media"
+    if category in {"maker", "makers"}:
+        if any(term in text for term in image_terms):
+            return "image_generation"
+        if any(term in text for term in media_terms):
+            return "media"
         return "tools"
-    if category in {"download", "streaming"}:
+    if category == "tools":
+        if any(term in text for term in image_tool_terms):
+            return "image_generation"
+        if any(term in text for term in ("video enhancer", "audio transcri", "video", "audio", "subtitle")):
+            return "media"
+        return "tools"
+    if category in {"download", "streaming", "movie", "anime", "novel"}:
         return "media"
-    return None
+    # The browser has four user-facing catalogues. Other Omega categories
+    # (search, fun, stalk, security, sports, etc.) are tools, not AI.
+    return "tools"
 
 def _omega_catalog_key(item: Dict[str, Any]) -> str:
     return f"{str(item.get('path') or item.get('url') or '').rstrip('/').lower()}|{item.get('model_id', '')}"
