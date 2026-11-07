@@ -17553,6 +17553,8 @@ def _create_referral_gift(sender: int, recipient: Optional[int], amount: int) ->
     gift = {
         "id": "GIFT" + secrets.token_hex(3).upper(), "sender": sender, "recipient": None,
         "credits": amount, "status": "pending", "created": ts_iso(),
+        "expires": (now_utc() + timedelta(days=max(1, int(get_setting("gift_expiry_days", 7) or 7)))).isoformat(),
+        "max_claims": 1, "claim_count": 0,
     }
     d.setdefault("referral_gifts", []).append(gift)
     db_save(d); audit(sender, "referral_gift_create", f"credits={amount} code={gift['id']}")
@@ -17566,12 +17568,22 @@ def _referral_gift_receipt(gift: Dict[str, Any], remaining: int, claimed: bool =
         f"{bullet('Code', gift.get('id'))}\n"
         f"{bullet(label, int(gift.get('credits', 0) or 0))}\n"
         f"{bullet('Remaining Referrals', int(remaining or 0))}\n"
+        f"{bullet('Expires', fmt_ts(gift.get('expires')) if gift.get('expires') else 'No expiry')}\n"
         f"{G['div']}Keep this receipt for your records."
     )
 def _claim_referral_gift(uid: int, gift_id: str) -> Tuple[bool, str]:
     d = db_load(); gift = next((g for g in d.get("referral_gifts", []) or [] if g.get("id") == gift_id), None)
     if not gift or gift.get("status") != "pending":
         return False, "This referral gift is no longer available"
+    expires = str(gift.get("expires") or "")
+    if expires and expires <= now_utc().isoformat():
+        gift["status"] = "expired"
+        db_save(d)
+        return False, "This referral gift has expired"
+    if int(gift.get("claim_count", 0) or 0) >= int(gift.get("max_claims", 1) or 1):
+        gift["status"] = "claimed"
+        db_save(d)
+        return False, "This referral gift has already been claimed"
     amount = max(0, int(gift.get("credits", 0) or 0))
     if amount < 1:
         return False, "This gift has no referral credits"
@@ -17579,7 +17591,7 @@ def _claim_referral_gift(uid: int, gift_id: str) -> Tuple[bool, str]:
     if not user:
         return False, "User not found"
     user["ref_credit"] = int(user.get("ref_credit", 0) or 0) + amount
-    gift["status"] = "claimed"; gift["claimed"] = ts_iso(); gift["recipient"] = uid
+    gift["status"] = "claimed"; gift["claimed"] = ts_iso(); gift["recipient"] = uid; gift["claim_count"] = int(gift.get("claim_count", 0) or 0) + 1
     db_save(d); audit(uid, "referral_gift_claim", f"gift={gift_id} credits={amount}")
     return True, f"Gift claimed: {amount} referral credit(s) added. Choose how to redeem them."
 def render_referral_gifts(call: types.CallbackQuery) -> None:
@@ -17947,7 +17959,10 @@ def render_user_stats(call: types.CallbackQuery) -> None:
         f"{bullet('Wallet', wallet_txt)}\n"
         f"{G['div']}\n"
         f"{bullet('Referrals', u.get('ref_count', 0))}\n"
+        f"{bullet('Referral credits', u.get('ref_credit', 0))}\n"
+        f"{bullet('File coins', u.get('file_coins', 0))}\n"
         f"{bullet('Bonus Slots', u.get('bot_slots_bonus', 0))}\n"
+        f"{bullet('AI models available', len(get_plan_ai_models(u.get('plan', 'free'))))}\n"
         f"{bullet('Free Trial', 'Used' if u.get('trial_used') else 'Available')}\n"
         f"{bullet('Tickets', len(my_tickets))}\n"
         f"{G['div']}{FOOTER}"
@@ -22267,6 +22282,19 @@ def _telemetry_loop():
                     plan_key = owner_doc.get("plan", "free")
                     ram_limit_mb = _plan_ram_mb(plan_key)
                     cpu_limit_pct = _plan_cpu_pct(plan_key)
+                    alert_enabled = bool(get_setting("resource_alerts_enabled", True))
+                    alert_threshold = max(50, min(99, int(get_setting("resource_alert_threshold", 80) or 80)))
+                    cpu_ratio = (cpu / cpu_limit_pct * 100) if cpu_limit_pct > 0 else 0
+                    ram_ratio = (mem_rss / (ram_limit_mb * 1024 * 1024) * 100) if ram_limit_mb > 0 else 0
+                    if alert_enabled and max(cpu_ratio, ram_ratio) >= alert_threshold:
+                        last_alert = float(info.get("resource_alert_last_epoch", 0) or 0)
+                        if time.time() - last_alert >= 3600:
+                            owner_id = info.get("owner")
+                            try:
+                                bot.send_message(owner_id, f"⚠️ <b>Resource alert</b>\nYour bot <b>{esc(str(info.get('name') or bot_id))}</b> is using {cpu_ratio:.0f}% CPU allowance and {ram_ratio:.0f}% RAM allowance.\nThe bot will be stopped after repeated plan-limit violations.", parse_mode="HTML")
+                            except Exception:
+                                pass
+                            info["resource_alert_last_epoch"] = time.time()
                     over_limit = (
                         mem_rss > ram_limit_mb * 1024 * 1024
                         or cpu > cpu_limit_pct
