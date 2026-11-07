@@ -2551,6 +2551,7 @@ def plans_kb() -> types.InlineKeyboardMarkup:
         kb.add(Btn(
             f"{G['star']}  {sc(v['name'])}  {G['bullet']}  {price}",
             callback_data=f"plan_view_{k}", style=style))
+    kb.add(Btn("📊 Compare Plans", callback_data="plan_compare", style="success"))
     kb.add(Btn(f"{G['back']}  Mᴀɪɴ Mᴇɴᴜ", callback_data="menu_main", style="danger"))
     return kb
 def payments_kb(plan: Optional[str] = None) -> types.InlineKeyboardMarkup:
@@ -17192,6 +17193,19 @@ def render_plans_menu(call: types.CallbackQuery) -> None:
         + f"\n{G['div']}\nTap a plan for full details.{FOOTER}"
     )
     show_menu(call.message.chat.id, PHOTOS["plans"], cap, plans_kb(), call=call)
+def render_plan_compare(call: types.CallbackQuery) -> None:
+    rows = ["<b>Plan comparison</b>", G["div_eq"]]
+    for key, value in PLAN_LIMITS.items():
+        bots = int(get_setting(f"plan_max_bots_{key}", value["max_bots"]))
+        ai_count = len(get_plan_ai_models(key, include_disabled=True))
+        duration = "Lifetime" if key == "lifetime" else f"{value['days']} days"
+        rows.append(
+            f"<b>{esc(value['name'])}</b> — {value['price']}{cur_sym() if value['price'] else ''}\n"
+            f"  {bots} bots · {value['ram']} MB RAM · {value['cpu']} CPU\n"
+            f"  AI models: {ai_count} · File catalog: {'Yes' if _ff_get('file_catalog') else 'No'} · {duration}"
+        )
+    rows.append(f"\n{G['div']}Choose a plan to view details or purchase it.{FOOTER}")
+    show_menu(call.message.chat.id, PHOTOS["plans"], "\n\n".join(rows), plans_kb(), call=call)
 def render_plan_detail(call: types.CallbackQuery, plan: str) -> None:
     p = PLAN_LIMITS.get(plan)
     if not p:
@@ -21421,6 +21435,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_bots":     render_bots_menu(call); return
     if data == "menu_upload":   render_upload_menu(call); return
     if data == "menu_plans":    render_plans_menu(call); return
+    if data == "plan_compare":  render_plan_compare(call); return
     if data == "menu_buy":      render_buy_menu(call); return
     if data == "menu_profile":  render_profile(call); return
     if data == "quota_forecast": render_quota_forecast(call); return
