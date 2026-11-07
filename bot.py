@@ -92,23 +92,15 @@ def _auto_install_missing() -> None:
              f"Run manually: pip install {' '.join(missing)}")
 _auto_install_missing()
 try:
-    from dotenv import load_dotenv
-    # Resolve configuration beside this script, not from the process cwd.
-    # This matters for VPS services launched by systemd/supervisord, whose
-    # working directory may be /, /root, or otherwise unrelated to the app.
+    from environment_loader import load_environment
+    # Resolve files beside this script, not from the process cwd. Platform
+    # variables remain authoritative; local dotenv files only fill gaps.
     _APP_DIR = Path(__file__).resolve().parent
-    _ENV_FILE = _APP_DIR / ".env"
-    _VAULT_ENV_FILE = _APP_DIR / "cipher_vault.env"
-    # Existing deployment environment variables always win. The regular
-    # sibling .env is preferred over the optional vault env file.
-    load_dotenv(_ENV_FILE, override=False)
-    load_dotenv(_VAULT_ENV_FILE, override=False)
-    if _ENV_FILE.is_file():
-        print(f"[config] loaded {_ENV_FILE}", flush=True)
-    elif _VAULT_ENV_FILE.is_file():
-        print(f"[config] loaded {_VAULT_ENV_FILE}", flush=True)
-except ImportError:
-    pass
+    _CONFIG = load_environment(_APP_DIR, verbose=True)
+except Exception as _config_error:
+    print(f"[config] universal loader warning: {_config_error}", flush=True)
+    _APP_DIR = Path(__file__).resolve().parent
+    _CONFIG = dict(os.environ)
 TOKEN = (
     os.getenv("BOT_TOKEN")
     or os.getenv("MAIN_BOT_TOKEN")
