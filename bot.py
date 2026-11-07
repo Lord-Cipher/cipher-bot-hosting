@@ -24322,6 +24322,7 @@ def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
     cap += f"\n{sc('Choose an endpoint, then follow the guided setup. One endpoint can serve many models.')}{FOOTER}"
     kb.add(Btn("➕ Add / Update Runtime Model", callback_data="adm_ai_omega_add", style="success"))
     kb.add(Btn("📚 Browse Omega Categories", callback_data="adm_ai_omega_categories", style="primary"))
+    kb.add(Btn("🧩 Assign Models to Plans", callback_data="adm_ai_routing_menu", style="success"))
     kb.add(Btn("🔄 Sync Omega Catalogue", callback_data="adm_ai_omega_sync", style="success"))
     kb.add(Btn("🧪 Test All Models", callback_data="adm_ai_omega_test_all", style="primary"))
     kb.add(Btn("🔍 Discover Omega Models", callback_data="adm_ai_omega_discover", style="primary"))
