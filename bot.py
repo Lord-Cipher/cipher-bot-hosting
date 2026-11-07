@@ -2528,7 +2528,7 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
     )
     kb.add(
         Btn(f" AI Aɢᴇɴᴛ", callback_data="menu_ai_chat",  style="success"),
-        Btn(f" Mʏ Sᴛᴀᴛꜱ",    callback_data="menu_stats",    style="primary"),
+        Btn(f"📊 Uꜱᴀɢᴇ Dᴀꜱʜʙᴏᴀʀᴅ", callback_data="menu_usage", style="primary"),
     )
     if admin:
         kb.add(Btn(f"Aᴅᴍɪɴ Pᴀɴᴇʟ", callback_data="menu_admin", style="danger"))
@@ -5909,6 +5909,23 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_trial(call)
     if data == "adm_settings":
         return render_adm_settings(call)
+    if data == "adm_resource_alerts":
+        return render_adm_resource_alerts(call)
+    if data == "adm_resource_alerts_toggle":
+        if not admin_only_call(call, "view_stats"): return
+        set_setting("resource_alerts_enabled", not bool(get_setting("resource_alerts_enabled", True)))
+        audit(call.from_user.id, "resource_alerts_toggle", str(get_setting("resource_alerts_enabled", True)))
+        return render_adm_resource_alerts(call)
+    if data == "adm_resource_alerts_threshold":
+        if not admin_only_call(call, "view_stats"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_resource_threshold"}
+        bot.send_message(call.message.chat.id, "Send an alert threshold from 50 to 99 (percentage of the plan allowance).")
+        return
+    if data == "adm_gift_expiry":
+        if not admin_only_call(call, "view_stats"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_gift_expiry"}
+        bot.send_message(call.message.chat.id, "Send the gift-code expiry in whole days (for example: 7).")
+        return
     if data == "adm_set_public_url":
         if not admin_only_call(call, "view_stats"): return
         USER_STATES[call.from_user.id] = {"flow": "await_adm_public_url"}
@@ -11363,6 +11380,36 @@ def on_text(m: types.Message) -> None:
                 )
             except Exception as e:
                 bot.reply_to(m, f"⚠️ URL saved, but Webhook registration failed: <code>{esc(e)}</code>", parse_mode="HTML")
+            return
+        if flow == "await_adm_resource_threshold":
+            if not is_admin(uid):
+                USER_STATES.pop(uid, None); return
+            try:
+                threshold = int(text.strip())
+                if threshold < 50 or threshold > 99:
+                    raise ValueError
+            except (TypeError, ValueError):
+                bot.reply_to(m, "Send a whole-number threshold from 50 to 99.")
+                return
+            set_setting("resource_alert_threshold", threshold)
+            USER_STATES.pop(uid, None)
+            audit(uid, "resource_alert_threshold", str(threshold))
+            bot.reply_to(m, f"Resource alert threshold set to {threshold}%.")
+            return
+        if flow == "await_adm_gift_expiry":
+            if not is_admin(uid):
+                USER_STATES.pop(uid, None); return
+            try:
+                days = int(text.strip())
+                if days < 1 or days > 3650:
+                    raise ValueError
+            except (TypeError, ValueError):
+                bot.reply_to(m, "Send a whole number of days from 1 to 3650.")
+                return
+            set_setting("gift_expiry_days", days)
+            USER_STATES.pop(uid, None)
+            audit(uid, "gift_expiry_days", str(days))
+            bot.reply_to(m, f"New gift codes will expire after {days} day(s). Existing codes keep their original expiry.")
             return
         if flow == "await_adm_trial_hours":
             try:
@@ -19569,6 +19616,7 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
         Btn("\U0001f5a5\ufe0f  Sys Info",    callback_data="adm_set_sysinfo",     style="primary"),
         Btn("\U0001f504  Reload Caches",     callback_data="adm_set_reload",      style="success"),
     )
+    kb.add(Btn("⚠️ Resource Alerts & Gift Expiry", callback_data="adm_resource_alerts", style="primary"))
     kb.add(
         Btn("\u270f\ufe0f  Footer Text",     callback_data="adm_set_footer_text", style="primary"),
         Btn("\U0001f44b  Welcome Msg",       callback_data="adm_set_welcome_text",style="primary"),
@@ -19583,6 +19631,27 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
         Btn(f"{'🟢' if wh_on else '⚪'} Webhook Mode", callback_data="adm_webhook_toggle", style="success" if wh_on else "primary"),
     )
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
+def render_adm_resource_alerts(call: types.CallbackQuery) -> None:
+    if not admin_only_call(call, "view_stats"):
+        return
+    enabled = bool(get_setting("resource_alerts_enabled", True))
+    threshold = int(get_setting("resource_alert_threshold", 80) or 80)
+    gift_days = int(get_setting("gift_expiry_days", 7) or 7)
+    cap = (
+        f"<b>⚠️ Resource Alerts & Gift Expiry</b>\n{G['div_eq']}\n"
+        f"{bullet('Resource alerts', '✅ ON' if enabled else '❌ OFF')}\n"
+        f"{bullet('Alert threshold', f'{threshold}% of plan allowance')}\n"
+        f"{bullet('Alert cooldown', '1 hour per bot')}\n"
+        f"{bullet('Gift-code expiry', f'{gift_days} day(s)')}\n"
+        f"{bullet('Gift usage', 'One claim per code')}\n"
+        f"{G['div']}Alerts are sent to bot owners before the existing resource guard stops repeated limit violators.{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn(f"{'✅' if enabled else '❌'} Toggle alerts", callback_data="adm_resource_alerts_toggle", style="success" if enabled else "danger"),
+           Btn("🎚 Set threshold", callback_data="adm_resource_alerts_threshold", style="primary"))
+    kb.add(Btn("🎁 Set gift expiry", callback_data="adm_gift_expiry", style="primary"))
+    kb.add(Btn(f"{G['back']} Settings", callback_data="adm_settings", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 def render_adm_github(call: types.CallbackQuery) -> None:
     if not admin_only_call(call, "view_stats"):
@@ -21566,6 +21635,7 @@ def _route_callback(call: types.CallbackQuery, data: str) -> None:
     if data == "menu_trial":    render_trial(call); return
     if data == "menu_coupon":   render_coupon(call); return
     if data == "menu_stats":    render_user_stats(call); return
+    if data == "menu_usage":    render_user_stats(call); return
     if data == "menu_ai_chat":  render_ai_chat(call); return
     if data == "menu_ai_models": render_ai_modes(call); return
     if data == "ai_history": render_ai_history(call); return
