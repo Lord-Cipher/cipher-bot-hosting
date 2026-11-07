@@ -6402,9 +6402,21 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_ai_config":           return render_adm_ai_config(call)
     if data == "adm_ai_omega_browser":    return render_adm_ai_omega_browser(call)
     if data == "adm_ai_omega_categories": return render_adm_ai_omega_categories(call)
-    if data == "adm_ai_omega_category_ai": return render_adm_ai_omega_ai(call)
-    if data in {"adm_ai_omega_category_media", "adm_ai_omega_category_tools"}:
-        ack(call, "No verified endpoints in this category yet", show_alert=True)
+    if data.startswith("adm_ai_omega_category_"):
+        group = data[len("adm_ai_omega_category_"):]
+        if group in _OMEGA_SYNC_GROUPS:
+            return render_adm_ai_omega_group(call, group)
+    if data == "adm_ai_omega_sync":
+        ack(call, "Synchronizing Omega catalogue…")
+        try:
+            meta = _sync_omega_catalog()
+            lines = [f"✅ <b>Omega catalogue synchronized</b>", ""]
+            for key, label in _OMEGA_SYNC_GROUPS.items():
+                lines.append(f"{label}: <b>{meta['counts'].get(key, 0)}</b> endpoints")
+            lines += ["", f"Total: <b>{meta['total']}</b>", f"New: +{meta['new']} · Updated: {meta['updated']} · Unavailable: {meta['unavailable']}"]
+            bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="HTML")
+        except Exception as error:
+            bot.send_message(call.message.chat.id, f"❌ Omega catalogue sync failed: <code>{esc(str(error)[:800])}</code>", parse_mode="HTML")
         return render_adm_ai_omega_categories(call)
     if data.startswith("adm_ai_omega_endpoint_") and not data.startswith("adm_ai_omega_endpoint_try_") and not data.startswith("adm_ai_omega_endpoint_add_"):
         return render_adm_ai_omega_endpoint(call, data[len("adm_ai_omega_endpoint_"):])
@@ -24032,15 +24044,99 @@ def _discover_omega_models() -> List[Dict[str, str]]:
         unique[f"{item['name']}|{item['endpoint']}"] = item
     return list(unique.values())
 
+_OMEGA_SYNC_GROUPS = {
+    "ai": "AI",
+    "tools": "Tools",
+    "image_generation": "Image Generation",
+    "media": "Media",
+}
+
+def _omega_sync_group(item: Dict[str, Any]) -> Optional[str]:
+    """Map Omega's live categories into the four catalogues we support."""
+    category = str(item.get("category") or "").strip().lower()
+    text = f"{item.get('name', '')} {item.get('description', '')} {item.get('route', '')}".lower()
+    image_terms = ("image generator", "image generation", "image editor", "text to image", "text-to-image", "image ai", "logo generator", "artgen", "image maker")
+    media_terms = ("video", "audio", "music", "media", "transcri", "converter", "upscaler", "downloader", "stream", "subtitle")
+    if category in {"ai", "maker"}:
+        if any(term in text for term in image_terms):
+            return "image_generation"
+        if any(term in text for term in media_terms):
+            return "media"
+        return "ai"
+    if category == "tools":
+        if any(term in text for term in ("image converter", "upscaler", "watermark", "image editor", "video enhancer", "audio transcri")):
+            return "image_generation" if "image" in text or "upscal" in text or "watermark" in text else "media"
+        return "tools"
+    if category in {"download", "streaming"}:
+        return "media"
+    return None
+
+def _omega_catalog_key(item: Dict[str, Any]) -> str:
+    return f"{item.get('method', 'GET').upper()}|{str(item.get('path') or item.get('url') or '').rstrip('/').lower()}|{item.get('model_id', '')}"
+
+def _sync_omega_catalog() -> Dict[str, Any]:
+    """Fetch Omega's live OpenAPI-style index and persist only approved groups."""
+    response = AI_HTTP.get("https://api.omegatech.app/openapi.json", timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    source = payload.get("endpoints") if isinstance(payload, dict) else payload
+    if not isinstance(source, list):
+        raise ValueError("Omega catalog did not contain an endpoints list")
+    old = get_setting("ai_omega_catalog", {}) or {}
+    old_items = old.get("items", []) if isinstance(old, dict) else []
+    old_map = {_omega_catalog_key(x): x for x in old_items if isinstance(x, dict)}
+    new_map: Dict[str, Dict[str, Any]] = {}
+    for raw in source:
+        if not isinstance(raw, dict):
+            continue
+        group = _omega_sync_group(raw)
+        if not group or not raw.get("url") and not raw.get("route"):
+            continue
+        path = str(raw.get("route") or raw.get("url") or "").strip()
+        url = str(raw.get("url") or f"https://api.omegatech.app{path if path.startswith('/') else '/' + path}")
+        methods = raw.get("methods") or [raw.get("method") or "GET"]
+        for method in methods[:4]:
+            method = str(method).upper()
+            item = {
+                "slug": re.sub(r"[^a-z0-9]+", "-", f"{group}-{path}-{method}".lower()).strip("-")[:48],
+                "name": str(raw.get("name") or path.rsplit("/", 1)[-1])[:100],
+                "description": str(raw.get("description") or "")[:500],
+                "category": group, "path": path, "url": url, "method": method,
+                "format": "openai" if group == "ai" and "chat/completions" in path else "omega_text",
+                "model_id": str(raw.get("model_id") or ""),
+                "params": raw.get("paramsSchema") or {},
+                "maintenance": bool(raw.get("isMaintenance", False)),
+                "synced_at": ts_iso(),
+            }
+            new_map[_omega_catalog_key(item)] = item
+    new_items = list(new_map.values())
+    new_keys, old_keys = set(new_map), set(old_map)
+    counts = {group: sum(1 for x in new_items if x.get("category") == group) for group in _OMEGA_SYNC_GROUPS}
+    meta = {
+        "items": new_items, "counts": counts, "total": len(new_items),
+        "last_sync": ts_iso(), "source_total": len(source),
+        "new": len(new_keys - old_keys), "updated": sum(1 for key in new_keys & old_keys if new_map[key] != old_map[key]),
+        "unavailable": len(old_keys - new_keys),
+    }
+    set_setting("ai_omega_catalog", meta)
+    return meta
+
+def _omega_catalog_meta() -> Dict[str, Any]:
+    value = get_setting("ai_omega_catalog", {}) or {}
+    return value if isinstance(value, dict) else {}
+
 def _omega_ai_catalog() -> List[Dict[str, Any]]:
-    """Stable AI endpoint cards used when Omega's catalog is unavailable."""
+    """Return synchronized cards, retaining a small safe fallback before first sync."""
+    synced = _omega_catalog_meta().get("items")
+    if isinstance(synced, list) and synced:
+        return [x for x in synced if isinstance(x, dict)]
     cards = [{
         "slug": "chat-completions",
         "name": "Chat Completions",
         "path": "/v1/chat/completions",
         "url": "https://api.omegatech.app/v1/chat/completions",
         "method": "POST", "format": "openai", "kind": "AI Chat",
-        "model_id": "gpt-4o-mini",
+        "model_id": "gpt-4o-mini", "category": "ai",
     }]
     for key in _AI_TARGET_LEGACY_KEYS:
         route = _OMEGATECH_MODELS.get(key)
@@ -24054,6 +24150,7 @@ def _omega_ai_catalog() -> List[Dict[str, Any]]:
             "url": endpoint if endpoint.startswith("http") else f"https://api.omegatech.app{path}",
             "method": "GET", "format": "omega_text", "kind": "AI Chat",
             "model_id": key,
+            "category": "ai",
         })
     return cards
 
@@ -24061,17 +24158,26 @@ def _omega_card(slug: str) -> Optional[Dict[str, Any]]:
     return next((item for item in _omega_ai_catalog() if item["slug"] == slug), None)
 
 def render_adm_ai_omega_categories(call: types.CallbackQuery) -> None:
-    cap = f"<b>🌐 Omega API Browser</b>\n{G['div_eq']}\nBrowse endpoints by category, like a repository.\n\nChoose a category to view its paths.{FOOTER}"
+    meta = _omega_catalog_meta()
+    counts = meta.get("counts", {}) if isinstance(meta, dict) else {}
+    total = int(meta.get("total", 0) or 0) if isinstance(meta, dict) else 0
+    last = meta.get("last_sync", "Never") if isinstance(meta, dict) else "Never"
+    cap = f"<b>🌐 Omega API Browser</b>\n{G['div_eq']}\nBrowse the synchronized catalogue by category.\n\n"
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(Btn("🤖 AI", callback_data="adm_ai_omega_category_ai", style="success"))
-    kb.add(Btn("🖼️ Image / Media", callback_data="adm_ai_omega_category_media", style="primary"))
-    kb.add(Btn("🛠️ Tools", callback_data="adm_ai_omega_category_tools", style="primary"))
+    for key, label, icon in (("ai", "AI", "🤖"), ("tools", "Tools", "🛠️"), ("image_generation", "Image Generation", "🎨"), ("media", "Media", "🎬")):
+        kb.add(Btn(f"{icon} {label} — {int(counts.get(key, 0) or 0)} endpoints", callback_data=f"adm_ai_omega_category_{key}", style="success" if key == "ai" else "primary"))
+    cap += f"<b>Total synchronized:</b> {total} endpoints\n<b>Last sync:</b> {esc(str(last))}\n"
+    if meta:
+        cap += f"<b>Changes:</b> +{meta.get('new', 0)} new · {meta.get('updated', 0)} updated · {meta.get('unavailable', 0)} unavailable\n"
+    cap += f"\nSelect a category.{FOOTER}"
+    kb.add(Btn("🔄 Sync Omega Catalogue Now", callback_data="adm_ai_omega_sync", style="success"))
     kb.add(Btn(f"{G['back']} Omega Manager", callback_data="adm_ai_omega_browser", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
-def render_adm_ai_omega_ai(call: types.CallbackQuery) -> None:
-    cards = _omega_ai_catalog()
-    cap = f"<b>🤖 Omega / AI</b>\n{G['div_eq']}\nSelect an endpoint to inspect its path, method, request format, and response.\n\n"
+def render_adm_ai_omega_group(call: types.CallbackQuery, group: str) -> None:
+    cards = [x for x in _omega_ai_catalog() if x.get("category") == group]
+    label = _OMEGA_SYNC_GROUPS.get(group, group.title())
+    cap = f"<b>📂 Omega / {esc(label)}</b>\n{G['div_eq']}\n<b>{len(cards)} endpoints</b>\nSelect an endpoint to inspect its path, method, request format, and response.\n\n"
     kb = types.InlineKeyboardMarkup(row_width=1)
     for card in cards:
         cap += f"• <b>{esc(card['name'])}</b> — <code>{esc(card['path'])}</code>\n"
@@ -24079,6 +24185,9 @@ def render_adm_ai_omega_ai(call: types.CallbackQuery) -> None:
     cap += FOOTER
     kb.add(Btn(f"{G['back']} Categories", callback_data="adm_ai_omega_categories", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
+
+def render_adm_ai_omega_ai(call: types.CallbackQuery) -> None:
+    return render_adm_ai_omega_group(call, "ai")
 
 def render_adm_ai_omega_endpoint(call: types.CallbackQuery, slug: str) -> None:
     card = _omega_card(slug)
@@ -24103,6 +24212,8 @@ def render_adm_ai_omega_endpoint(call: types.CallbackQuery, slug: str) -> None:
 def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
     custom = _custom_ai_models()
     health = get_setting("ai_health", {}) or {}
+    meta = _omega_catalog_meta()
+    counts = meta.get("counts", {}) if isinstance(meta, dict) else {}
     grouped = {}
     for key, spec in custom.items():
         grouped.setdefault(str(spec.get("endpoint") or ""), []).append(key)
@@ -24110,6 +24221,8 @@ def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
         f"<b>🌐 {sc('Omega API Browser')}</b>\n{G['div_eq']}\n"
         f"{sc('Verified Omega routes and your runtime-configured models')}:\n"
     )
+    cap += f"\n<b>Synced catalog:</b> {sum(int(v or 0) for v in counts.values())} endpoints\n"
+    cap += " · ".join(f"{_OMEGA_SYNC_GROUPS.get(k, k)}: {int(v or 0)}" for k, v in counts.items()) + "\n"
     kb = types.InlineKeyboardMarkup(row_width=1)
     for key in _AI_TARGET_LEGACY_KEYS:
         route = _OMEGATECH_MODELS.get(key)
@@ -24130,6 +24243,7 @@ def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
     cap += f"\n{sc('Choose an endpoint, then follow the guided setup. One endpoint can serve many models.')}{FOOTER}"
     kb.add(Btn("➕ Add / Update Runtime Model", callback_data="adm_ai_omega_add", style="success"))
     kb.add(Btn("📚 Browse Omega Categories", callback_data="adm_ai_omega_categories", style="primary"))
+    kb.add(Btn("🔄 Sync Omega Catalogue", callback_data="adm_ai_omega_sync", style="success"))
     kb.add(Btn("🧪 Test All Models", callback_data="adm_ai_omega_test_all", style="primary"))
     kb.add(Btn("🔍 Discover Omega Models", callback_data="adm_ai_omega_discover", style="primary"))
     health_on = bool(get_setting("ai_health_enabled", False))
