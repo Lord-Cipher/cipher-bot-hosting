@@ -2280,6 +2280,26 @@ def _log_err(where: str, exc: BaseException) -> None:
               file=sys.stderr, flush=True)
     except Exception:
         pass
+ACTIVE_INTERFACE_MESSAGES: Dict[int, int] = {}
+def _remember_interface_message(chat_id: int, message_id: Optional[int]) -> None:
+    if message_id is not None:
+        ACTIVE_INTERFACE_MESSAGES[int(chat_id)] = int(message_id)
+def _begin_interface_transition(call: Optional[types.CallbackQuery]) -> None:
+    """Invalidate live refreshes and delete only the bot's tracked menu."""
+    if not call or not call.message:
+        return
+    chat_id = int(call.message.chat.id)
+    LIVE_UI_SESSIONS.pop(chat_id, None)
+    tracked = ACTIVE_INTERFACE_MESSAGES.get(chat_id)
+    if tracked != int(call.message.message_id):
+        return
+    try:
+        bot.delete_message(chat_id, tracked)
+    except Exception as exc:
+        # Already-deleted messages and Telegram permission races are harmless;
+        # the next screen will still be rendered normally.
+        _log_err("delete_interface", exc)
+    ACTIVE_INTERFACE_MESSAGES.pop(chat_id, None)
 _TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)(\s[^>]*)?>")
 def _html_safe_truncate(s: str, limit: int = 1024) -> str:
     if len(s) <= limit:
@@ -2334,6 +2354,7 @@ def show_menu(
                 message_id=msg.message_id,
                 reply_markup=kb,
             )
+            _remember_interface_message(chat_id, msg.message_id)
             return
         except ApiTelegramException as e:
             if "message is not modified" in str(e).lower():
@@ -2358,6 +2379,7 @@ def show_menu(
                 reply_markup=kb,
                 parse_mode="HTML",
             )
+            _remember_interface_message(chat_id, msg.message_id)
             return
         except ApiTelegramException as e:
             if "message is not modified" in str(e).lower():
@@ -2375,6 +2397,7 @@ def show_menu(
                 message_id=msg.message_id,
                 reply_markup=kb,
             )
+            _remember_interface_message(chat_id, msg.message_id)
             return
         except Exception as e:
             _log_err("edit_message_caption(plain)", e)
@@ -2429,6 +2452,7 @@ def show_menu(
             sess["msg_id"] = new_msg_id
             sess["content_type"] = new_content_type
             sess["ts"] = time.time()
+    _remember_interface_message(chat_id, new_msg_id)
 def show_text(
     chat_id: int, text: str, kb: Optional[types.InlineKeyboardMarkup] = None,
     call: Optional[types.CallbackQuery] = None,
@@ -2446,6 +2470,7 @@ def show_text(
                 text, chat_id=chat_id, message_id=call.message.message_id,
                 reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True,
             )
+            _remember_interface_message(chat_id, call.message.message_id)
             return
         except ApiTelegramException as e:
             if "message is not modified" in str(e).lower():
@@ -2460,6 +2485,7 @@ def show_text(
                 plain, chat_id=chat_id, message_id=call.message.message_id,
                 reply_markup=kb, disable_web_page_preview=True,
             )
+            _remember_interface_message(chat_id, call.message.message_id)
             return
         except Exception as e:
             _log_err("edit_message_text(plain)", e)
@@ -2487,6 +2513,7 @@ def show_text(
             bot.delete_message(chat_id, call.message.message_id)
         except Exception as e:
             _log_err("delete_message", e)
+    _remember_interface_message(chat_id, new_msg_id)
 def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -9799,9 +9826,17 @@ def render_adm_rate_plan(call: types.CallbackQuery, plan: str) -> None:
                    callback_data=f"adm_rate_set_{plan}_{metric}", style="primary"))
     kb.add(Btn(f"{G['back']}  Rᴀᴛᴇ Cᴏɴꜰɪɢ", callback_data="adm_rate_config", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("rate_limits", PHOTOS["admin"]), cap, kb, call=call)
-def render_adm_live_monitor(call: types.CallbackQuery) -> None:
-    # Register for live updates
-    if call and call.message:
+def render_adm_live_monitor(call: types.CallbackQuery, _live_refresh: bool = False) -> None:
+    # Only a manual navigation may create a monitor session. A delayed
+    # background tick must prove that the same session and message still
+    # exist, otherwise it can resurrect the monitor after the user navigates.
+    if _live_refresh:
+        current = LIVE_UI_SESSIONS.get(call.message.chat.id) if call and call.message else None
+        if (not current or current.get("type") != "adm_monitor"
+                or current.get("msg_id") != call.message.message_id):
+            return
+        current["ts"] = time.time()
+    elif call and call.message:
         LIVE_UI_SESSIONS[call.message.chat.id] = {
             "type": "adm_monitor",
             "msg_id": call.message.message_id,
@@ -21527,8 +21562,8 @@ def _handle_gift_confirm(m: types.Message, st: Dict[str, Any]) -> None:
     except Exception: pass
 def _route_callback(call: types.CallbackQuery, data: str) -> None:
     # If the user clicks any button outside the live monitor refresh, clear the live monitoring session
-    if not data.startswith("adm_monitor") and data != "live_update":
-        LIVE_UI_SESSIONS.pop(call.message.chat.id, None)
+    if data not in {"live_update", "adm_monitor_refresh"}:
+        _begin_interface_transition(call)
 
     # Core menus
     if data == "menu_main":     render_main_menu(call.message.chat.id, call.from_user.id, call); return
@@ -22453,7 +22488,7 @@ def _telemetry_loop():
                     if sess["type"] == "bot_view":
                         render_bot_view(mock_call, sess["bot_id"], _live_refresh=True)
                     elif sess["type"] == "adm_monitor":
-                        render_adm_live_monitor(mock_call)
+                        render_adm_live_monitor(mock_call, _live_refresh=True)
                 except Exception as e:
                     print(f"[telemetry] live UI refresh failed for chat {chat_id}: {e}", flush=True)
                     
