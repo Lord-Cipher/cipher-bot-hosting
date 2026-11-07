@@ -18566,7 +18566,14 @@ def _clone_env_with_credentials(source_env: Dict[str, Any], new_token: str, chat
     keep aliases already present in their env panel synchronized to the new
     bot's token/chat instead of silently leaving the source identity behind.
     """
-    env = {str(k): str(v) for k, v in (source_env or {}).items()}
+    # Environment names are case-insensitive in the common bot runtimes. Keep
+    # one canonical copy so a cloned project cannot receive both TOKEN and
+    # token (or two conflicting Telegram credentials).
+    env: Dict[str, str] = {}
+    for raw_key, raw_value in (source_env or {}).items():
+        key = str(raw_key).strip()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            env[key] = str(raw_value)
     token_keys = {"BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN", "TG_BOT_TOKEN", "TOKEN"}
     chat_keys = {"CHAT_ID", "TELEGRAM_CHAT_ID", "TG_CHAT_ID", "TARGET_CHAT_ID"}
     source_token_values = {env[k] for k in token_keys if k in env and env[k]}
@@ -18605,6 +18612,15 @@ def _finish_bot_clone_inner(uid: int, bot_id: str, new_token: str, chat_id: str)
             new_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         new_dir.mkdir(parents=True, exist_ok=True)
+    # A clone must never inherit the source bot's dotenv/runtime identity.
+    # Panel variables are injected by safe_env()/the remote env-file below;
+    # stale .env files otherwise override or conflict with the new token.
+    for stale_name in (".env", ".env.local", ".env.production", ".env.development",
+                       ".cipher-runtime.env", "cipher_vault.env"):
+        try:
+            (new_dir / stale_name).unlink(missing_ok=True)
+        except Exception:
+            pass
 
     import copy as _copy
     new_doc = _copy.deepcopy(b)
@@ -23058,6 +23074,8 @@ def _run_bot_ai_diagnosis(call: types.CallbackQuery, bot_id: str, selected_model
                         "file": rel_file,
                         "code": extracted_code,
                         "preflight": patch_preflight,
+                        "owner": int(call.from_user.id),
+                        "expires_at": time.time() + AI_FILE_FIX_TTL,
                         "timestamp": ts_iso(),
                     }
                     save_bot(b)
@@ -23110,8 +23128,8 @@ def _run_bot_ai_diagnosis(call: types.CallbackQuery, bot_id: str, selected_model
             
             kb = types.InlineKeyboardMarkup(row_width=2)
             if patch_ready:
-                kb.add(Btn("🟢 Yes", callback_data=f"bot_applyfix_{bot_id}", style="success"),
-                       Btn("🔴 No",  callback_data=f"bot_rejectfix_{bot_id}", style="danger"))
+                kb.add(Btn("✅ Yes — Fix and restart", callback_data=f"bot_applyfix_{bot_id}", style="success"),
+                       Btn("❌ No — Cancel",  callback_data=f"bot_rejectfix_{bot_id}", style="danger"))
             else:
                 kb.add(Btn(f"{G['back']}  Bᴏᴛ", callback_data=f"bot_view_{bot_id}", style="danger"))
 
@@ -23275,6 +23293,14 @@ def action_bot_apply_fix(call: types.CallbackQuery, bot_id: str) -> None:
     patch = b.get("pending_patch")
     if not isinstance(patch, dict) or not patch.get("code") or not patch.get("file"):
         ack(call, "No pending patch found or expired.", show_alert=True)
+        return
+    if int(patch.get("owner", b.get("owner", 0)) or 0) != int(call.from_user.id) and not is_admin(call.from_user.id):
+        ack(call, "Only the bot owner can approve this AI fix.", show_alert=True)
+        return
+    if float(patch.get("expires_at", 0) or 0) and time.time() > float(patch.get("expires_at")):
+        b.pop("pending_patch", None)
+        save_bot(b)
+        ack(call, "This AI fix proposal expired. Run diagnosis again.", show_alert=True)
         return
 
     bot_id = str(bot_id)
@@ -23619,6 +23645,10 @@ def action_bot_reject_fix(call: types.CallbackQuery, bot_id: str) -> None:
             return
     if not b.get("pending_patch"):
         ack(call, "No pending patch to reject.", show_alert=True)
+        return
+    pending = b.get("pending_patch") or {}
+    if int(pending.get("owner", b.get("owner", 0)) or 0) != int(call.from_user.id) and not is_admin(call.from_user.id):
+        ack(call, "Only the bot owner can cancel this AI fix.", show_alert=True)
         return
     b.pop("pending_patch", None)
     save_bot(b)
