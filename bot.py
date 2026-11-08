@@ -6494,6 +6494,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_ai_omega_back_categories":
         USER_STATES.pop(call.from_user.id, None)
         return render_adm_ai_omega_categories(call)
+    if data == "adm_ai_omega_active_ai":
+        return render_adm_ai_omega_active_ai(call)
     if data == "adm_ai_model_flow_back":
         USER_STATES.pop(call.from_user.id, None)
         return render_adm_ai_omega_browser(call)
@@ -6654,34 +6656,9 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             custom.pop(model_key, None); set_setting("ai_custom_models", custom); reload_ai_runtime()
             ack(call, "Model removed")
         return render_adm_ai_omega_browser(call)
-    if data.startswith("adm_ai_assign_model_") and not data.startswith("adm_ai_assign_model_paid_"):
-        assignment = data[len("adm_ai_assign_model_"):]
-        if "_" not in assignment:
-            ack(call, "Invalid model assignment", show_alert=True); return render_adm_ai_omega_browser(call)
-        plan, token = assignment.split("_", 1)
-        model_key, custom_spec = _ai_model_from_callback_token(token)
-        if plan not in PLAN_LIMITS or not model_key:
-            ack(call, "Model or plan not found", show_alert=True); return render_adm_ai_omega_browser(call)
-        pool = get_plan_ai_models(plan, include_disabled=True)
-        if model_key not in pool:
-            pool.append(model_key)
-            set_plan_ai_models(plan, pool)
-        ack(call, f"Added to {PLAN_LIMITS[plan]['name']}")
-        return render_adm_ai_omega_browser(call)
-    if data.startswith("adm_ai_assign_model_paid_"):
-        token = data[len("adm_ai_assign_model_paid_"):].lower()
-        model_key, custom_spec = _ai_model_from_callback_token(token)
-        if not model_key:
-            ack(call, "Model not found", show_alert=True); return render_adm_ai_omega_browser(call)
-        assigned = []
-        for plan in ("starter", "basic", "pro", "enterprise", "lifetime"):
-            pool = get_plan_ai_models(plan, include_disabled=True)
-            if model_key not in pool:
-                pool.append(model_key); set_plan_ai_models(plan, pool)
-            assigned.append(PLAN_LIMITS[plan]["name"])
-        ack(call, "Added to paid plans")
-        bot.send_message(call.message.chat.id, f"{G['ok']} <b>{esc(custom_spec.get('label', model_key))}</b> is now visible to: {esc(', '.join(assigned))}.", parse_mode="HTML")
-        return render_adm_ai_omega_browser(call)
+    if data.startswith("adm_ai_assign_model_"):
+        ack(call, "Plan visibility is managed in AI Config → AI Pool Routing.", show_alert=True)
+        return render_adm_ai_routing_menu(call)
     if data == "adm_ai_scanner_model":    return render_adm_ai_scanner_model(call)
     if data.startswith("adm_ai_scanner_"):
         scanner_model = data[len("adm_ai_scanner_"):]
@@ -23981,6 +23958,11 @@ def _ai_operative_enabled(key: str) -> bool:
         get_setting(f"ai_operative_{key}_enabled", default_enabled)
     )
 
+
+def _ai_model_circuit_open(key: str) -> bool:
+    """Return whether recent provider failures temporarily block a model."""
+    return float(AI_MODEL_CIRCUIT_OPEN_UNTIL.get(str(key).lower(), 0) or 0) > time.time()
+
 def _ai_pool_enabled(mode: str = "chat") -> bool:
     mode = str(mode or "chat").lower()
     return mode in _AI_MODE_LABELS and bool(get_setting(f"ai_{mode}_pool_enabled", True))
@@ -24104,7 +24086,7 @@ def get_plan_ai_models(plan: str, include_disabled: bool = False, mode: str = "c
     pool: List[str] = []
     for m in (configured or []):
         m = str(m).strip().lower()
-        if m in allowed and m not in pool and (include_disabled or _ai_operative_enabled(m)):
+        if m in allowed and m not in pool and (include_disabled or _ai_operative_enabled(m)) and (include_disabled or not _ai_model_circuit_open(m)):
             pool.append(m)
     return pool
 
@@ -24313,13 +24295,17 @@ def _save_runtime_ai_model(uid: int, fmt: str, chat_id: int) -> None:
     set_setting("ai_custom_models", custom)
     reload_ai_runtime()
     audit(uid, "ai_runtime_model_save", f"key={key} endpoint={endpoint} format={fmt}")
-    token = _ai_model_callback_token(key)
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    for plan_key in PLAN_LIMITS:
-        kb.add(Btn(f"Add to {PLAN_LIMITS[plan_key]['name']}", callback_data=f"adm_ai_assign_model_{plan_key}_{token}", style="success"))
-    kb.add(Btn("Add to all paid plans", callback_data=f"adm_ai_assign_model_paid_{token}", style="primary"))
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🧠 Configure visibility in AI Config", callback_data="adm_ai_routing_menu", style="success"))
+    kb.add(Btn("🤖 Open Active AI", callback_data="adm_ai_omega_active_ai", style="primary"))
     kb.add(Btn("Back to Omega Browser", callback_data="adm_ai_omega_back_browser", style="danger"))
-    bot.send_message(chat_id, f"{G['ok']} <b>{esc(label)}</b> was added to the Omega catalog.\n\nChoose which plan can see and use it in the user AI panel.", parse_mode="HTML", reply_markup=kb)
+    bot.send_message(
+        chat_id,
+        f"{G['ok']} <b>{esc(label)}</b> was added to the Omega catalog.\n\n"
+        "Plan visibility is controlled only from AI Config → AI Pool Routing. "
+        "Open that screen to add this model to the appointed plan pool.",
+        parse_mode="HTML", reply_markup=kb,
+    )
 
 def _ai_health_check(force: bool = False) -> None:
     """Check configured models periodically and persist safe health metadata."""
@@ -24532,6 +24518,7 @@ def render_adm_ai_omega_categories(call: types.CallbackQuery) -> None:
     last = meta.get("last_sync", "Never") if isinstance(meta, dict) else "Never"
     cap = f"<b>🌐 Omega API Browser</b>\n{G['div_eq']}\nBrowse the synchronized catalogue by category.\n\n"
     kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🤖 Active AI — implemented models", callback_data="adm_ai_omega_active_ai", style="success"))
     for key, label, icon in (("ai", "AI", "🤖"), ("tools", "Tools", "🛠️"), ("image_generation", "Image Generation", "🎨"), ("media", "Media", "🎬")):
         kb.add(Btn(f"{icon} {label} — {int(counts.get(key, 0) or 0)} endpoints", callback_data=f"adm_ai_omega_category_{key}", style="success" if key == "ai" else "primary"))
     cap += f"<b>Total synchronized:</b> {total} endpoints\n<b>Last sync:</b> {esc(str(last))}\n"
@@ -24567,6 +24554,44 @@ def render_adm_ai_omega_group(call: types.CallbackQuery, group: str, page: int =
 
 def render_adm_ai_omega_ai(call: types.CallbackQuery) -> None:
     return render_adm_ai_omega_group(call, "ai")
+
+
+def render_adm_ai_omega_active_ai(call: types.CallbackQuery) -> None:
+    """Show implemented runtime models without changing plan pools."""
+    health = get_setting("ai_health", {}) or {}
+    models = list(_AI_OPERATIVE_KEYS)
+    cap = (
+        f"<b>🤖 Active AI</b>\n{G['div_eq']}\n"
+        "Implemented models currently registered in the runtime.\n"
+        "Plan pools and fallback order are managed in AI Config.\n\n"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for model in models:
+        check = health.get(model, {}) if isinstance(health, dict) else {}
+        if AI_MODEL_CIRCUIT_OPEN_UNTIL.get(model, 0) > time.time():
+            status = "🔴"
+        elif check.get("ok") is False:
+            status = "⚠️"
+        elif check.get("ok") is True:
+            status = "🟢"
+        else:
+            status = "⚪"
+        plans = [
+            details["name"] for plan, details in PLAN_LIMITS.items()
+            if model in get_plan_ai_models(plan, include_disabled=True)
+        ]
+        visibility = ", ".join(plans) or "not assigned"
+        cap += f"{status} <b>{esc(ai_label(model))}</b> · <i>{esc(visibility)}</i>\n"
+        kb.add(
+            Btn(f"💬 {ai_label(model)[:20]}", callback_data=f"adm_ai_omega_try_{model}", style="primary"),
+            Btn("🧪 Test", callback_data=f"adm_ai_omega_test_{model}", style="success"),
+        )
+    if not models:
+        cap += "No implemented AI models are registered.\n"
+    cap += f"\n{G['div']}Use AI Config to change plan visibility.{FOOTER}"
+    kb.add(Btn("🧠 Open AI Pool Routing", callback_data="adm_ai_routing_menu", style="success"))
+    kb.add(Btn(f"{G['back']} Categories", callback_data="adm_ai_omega_categories", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS.get("settings", PHOTOS["admin"]), cap, kb, call=call)
 
 def render_adm_ai_omega_endpoint(call: types.CallbackQuery, slug: str) -> None:
     card = _omega_card(slug)
@@ -24629,8 +24654,8 @@ def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
             kb.add(Btn(f"🗑️ Remove {str(spec.get('label', key))[:18]}", callback_data=f"adm_ai_omega_delete_{key}", style="danger"))
     cap += f"\n{sc('Choose an endpoint, then follow the guided setup. One endpoint can serve many models.')}{FOOTER}"
     kb.add(Btn("➕ Add / Update Runtime Model", callback_data="adm_ai_omega_add", style="success"))
+    kb.add(Btn("🤖 Active AI Models", callback_data="adm_ai_omega_active_ai", style="success"))
     kb.add(Btn("📚 Browse Omega Categories", callback_data="adm_ai_omega_categories", style="primary"))
-    kb.add(Btn("🧩 Assign Models to Plans", callback_data="adm_ai_routing_menu", style="success"))
     kb.add(Btn("🔄 Sync Omega Catalogue", callback_data="adm_ai_omega_sync", style="success"))
     kb.add(Btn("🧪 Test All Models", callback_data="adm_ai_omega_test_all", style="primary"))
     kb.add(Btn("🔍 Discover Omega Models", callback_data="adm_ai_omega_discover", style="primary"))
