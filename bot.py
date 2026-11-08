@@ -770,7 +770,7 @@ def _is_platform_ai_request(prompt: Optional[str]) -> bool:
     terms = (
         "cipher tech", "cipher bot", "cipher hosting", "my bot", "upload bot",
         "host my", "hosting plan", "subscription", "plan price", "plan limit",
-        "ai model", "model pool", "available model", "sandbox", "vps", "deploy",
+        "ai model", "ai models", "coding model", "coding models", "chatting model", "chatting models", "image model", "image models", "model pool", "available model", "sandbox", "vps", "deploy",
         "force join", "required channel", "referral", "file catalogue", "file catalog",
         "sentinel", "platform", "github backup", "hosting feature", "restart my bot",
     )
@@ -785,14 +785,17 @@ def _build_cipher_ai_context(model_name: str, prompt: Optional[str] = None) -> s
     labels = globals().get("_AI_OPERATIVE_LABELS", {})
     operative_label = labels.get(model_key, str(model_name or "AI").strip())
     base = (
-        "[SYSTEM DIRECTIVE: You are a capable, general-purpose AI assistant. Answer the user's "
-        "questions directly and naturally across everyday knowledge, explanations, writing, analysis, "
-        "math, brainstorming, coding, debugging, and project review. Do not assume a question is about "
-        "Cipher Tech Hosting, a Telegram platform, just because you are running inside a bot. do not redirect unrelated questions to hosting. Do not volunteer plans, "
-        "hosting features, platform news, or owner information unless the user asks about them. Be honest "
-        "about uncertainty, do not invent current facts, and do not claim to have browsed, run code, or "
-        "inspected files unless you actually did. Keep a natural conversation and ask one concise "
-        "clarifying question when needed; ask one concise clarifying question rather than guessing. If asked which model is answering, use the configured operative "
+        "[SYSTEM DIRECTIVE: You are a capable, broad, general-purpose AI assistant—not a platform FAQ bot. "
+        "Treat questions about world knowledge, current affairs, science, history, geography, culture, "
+        "business, writing, translation, math, reasoning, brainstorming, coding, debugging, and everyday "
+        "decisions as first-class requests. Answer unrelated questions directly and naturally; do not "
+        "redirect them to Cipher Tech Hosting merely because you run inside this bot. Do not volunteer "
+        "plans, hosting features, platform news, or owner information unless the user asks about them. "
+        "Use your broad learned knowledge confidently, but be honest about uncertainty and knowledge dates: "
+        "never invent current events, live prices, recent claims, or citations, and never claim to have "
+        "browsed the web, run code, or inspected files unless you actually did. For time-sensitive facts, "
+        "state the limitation and explain what information would need verification. Keep a natural "
+        "conversation and ask one concise clarifying question when needed rather than guessing. If asked which model is answering, use the configured operative "
         f"label ({operative_label}) and distinguish this assistant from its underlying provider. Provider "
         "route names can be aliases; do not guess who trained the underlying model. "
         "If asked about Lord Cipher, explain that he is the creator and master of this platform assistant, "
@@ -810,10 +813,10 @@ def _build_cipher_ai_context(model_name: str, prompt: Optional[str] = None) -> s
         pool_parts = []
         for pool_mode, pool_label in (("chat", "Chatting"), ("coding", "Coding"), ("image", "Image Generation")):
             if not _ai_pool_enabled(pool_mode):
-                pool_parts.append(f"{pool_label}: OFF")
                 continue
             pool = get_plan_ai_models(plan_key, mode=pool_mode) or []
-            pool_parts.append(f"{pool_label}: {len(pool)} enabled")
+            names = ", ".join(_public_ai_model_name(model) for model in pool) or "none"
+            pool_parts.append(f"{pool_label}: {names}")
         price = "Free" if details.get("price", 0) == 0 else f"{details.get('price')}{cur_sym()}"
         duration = "Lifetime" if plan_key == "lifetime" else f"{details.get('days', 0)} days"
         plans_info.append(
@@ -832,7 +835,7 @@ def _build_cipher_ai_context(model_name: str, prompt: Optional[str] = None) -> s
         "security scanner. Users choose eligible models by plan; suggested code fixes require explicit "
         "confirmation. Lord Cipher founded and owns the platform and built/configured this assistant. The "
         "platform has tiered hosting plans, referrals, and encrypted backups. "
-        f"CURRENT PLANS, LIMITS, PRICES, AND AI POOL COUNTS: {plans_str}. "
+        f"CURRENT PLANS, LIMITS, PRICES, AND ENABLED AI MODELS: {plans_str}. "
         f"LATEST PLATFORM UPDATE: {system_news}. Treat these as current platform facts only; do not "
         "mention these facts when unrelated, and do not invent missing details.]\n"
     )
@@ -6518,6 +6521,15 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             print(f"[omega_browser] image page render failed: {type(error).__name__}: {error}", flush=True)
             bot.send_message(call.message.chat.id, "❌ Could not render that Image Generation page. Please sync the Omega catalogue and try again.")
             return render_adm_ai_omega_categories(call)
+    if data.startswith("adm_ai_omega_page_img_"):
+        raw_page = data[len("adm_ai_omega_page_img_"):]
+        try:
+            page = max(0, int(raw_page))
+        except (TypeError, ValueError):
+            ack(call, "Invalid Image Generation page.", show_alert=True)
+            return render_adm_ai_omega_group(call, "image_generation", 0)
+        ack(call, "Loading Image Generation…")
+        return render_adm_ai_omega_group(call, "image_generation", page)
     if data.startswith("adm_ai_omega_page_"):
         parts = data[len("adm_ai_omega_page_"):].rsplit("_", 1)
         if len(parts) == 2 and parts[0] in _OMEGA_SYNC_GROUPS:
@@ -22698,12 +22710,23 @@ def _is_ai_model_catalog_request(prompt: str) -> bool:
         return False
     return any(phrase in text for phrase in (
         "models by plan", "models available", "available models", "what models",
-        "which models", "list the models", "list ai models",
+        "which models", "list the models", "list ai models", "coding models",
+        "chatting models", "image models", "models does my plan", "ai models",
     ))
 
-def _ai_model_catalog_answer() -> str:
-    lines = ["AI models currently available by plan:"]
+def _ai_model_catalog_answer(prompt: Optional[str] = None, default_plan: Optional[str] = None) -> str:
+    query = str(prompt or "").lower()
+    requested = []
     for plan_key, details in PLAN_LIMITS.items():
+        display_name = str(details.get("name", plan_key)).lower()
+        if re.search(rf"\b{re.escape(plan_key.lower())}\b", query) or re.search(rf"\b{re.escape(display_name)}\b", query):
+            requested.append(plan_key)
+    if not requested and default_plan in PLAN_LIMITS and any(term in query for term in ("my plan", "my pool", "my models")):
+        requested = [str(default_plan)]
+    plan_items = [(key, PLAN_LIMITS[key]) for key in (requested or list(PLAN_LIMITS))]
+    heading = f"AI models for {PLAN_LIMITS[requested[0]].get('name', requested[0])}:" if len(requested) == 1 else "AI models currently available by plan:"
+    lines = [heading]
+    for plan_key, details in plan_items:
         parts = []
         if _ai_pool_enabled("chat"):
             chat = get_plan_ai_models(plan_key, mode="chat")
@@ -22711,6 +22734,9 @@ def _ai_model_catalog_answer() -> str:
         if _ai_pool_enabled("coding"):
             coding = get_plan_ai_models(plan_key, mode="coding")
             parts.append("Coding: " + (", ".join(_public_ai_model_name(m) for m in coding) or "none"))
+        if _ai_pool_enabled("image"):
+            image = get_plan_ai_models(plan_key, mode="image")
+            parts.append("Image Generation: " + (", ".join(_public_ai_model_name(m) for m in image) or "none"))
         lines.append(f"{details.get('name', plan_key.title())}: " + " | ".join(parts))
     return "\n".join(lines)
 
@@ -22726,7 +22752,7 @@ def _call_ai_api(
         return None
 
     if _is_ai_model_catalog_request(prompt):
-        return _ai_model_catalog_answer()
+        return _ai_model_catalog_answer(prompt, user_plan)
 
     if "verified active plan:" not in prompt.lower():
         prompt = f"VERIFIED ACTIVE PLAN: {str(user_plan or 'free').lower()}\n{prompt}"
@@ -24218,7 +24244,7 @@ def _create_ai_engine() -> AIEngine:
         ),
         # Fallback is the retry strategy for user prompts. A second request to
         # the same stalled provider would delay the next model unnecessarily.
-        transient_retries=0,
+        transient_retries=1,
         failure_counts=AI_MODEL_FAILURE_COUNT,
         circuit_open_until=AI_MODEL_CIRCUIT_OPEN_UNTIL,
     )
@@ -24744,9 +24770,11 @@ def render_adm_ai_omega_group(call: types.CallbackQuery, group: str, page: int =
         kb.add(Btn(f"{card['name'][:24]}  {card['path'][:24]}", callback_data=f"adm_ai_omega_endpoint_{card['slug']}", style="primary"))
     nav = []
     if page > 0:
-        nav.append(Btn("◀ Previous", callback_data=f"adm_ai_omega_page_{group}_{page - 1}", style="primary"))
+        page_callback = f"adm_ai_omega_page_img_{page - 1}" if group == "image_generation" else f"adm_ai_omega_page_{group}_{page - 1}"
+        nav.append(Btn("◀ Previous", callback_data=page_callback, style="primary"))
     if page < pages - 1:
-        nav.append(Btn("Next ▶", callback_data=f"adm_ai_omega_page_{group}_{page + 1}", style="primary"))
+        page_callback = f"adm_ai_omega_page_img_{page + 1}" if group == "image_generation" else f"adm_ai_omega_page_{group}_{page + 1}"
+        nav.append(Btn("Next ▶", callback_data=page_callback, style="primary"))
     if nav:
         kb.row(*nav)
     cap += FOOTER

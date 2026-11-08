@@ -284,10 +284,10 @@ class AIEngine:
             code = int(payload.get("statusCode", 0))
         except (TypeError, ValueError):
             code = 0
-        if code in {500, 502, 503, 504}:
+        if code in {408, 425, 429, 500, 502, 503, 504}:
             return True
         message = str(payload.get("error") or payload.get("message") or "")
-        return bool(re.search(r"\bHTTP\s+50[0-4]\b", message, re.IGNORECASE))
+        return bool(re.search(r"\bHTTP\s+(?:408|425|429|50[0-4])\b", message, re.IGNORECASE))
 
     def fit_prompt(self, prefix: str, prompt: str, route: ModelRoute, mode: str = "chat") -> Optional[str]:
         """Keep platform instructions intact while fitting the encoded GET query."""
@@ -408,12 +408,16 @@ class AIEngine:
                     response = self.session.get(url, params=params, timeout=route.timeout)
                 except Exception as error:
                     last_error = self._safe_exception(error)
+                    if attempt < self.transient_retries:
+                        if self.retry_backoff_seconds:
+                            time.sleep(self.retry_backoff_seconds * (attempt + 1))
+                        continue
                     break
 
                 status_code = getattr(response, "status_code", None)
                 if status_code in (413, 414, 431):
                     return ModelResult(model, error=f"request too large (HTTP {status_code})")
-                if status_code in (500, 502, 503, 504):
+                if status_code in (408, 425, 429, 500, 502, 503, 504):
                     last_error = f"HTTP {status_code}"
                     if attempt < self.transient_retries:
                         if self.retry_backoff_seconds:
