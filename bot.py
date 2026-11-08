@@ -24487,58 +24487,18 @@ def _discover_omega_models() -> List[Dict[str, str]]:
         unique[f"{item['name']}|{item['endpoint']}"] = item
     return list(unique.values())
 
-_OMEGA_SYNC_GROUPS = {
-    "ai": "AI",
-    "tools": "Tools",
-    "media": "Media",
-}
+_OMEGA_SYNC_GROUPS = {"ai": "AI"}
 
 def _omega_sync_group(item: Dict[str, Any]) -> Optional[str]:
-    """Map Omega's authoritative category into our four catalogues.
-
-    The API's category is authoritative. In particular, Maker must never fall
-    through to AI merely because its name contains words such as "AI" or
-    "generator". Text is used only for the intentional image/media splits.
-    """
+    """Keep only endpoints officially categorized as AI by Omega."""
     category = str(item.get("category") or "").strip().lower()
-    text = f"{item.get('name', '')} {item.get('description', '')} {item.get('route', '')}".lower()
-    schema = item.get("paramsSchema") or {}
-    schema_names = {str(key).lower() for key in schema} if isinstance(schema, dict) else set()
-    action_values = set()
-    action_schema = schema.get("action") if isinstance(schema, dict) else None
-    if isinstance(action_schema, dict) and isinstance(action_schema.get("enum"), list):
-        action_values = {str(value).lower() for value in action_schema["enum"]}
-    image_terms = ("image generator", "image generation", "image editor", "image-to-image", "text to image", "text-to-image", "image ai", "image models", "logo generator", "artgen", "image maker", "image synthesis", "nano banana", "nanobanana")
-    image_capable_action = bool(action_values & {"image", "generate", "text-to-image", "image-generation", "edit"})
-    image_prompt_schema = bool(schema_names & {"prompt", "query", "text", "description"})
-    media_terms = ("video generator", "video", "audio", "music", "media", "transcri", "downloader", "stream", "subtitle")
-    image_tool_terms = ("image converter", "image upscaler", "image-upscaler", "watermark", "photo editor")
-    if category in {"ai", "ai ", "ai-agent"}:
-        if any(term in text for term in image_terms) or (image_capable_action and image_prompt_schema):
-            return None
-        if any(term in text for term in media_terms):
-            return "media"
-        return "ai"
-    if category in {"maker", "makers"}:
-        if any(term in text for term in image_terms):
-            return None
-        if any(term in text for term in media_terms):
-            return "media"
-        return "tools"
-    if category == "tools":
-        if any(term in text for term in image_tool_terms):
-            return None
-        if any(term in text for term in ("video enhancer", "audio transcri", "video", "audio", "subtitle")):
-            return "media"
-        return "tools"
-    if category in {"download", "streaming", "movie", "anime", "novel"}:
-        return "media"
-    # The browser has four user-facing catalogues. Other Omega categories
-    # (search, fun, stalk, security, sports, etc.) are tools, not AI.
-    return "tools"
+    return "ai" if category in {"ai", "ai-agent"} else None
 
 def _omega_catalog_key(item: Dict[str, Any]) -> str:
-    return f"{str(item.get('path') or item.get('url') or '').rstrip('/').lower()}|{item.get('model_id', '')}"
+    return (
+        f"{str(item.get('path') or item.get('url') or '').rstrip('/').lower()}|"
+        f"{item.get('model_id', '')}|{str(item.get('name') or '').strip().lower()}"
+    )
 
 def _omega_catalog_signature(item: Dict[str, Any]) -> Dict[str, Any]:
     value = dict(item)
@@ -24584,13 +24544,16 @@ def _sync_omega_catalog() -> Dict[str, Any]:
         path = str(raw.get("route") or raw.get("url") or "").strip()
         url = str(raw.get("url") or f"https://api.omegatech.app{path if path.startswith('/') else '/' + path}")
         methods = [str(x).upper() for x in (raw.get("methods") or [raw.get("method") or "GET"])]
+        identity = f"{raw.get('name', '')}|{path}|{raw.get('model_id', '')}"
+        slug_prefix = re.sub(r"[^a-z0-9]+", "-", f"{group}-{raw.get('name', '')}-{path}".lower()).strip("-")
+        slug = f"{slug_prefix[:40].rstrip('-')}-{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:7]}"
         item = {
-            "slug": re.sub(r"[^a-z0-9]+", "-", f"{group}-{path}".lower()).strip("-")[:48],
+            "slug": slug[:48],
             "name": str(raw.get("name") or path.rsplit("/", 1)[-1])[:100],
             "description": str(raw.get("description") or "")[:500],
             "category": group, "path": path, "url": url,
             "method": "POST" if "POST" in methods else methods[0], "methods": methods,
-            "format": "openai" if group == "ai" and "chat/completions" in path else "omega_text",
+            "format": "openai" if "chat/completions" in path else "omega_text",
             "model_id": str(raw.get("model_id") or ""),
             "model_options": _omega_model_options(raw),
             "params": raw.get("paramsSchema") or {},
@@ -24613,13 +24576,27 @@ def _sync_omega_catalog() -> Dict[str, Any]:
 
 def _omega_catalog_meta() -> Dict[str, Any]:
     value = get_setting("ai_omega_catalog", {}) or {}
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return {}
+    meta = dict(value)
+    items = meta.get("items")
+    if isinstance(items, list):
+        items = [item for item in items if isinstance(item, dict) and item.get("category") == "ai"]
+        meta["items"] = items
+        meta["counts"] = {"ai": len(items)}
+        meta["model_counts"] = {"ai": sum(max(1, len(item.get("model_options") or [])) for item in items)}
+        meta["total"] = len(items)
+    else:
+        counts = meta.get("counts") if isinstance(meta.get("counts"), dict) else {}
+        meta["counts"] = {"ai": int(counts.get("ai", 0) or 0)}
+        meta["total"] = int(meta["counts"]["ai"] or 0)
+    return meta
 
 def _omega_ai_catalog() -> List[Dict[str, Any]]:
     """Return synchronized cards, retaining a small safe fallback before first sync."""
     synced = _omega_catalog_meta().get("items")
     if isinstance(synced, list) and synced:
-        return [x for x in synced if isinstance(x, dict) and x.get("category") != "image_generation"]
+        return [x for x in synced if isinstance(x, dict) and x.get("category") == "ai"]
     cards = [{
         "slug": "chat-completions",
         "name": "Chat Completions",
@@ -24662,7 +24639,7 @@ def render_adm_ai_omega_categories(call: types.CallbackQuery) -> None:
     cap = f"<b>🌐 Omega API Browser</b>\n{G['div_eq']}\nBrowse the synchronized catalogue by category.\n\n"
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(Btn("🤖 Active AI — implemented models", callback_data="adm_ai_omega_active_ai", style="success"))
-    for key, label, icon in (("ai", "AI", "🤖"), ("tools", "Tools", "🛠️"), ("media", "Media", "🎬")):
+    for key, label, icon in (("ai", "AI", "🤖"),):
         kb.add(Btn(f"{icon} {label} — {int(counts.get(key, 0) or 0)} endpoints", callback_data=f"adm_ai_omega_category_{key}", style="success" if key == "ai" else "primary"))
     cap += f"<b>Total synchronized:</b> {total} endpoints\n<b>Last sync:</b> {esc(str(last))}\n"
     if meta:
