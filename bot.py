@@ -125,9 +125,24 @@ except (TypeError, ValueError):
 BRAND       = "ᶜᴵᴾᴴᴱᴿ ᵀᴱᶜʜ ᴴᴼˢᵀ"
 BRAND_VER   = "v2.1"
 BRAND_TAG   = f"{BRAND} {BRAND_VER}"
-SUPPORT_USR = "@lord_ciph3r"
+SUPPORT_USR = "@lord_ciph3r"  # legacy constant; user-facing messages use support_contact()
 UPDATE_CH   = "https://t.me/cipher_tech_team"
 FOOTER      = f"\n\n<blockquote>{BRAND_TAG}</blockquote>"
+
+def support_contact() -> str:
+    """Return the administrator-configured support contact."""
+    value = str(get_setting("support_contact", SUPPORT_USR) or SUPPORT_USR).strip()
+    return value or SUPPORT_USR
+
+def normalize_support_contact(raw: str) -> Optional[str]:
+    """Validate a Telegram support username or public t.me link."""
+    value = str(raw or "").strip()
+    if re.fullmatch(r"@[A-Za-z][A-Za-z0-9_]{4,31}", value):
+        return value
+    match = re.fullmatch(r"https://t\.me/([A-Za-z][A-Za-z0-9_]{4,31})/?", value, re.IGNORECASE)
+    if match:
+        return f"https://t.me/{match.group(1)}"
+    return None
 AI_LOCK = threading.Lock()
 AI_MODEL_FAILURE_COUNT: Dict[str, int] = {}
 AI_MODEL_CIRCUIT_OPEN_UNTIL: Dict[str, float] = {}
@@ -5420,7 +5435,7 @@ def banned_block(call_or_msg: Any) -> bool:
                 chat,
                 f"<b>{G['no']} {sc('You are banned')}</b>\n"
                 f"{bullet('Reason', u.get('ban_reason') or '—')}\n"
-                f"Contact {SUPPORT_USR} to appeal.",
+                f"Contact {support_contact()} to appeal.",
             )
         except Exception:
             pass
@@ -5581,7 +5596,7 @@ def cmd_start(m: types.Message) -> None:
         bot.send_message(
             m.chat.id,
             f"<b>{G['warn']} {sc('Panel under maintenance')}</b>\n\n"
-            f"We will be back shortly. {SUPPORT_USR} for urgent issues.",
+            f"We will be back shortly. {support_contact()} for urgent issues.",
         )
         return
     # Group join verification — user must join required groups FIRST
@@ -5618,7 +5633,7 @@ def cmd_help(m: types.Message) -> None:
         f"{bullet('Wallet',  'Top-up via admin, then spend on plans.')}\n"
         f"{bullet('Refer',   'Invite friends with your /start link to earn slots.')}\n"
         f"{bullet('Trial',   'One-time 48-hour Pro trial in the Trial menu.')}\n"
-        f"{bullet('Support', f'Open a ticket from the Tickets menu, or DM {SUPPORT_USR}.')}\n"
+        f"{bullet('Support', f'Open a ticket from the Tickets menu, or DM {support_contact()}.')}\n"
         f"{G['div']}{FOOTER}"
     )
     bot.send_message(m.chat.id, txt, parse_mode="HTML",
@@ -5635,7 +5650,7 @@ def cmd_menu(m: types.Message) -> None:
         bot.send_message(
             m.chat.id,
             f"<b>{G['warn']} {sc('Panel under maintenance')}</b>\n\n"
-            f"We will be back shortly. {SUPPORT_USR} for urgent issues.",
+            f"We will be back shortly. {support_contact()} for urgent issues.",
         )
         return
     if not require_verified(m.chat.id, uid):
@@ -6009,6 +6024,17 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             f"{sc('Send your platform URL (e.g. https://my-hosting.railway.app)')}.\n"
             f"{sc('This is required for GitHub Webhooks to work.')}\n/cancel {sc('to abort')}.",
             parse_mode="HTML")
+        return ack(call)
+    if data == "adm_set_support":
+        if not admin_only_call(call, "view_stats"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_support_contact"}
+        bot.send_message(
+            call.message.chat.id,
+            f"{G['settings']} Send the support Telegram username or HTTPS link.\n"
+            f"Examples: <code>@your_support_username</code> or <code>https://t.me/your_support_username</code>.\n"
+            f"Current: <code>{esc(support_contact())}</code>\n/cancel to abort.",
+            parse_mode="HTML",
+        )
         return ack(call)
     if data == "adm_approval_toggle":
         cur = approval_required()
@@ -11564,6 +11590,25 @@ def on_text(m: types.Message) -> None:
                 )
             except Exception as e:
                 bot.reply_to(m, f"⚠️ URL saved, but Webhook registration failed: <code>{esc(e)}</code>", parse_mode="HTML")
+            return
+        if flow == "await_adm_support_contact":
+            if not is_admin(uid):
+                USER_STATES.pop(uid, None)
+                return
+            contact = normalize_support_contact(text)
+            if not contact:
+                bot.reply_to(
+                    m,
+                    "Invalid support contact. Send a Telegram username such as "
+                    "<code>@your_support_username</code> or an HTTPS link such as "
+                    "<code>https://t.me/your_support_username</code>.",
+                    parse_mode="HTML",
+                )
+                return
+            set_setting("support_contact", contact)
+            USER_STATES.pop(uid, None)
+            audit(uid, "support_contact_updated", contact)
+            bot.reply_to(m, f"{G['ok']} Support contact updated to <code>{esc(contact)}</code>.", parse_mode="HTML")
             return
         if flow == "await_adm_resource_threshold":
             if not is_admin(uid):
@@ -18065,7 +18110,7 @@ def render_support(call: types.CallbackQuery) -> None:
     cap = (
         f"<b>{G['broadcast']} {sc('Support')}</b>\n"
         f"{G['div_eq']}\n"
-        f"{bullet('DM', SUPPORT_USR)}\n"
+        f"{bullet('DM', support_contact())}\n"
         f"{bullet('Channel', UPDATE_CH)}\n"
         f"{G['div']}\n"
         f"{sc('Or open a ticket from Tickets menu')}.{FOOTER}"
@@ -19766,6 +19811,7 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
         f"<b>{G['settings']} {sc('Settings')}</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Brand', BRAND_TAG)}\n"
+        f"{bullet('Support Contact', support_contact())}\n"
         f"{bullet('Announce Ch', ANNOUNCE_CHANNEL or '—')}\n"
         f"{bullet('Maintenance', 'ON' if on else 'OFF')}\n"
         f"{bullet('TG Backup Ch', _tg_backup_channel() or '—')}\n"
@@ -19776,6 +19822,7 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
         Btn("\u270f\ufe0f  Brand Name",      callback_data="adm_set_brand",       style="primary"),
         Btn("\U0001f4e3  Announce Ch",       callback_data="adm_set_announce",    style="primary"),
     )
+    kb.add(Btn("🆘  Support Contact", callback_data="adm_set_support", style="primary"))
     kb.add(
         Btn("\U0001f451  Transfer Owner",    callback_data="adm_set_owner",       style="danger"),
         Btn("\U0001f527  Maint Mode",        callback_data="adm_maint",           style="danger"),
@@ -20054,7 +20101,7 @@ def action_payment_reject(call: types.CallbackQuery, pid: str) -> None:
     audit(call.from_user.id, "pay_reject", f"pid={pid}")
     try:
         bot.send_message(pay["uid"],
-            f"<b>{G['no']} {sc('Payment rejected')}</b> #{pid}\n{sc('Contact')} {SUPPORT_USR}",
+            f"<b>{G['no']} {sc('Payment rejected')}</b> #{pid}\n{sc('Contact')} {support_contact()}",
             parse_mode="HTML")
     except Exception:
         pass
