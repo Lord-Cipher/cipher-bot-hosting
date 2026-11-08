@@ -6494,6 +6494,9 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_ai_omega_back_categories":
         USER_STATES.pop(call.from_user.id, None)
         return render_adm_ai_omega_categories(call)
+    if data == "adm_ai_model_flow_back":
+        USER_STATES.pop(call.from_user.id, None)
+        return render_adm_ai_omega_browser(call)
     if data == "adm_ai_omega_categories": return render_adm_ai_omega_categories(call)
     if data.startswith("adm_ai_omega_category_"):
         group = data[len("adm_ai_omega_category_"):]
@@ -6530,7 +6533,9 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         card, model_id = selected
         if prefix.endswith("add_"):
             USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_model_name", "endpoint": card["url"], "format": card.get("format", "omega_text"), "model_id": model_id}
-            bot.send_message(call.message.chat.id, f"What should this model be called in the bot?\n\nEndpoint: <code>{esc(card['path'])}</code>\nModel: <code>{esc(model_id)}</code>", parse_mode="HTML")
+            kb = types.InlineKeyboardMarkup(row_width=1)
+            kb.add(Btn("↩ Back to Omega Browser", callback_data="adm_ai_model_flow_back", style="danger"))
+            bot.send_message(call.message.chat.id, f"What should this model be called in the bot?\n\nEndpoint: <code>{esc(card['path'])}</code>\nModel: <code>{esc(model_id)}</code>", parse_mode="HTML", reply_markup=kb)
         else:
             USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_catalog_prompt", "endpoint_card": {**card, "model_id": model_id}}
             bot.send_message(call.message.chat.id, f"Send a prompt for model <code>{esc(model_id)}</code>.\n\nThe raw Omega response will be shown.", parse_mode="HTML")
@@ -6548,7 +6553,9 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         if not card: ack(call, "Endpoint not found", show_alert=True); return
         model_id = card.get("model_id") or ((card.get("model_options") or [""])[0])
         USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_model_name", "endpoint": card["url"], "format": card.get("format", "omega_text"), "model_id": model_id}
-        bot.send_message(call.message.chat.id, f"What should <code>{esc(card['path'])}</code> be called in the bot?", parse_mode="HTML")
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(Btn("↩ Back to Omega Browser", callback_data="adm_ai_model_flow_back", style="danger"))
+        bot.send_message(call.message.chat.id, f"What should <code>{esc(card['path'])}</code> be called in the bot?", parse_mode="HTML", reply_markup=kb)
         return
     if data.startswith("adm_ai_omega_endpoint_try_"):
         card = _omega_card(data[len("adm_ai_omega_endpoint_try_"):])
@@ -6645,7 +6652,35 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         custom = _custom_ai_models()
         if model_key in custom:
             custom.pop(model_key, None); set_setting("ai_custom_models", custom); reload_ai_runtime()
-            audit(call.from_user.id, "ai_runtime_model_delete", model_key); ack(call, "Runtime model removed")
+            ack(call, "Model removed")
+        return render_adm_ai_omega_browser(call)
+    if data.startswith("adm_ai_assign_model_") and not data.startswith("adm_ai_assign_model_paid_"):
+        assignment = data[len("adm_ai_assign_model_"):]
+        if "_" not in assignment:
+            ack(call, "Invalid model assignment", show_alert=True); return render_adm_ai_omega_browser(call)
+        plan, token = assignment.split("_", 1)
+        model_key, custom_spec = _ai_model_from_callback_token(token)
+        if plan not in PLAN_LIMITS or not model_key:
+            ack(call, "Model or plan not found", show_alert=True); return render_adm_ai_omega_browser(call)
+        pool = get_plan_ai_models(plan, include_disabled=True)
+        if model_key not in pool:
+            pool.append(model_key)
+            set_plan_ai_models(plan, pool)
+        ack(call, f"Added to {PLAN_LIMITS[plan]['name']}")
+        return render_adm_ai_omega_browser(call)
+    if data.startswith("adm_ai_assign_model_paid_"):
+        token = data[len("adm_ai_assign_model_paid_"):].lower()
+        model_key, custom_spec = _ai_model_from_callback_token(token)
+        if not model_key:
+            ack(call, "Model not found", show_alert=True); return render_adm_ai_omega_browser(call)
+        assigned = []
+        for plan in ("starter", "basic", "pro", "enterprise", "lifetime"):
+            pool = get_plan_ai_models(plan, include_disabled=True)
+            if model_key not in pool:
+                pool.append(model_key); set_plan_ai_models(plan, pool)
+            assigned.append(PLAN_LIMITS[plan]["name"])
+        ack(call, "Added to paid plans")
+        bot.send_message(call.message.chat.id, f"{G['ok']} <b>{esc(custom_spec.get('label', model_key))}</b> is now visible to: {esc(', '.join(assigned))}.", parse_mode="HTML")
         return render_adm_ai_omega_browser(call)
     if data == "adm_ai_scanner_model":    return render_adm_ai_scanner_model(call)
     if data.startswith("adm_ai_scanner_"):
@@ -11276,7 +11311,9 @@ def on_text(m: types.Message) -> None:
             if not endpoint:
                 bot.reply_to(m, "The endpoint cannot be empty. Please try again."); return
             USER_STATES[uid] = {"flow": "await_adm_ai_model_name", "endpoint": endpoint}
-            bot.reply_to(m, "What should this model be called in the bot?\n\nExample: Gemini Pro")
+            kb = types.InlineKeyboardMarkup(row_width=1)
+            kb.add(Btn("↩ Back to Omega Browser", callback_data="adm_ai_model_flow_back", style="danger"))
+            bot.reply_to(m, "What should this model be called in the bot?\n\nExample: Gemini Pro", reply_markup=kb)
             return
         if flow == "await_adm_ai_model_name":
             label = text.strip()
@@ -11288,6 +11325,7 @@ def on_text(m: types.Message) -> None:
             kb = types.InlineKeyboardMarkup(row_width=1)
             kb.add(Btn(f"Use {label} as the model ID", callback_data="adm_ai_omega_use_name", style="success"))
             kb.add(Btn("Enter a different model ID", callback_data="adm_ai_omega_custom_model_id", style="primary"))
+            kb.add(Btn("↩ Back to Omega Browser", callback_data="adm_ai_model_flow_back", style="danger"))
             bot.send_message(m.chat.id, "What model ID should Omega receive?", reply_markup=kb)
             return
         if flow == "await_adm_ai_model_id":
@@ -24248,7 +24286,19 @@ def _show_ai_model_format_choices(chat_id: int) -> None:
     kb.add(Btn("📝 Omega text", callback_data="adm_ai_omega_format_omega_text", style="primary"))
     kb.add(Btn("💬 Model + message", callback_data="adm_ai_omega_format_model_message", style="primary"))
     kb.add(Btn("🔌 OpenAI-compatible", callback_data="adm_ai_omega_format_openai", style="success"))
+    kb.add(Btn("↩ Back to Omega Browser", callback_data="adm_ai_model_flow_back", style="danger"))
     bot.send_message(chat_id, "How should the request be sent?\n\nChoose the format used by this Omega endpoint.", reply_markup=kb)
+
+def _ai_model_callback_token(model_key: str) -> str:
+    return hashlib.sha1(str(model_key).encode("utf-8")).hexdigest()[:10]
+
+def _ai_model_from_callback_token(token: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    custom = _custom_ai_models()
+    token = str(token or "").lower()
+    for key, spec in custom.items():
+        if token == key or token == _ai_model_callback_token(key):
+            return key, spec
+    return None, {}
 
 def _save_runtime_ai_model(uid: int, fmt: str, chat_id: int) -> None:
     st = USER_STATES.pop(uid, None) or {}
@@ -24263,7 +24313,13 @@ def _save_runtime_ai_model(uid: int, fmt: str, chat_id: int) -> None:
     set_setting("ai_custom_models", custom)
     reload_ai_runtime()
     audit(uid, "ai_runtime_model_save", f"key={key} endpoint={endpoint} format={fmt}")
-    bot.send_message(chat_id, f"{G['ok']} <b>{esc(label)}</b> was added to the Omega catalog.\n\nYou can test it now, then add it to a plan pool.", parse_mode="HTML")
+    token = _ai_model_callback_token(key)
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for plan_key in PLAN_LIMITS:
+        kb.add(Btn(f"Add to {PLAN_LIMITS[plan_key]['name']}", callback_data=f"adm_ai_assign_model_{plan_key}_{token}", style="success"))
+    kb.add(Btn("Add to all paid plans", callback_data=f"adm_ai_assign_model_paid_{token}", style="primary"))
+    kb.add(Btn("Back to Omega Browser", callback_data="adm_ai_omega_back_browser", style="danger"))
+    bot.send_message(chat_id, f"{G['ok']} <b>{esc(label)}</b> was added to the Omega catalog.\n\nChoose which plan can see and use it in the user AI panel.", parse_mode="HTML", reply_markup=kb)
 
 def _ai_health_check(force: bool = False) -> None:
     """Check configured models periodically and persist safe health metadata."""
