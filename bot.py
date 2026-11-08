@@ -790,7 +790,7 @@ def _is_platform_ai_request(prompt: Optional[str]) -> bool:
     terms = (
         "cipher tech", "cipher bot", "cipher hosting", "my bot", "upload bot",
         "host my", "hosting plan", "subscription", "plan price", "plan limit",
-        "ai model", "ai models", "coding model", "coding models", "chatting model", "chatting models", "image model", "image models", "model pool", "available model", "sandbox", "vps", "deploy",
+        "ai model", "ai models", "coding model", "coding models", "chatting model", "chatting models", "model pool", "available model", "sandbox", "vps", "deploy",
         "force join", "required channel", "referral", "file catalogue", "file catalog",
         "sentinel", "platform", "github backup", "hosting feature", "restart my bot",
     )
@@ -6549,9 +6549,6 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         group = data[len("adm_ai_omega_category_"):]
         if group in _OMEGA_SYNC_GROUPS:
             return render_adm_ai_omega_group(call, group)
-    if data.startswith("adm_ai_omega_page_image_generation_") or data.startswith("adm_ai_omega_page_img_"):
-        ack(call, "Image generation has been removed.", show_alert=True)
-        return render_adm_ai_omega_categories(call)
     if data.startswith("adm_ai_omega_page_"):
         parts = data[len("adm_ai_omega_page_"):].rsplit("_", 1)
         if len(parts) == 2 and parts[0] in _OMEGA_SYNC_GROUPS:
@@ -22746,7 +22743,7 @@ def _is_ai_model_catalog_request(prompt: str) -> bool:
     return any(phrase in text for phrase in (
         "models by plan", "models available", "available models", "what models",
         "which models", "list the models", "list ai models", "coding models",
-        "chatting models", "image models", "models does my plan", "ai models",
+        "chatting models", "models does my plan", "ai models",
     ))
 
 def _ai_model_catalog_answer(prompt: Optional[str] = None, default_plan: Optional[str] = None) -> str:
