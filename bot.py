@@ -6647,6 +6647,18 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             results.append(f"{'✅' if outcome.ok else '❌'} {esc(ai_label(model_key))} — {elapsed:.2f}s")
         bot.send_message(call.message.chat.id, "<b>🧪 Model test results</b>\n\n" + "\n".join(results), parse_mode="HTML")
         return render_adm_ai_omega_browser(call)
+    if data.startswith("adm_ai_omega_prompt_"):
+        model_key = data[len("adm_ai_omega_prompt_"):].lower()
+        if model_key in _AI_IMAGE_MODEL_KEYS:
+            USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_image_prompt", "model": model_key}
+            bot.send_message(call.message.chat.id, f"Send an image prompt for <b>{esc(ai_label(model_key))}</b>.\n\nThe generated image will be uploaded here, not returned as a URL.", parse_mode="HTML")
+            return
+        if model_key in _AI_OPERATIVE_KEYS:
+            USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_endpoint_prompt", "model": model_key}
+            bot.send_message(call.message.chat.id, f"Send a prompt for <b>{esc(ai_label(model_key))}</b>.\n\nThe raw provider response and timing will be shown.", parse_mode="HTML")
+            return
+        ack(call, "Unknown model", show_alert=True)
+        return render_adm_ai_omega_active_ai(call)
     if data.startswith("adm_ai_omega_test_"):
         model_key = data[len("adm_ai_omega_test_"):].lower()
         if model_key not in set(_AI_OPERATIVE_KEYS) | set(_AI_IMAGE_MODEL_KEYS):
@@ -11232,6 +11244,25 @@ def on_text(m: types.Message) -> None:
                 back = types.InlineKeyboardMarkup(row_width=1)
                 back.add(Btn("↩ Back to Omega categories", callback_data="adm_ai_omega_back_categories", style="danger"))
                 bot.reply_to(m, f"❌ Endpoint request failed: <code>{esc(str(error)[:800])}</code>", parse_mode="HTML", reply_markup=back)
+            return
+        if flow == "await_adm_ai_image_prompt":
+            USER_STATES.pop(uid, None)
+            model_key = str(st.get("model", "")).lower()
+            if model_key not in _AI_IMAGE_MODEL_KEYS:
+                bot.reply_to(m, f"{G['no']} That image model is no longer available."); return
+            prompt = text.strip()
+            if not prompt or len(prompt) > 12000:
+                bot.reply_to(m, "Please send an image prompt between 1 and 12,000 characters."); return
+            started = time.monotonic()
+            image = _generate_ai_image(model_key, prompt)
+            elapsed = time.monotonic() - started
+            back = types.InlineKeyboardMarkup(row_width=1)
+            back.add(Btn("↩ Back to Active AI", callback_data="adm_ai_omega_active_ai", style="danger"))
+            if image:
+                photo = io.BytesIO(image); photo.name = "active-ai-generated.png"
+                bot.send_photo(m.chat.id, photo, caption=f"✅ <b>{esc(ai_label(model_key))}</b> · {elapsed:.2f}s", parse_mode="HTML", reply_markup=back)
+            else:
+                bot.reply_to(m, f"<b>❌ Image endpoint failed</b>\n{bullet('Model', ai_label(model_key))}{bullet('Response time', f'{elapsed:.2f}s')}\n{bullet('Reason', 'No image bytes were returned; the endpoint may be unavailable or returned an unsupported response.')}", parse_mode="HTML", reply_markup=back)
             return
         if flow == "await_adm_ai_endpoint_prompt":
             USER_STATES.pop(uid, None)
@@ -24738,7 +24769,10 @@ def render_adm_ai_omega_active_ai(call: types.CallbackQuery) -> None:
         ]
         visibility = ", ".join(plans) or "not assigned"
         cap += f"{status} <b>{esc(ai_label(model))}</b> · <i>{esc(visibility)}</i>\n"
-        kb.add(Btn("🧪 Test", callback_data=f"adm_ai_omega_test_{model}", style="success"))
+        kb.row(
+            Btn("📝 Prompt", callback_data=f"adm_ai_omega_prompt_{model}", style="primary"),
+            Btn("🧪 Test", callback_data=f"adm_ai_omega_test_{model}", style="success"),
+        )
     if not models:
         cap += "No implemented AI models are registered.\n"
     cap += f"\n{G['div']}Use AI Config to change plan visibility.{FOOTER}"
@@ -24766,7 +24800,9 @@ def render_adm_ai_omega_endpoint(call: types.CallbackQuery, slug: str) -> None:
         cap += "\n<b>Models on this shared endpoint:</b>\n" + "\n".join(f"• <code>{esc(model)}</code>" for model in options[:12]) + "\n"
         for index, model in enumerate(options[:12]):
             kb.add(Btn(f"➕ Add {str(model)[:28]}", callback_data=f"adm_ai_omega_model_add_{slug}_{index}", style="success"))
+            kb.add(Btn(f"📝 Test {str(model)[:28]}", callback_data=f"adm_ai_omega_model_test_{slug}_{index}", style="primary"))
     else:
+        kb.add(Btn("📝 Test with prompt", callback_data=f"adm_ai_omega_endpoint_try_{slug}", style="primary"))
         kb.add(Btn("➕ Add to AI Catalog", callback_data=f"adm_ai_omega_endpoint_add_{slug}", style="success"))
     group = card.get("category", "ai")
     kb.add(Btn(f"{G['back']} {_OMEGA_SYNC_GROUPS.get(group, 'AI')} Endpoints", callback_data=f"adm_ai_omega_category_{group}", style="danger"))
