@@ -2547,7 +2547,7 @@ def main_menu_kb(admin: bool = False) -> types.InlineKeyboardMarkup:
     )
     kb.add(
         Btn(f" AI Aɢᴇɴᴛ", callback_data="menu_ai_chat",  style="success"),
-        Btn(f"📊 Uꜱᴀɢᴇ Dᴀꜱʜʙᴏᴀʀᴅ", callback_data="menu_usage", style="primary"),
+        Btn(f"Mʏ Sᴛᴀᴛs", callback_data="menu_usage", style="primary"),
     )
     if admin:
         kb.add(Btn(f"Aᴅᴍɪɴ Pᴀɴᴇʟ", callback_data="menu_admin", style="danger"))
@@ -6488,6 +6488,12 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return
     if data == "adm_ai_config":           return render_adm_ai_config(call)
     if data == "adm_ai_omega_browser":    return render_adm_ai_omega_browser(call)
+    if data == "adm_ai_omega_back_browser":
+        USER_STATES.pop(call.from_user.id, None)
+        return render_adm_ai_omega_browser(call)
+    if data == "adm_ai_omega_back_categories":
+        USER_STATES.pop(call.from_user.id, None)
+        return render_adm_ai_omega_categories(call)
     if data == "adm_ai_omega_categories": return render_adm_ai_omega_categories(call)
     if data.startswith("adm_ai_omega_category_"):
         group = data[len("adm_ai_omega_category_"):]
@@ -11188,9 +11194,15 @@ def on_text(m: types.Message) -> None:
                 except Exception:
                     raw = response.text
                     answer = response.text
-                bot.reply_to(m, f"{esc(answer[:6000])}\n\n<b>Raw Omega Response</b>\n<blockquote expandable>{esc(raw[:3600])}</blockquote>", parse_mode="HTML")
+                back = types.InlineKeyboardMarkup(row_width=1)
+                if card.get("slug"):
+                    back.add(Btn("↩ Back to endpoint", callback_data=f"adm_ai_omega_endpoint_{card['slug']}", style="primary"))
+                back.add(Btn("↩ Back to Omega categories", callback_data="adm_ai_omega_back_categories", style="danger"))
+                bot.reply_to(m, f"{esc(answer[:6000])}\n\n<b>Raw Omega Response</b>\n<blockquote expandable>{esc(raw[:3600])}</blockquote>", parse_mode="HTML", reply_markup=back)
             except Exception as error:
-                bot.reply_to(m, f"❌ Endpoint request failed: <code>{esc(str(error)[:800])}</code>", parse_mode="HTML")
+                back = types.InlineKeyboardMarkup(row_width=1)
+                back.add(Btn("↩ Back to Omega categories", callback_data="adm_ai_omega_back_categories", style="danger"))
+                bot.reply_to(m, f"❌ Endpoint request failed: <code>{esc(str(error)[:800])}</code>", parse_mode="HTML", reply_markup=back)
             return
         if flow == "await_adm_ai_endpoint_prompt":
             USER_STATES.pop(uid, None)
@@ -11213,7 +11225,9 @@ def on_text(m: types.Message) -> None:
                 except Exception:
                     raw_json = str(raw)
                 if not raw_json or raw_json == "null":
-                    bot.reply_to(m, answer)
+                    back = types.InlineKeyboardMarkup(row_width=1)
+                    back.add(Btn("↩ Back to Omega Browser", callback_data="adm_ai_omega_back_browser", style="danger"))
+                    bot.reply_to(m, answer, reply_markup=back)
                 else:
                     route = AI_ENGINE.routes.get(model_key)
                     request_info = {"method": "GET", "model": model_key, "endpoint": getattr(route, "endpoint", ""), "prompt": prompt}
@@ -11226,24 +11240,28 @@ def on_text(m: types.Message) -> None:
                     # every raw JSON character by sending additional quote
                     # blocks when a provider returns a large envelope.
                     chunks = [raw_json[i:i + 3400] for i in range(0, len(raw_json), 3400)]
+                    back = types.InlineKeyboardMarkup(row_width=1)
+                    back.add(Btn("↩ Back to Omega Browser", callback_data="adm_ai_omega_back_browser", style="danger"))
                     bot.reply_to(
                         m,
                         f"{esc(answer)}\n\n<b>Request Details</b>\n"
                         f"<blockquote expandable>{esc(request_json[:3000])}</blockquote>",
-                        parse_mode="HTML",
+                        parse_mode="HTML", reply_markup=back,
                     )
                     bot.send_message(m.chat.id, f"<b>Raw Omega Response</b>\n<blockquote expandable>{esc(chunks[0])}</blockquote>", parse_mode="HTML")
                     for chunk in chunks[1:]:
                         bot.send_message(m.chat.id, f"<blockquote expandable>{esc(chunk)}</blockquote>", parse_mode="HTML")
             else:
-                bot.reply_to(
-                    m,
-                    f"<b>❌ Endpoint request failed</b>\n"
-                    f"{bullet('Model', ai_label(model_key))}\n"
-                    f"{bullet('Response time', f'{elapsed:.2f}s')}\n"
-                    f"{bullet('Reason', result.error or 'No usable response')}",
-                    parse_mode="HTML",
-                )
+                    back = types.InlineKeyboardMarkup(row_width=1)
+                    back.add(Btn("↩ Back to Omega Browser", callback_data="adm_ai_omega_back_browser", style="danger"))
+                    bot.reply_to(
+                        m,
+                        f"<b>❌ Endpoint request failed</b>\n"
+                        f"{bullet('Model', ai_label(model_key))}\n"
+                        f"{bullet('Response time', f'{elapsed:.2f}s')}\n"
+                        f"{bullet('Reason', result.error or 'No usable response')}",
+                        parse_mode="HTML", reply_markup=back,
+                    )
             return
         if flow == "await_adm_ai_model_endpoint":
             endpoint = text.strip()
@@ -18067,7 +18085,7 @@ def render_user_stats(call: types.CallbackQuery) -> None:
     expires_txt = fmt_ts(plan_expires) if plan_expires else ("Forever" if p["price"] == 0 else "\u2014")
     wallet_txt = f"{u.get('wallet', 0)}{cur_sym()}"
     cap = (
-        f"<b>{G['graph']} {sc('My Stats')}</b>\n"
+        f"<b>{sc('My Stats')}</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('Name', u.get('name', '—'))}\n"
         f"{bullet('User ID', uid)}\n"
@@ -24454,13 +24472,12 @@ def _omega_card_model(slug: str, index: int) -> Optional[Tuple[Dict[str, Any], s
 def render_adm_ai_omega_categories(call: types.CallbackQuery) -> None:
     meta = _omega_catalog_meta()
     counts = meta.get("counts", {}) if isinstance(meta, dict) else {}
-    model_counts = meta.get("model_counts", {}) if isinstance(meta, dict) else {}
     total = int(meta.get("total", 0) or 0) if isinstance(meta, dict) else 0
     last = meta.get("last_sync", "Never") if isinstance(meta, dict) else "Never"
     cap = f"<b>🌐 Omega API Browser</b>\n{G['div_eq']}\nBrowse the synchronized catalogue by category.\n\n"
     kb = types.InlineKeyboardMarkup(row_width=1)
     for key, label, icon in (("ai", "AI", "🤖"), ("tools", "Tools", "🛠️"), ("image_generation", "Image Generation", "🎨"), ("media", "Media", "🎬")):
-        kb.add(Btn(f"{icon} {label} — {int(counts.get(key, 0) or 0)} endpoints · {int(model_counts.get(key, 0) or 0)} models", callback_data=f"adm_ai_omega_category_{key}", style="success" if key == "ai" else "primary"))
+        kb.add(Btn(f"{icon} {label} — {int(counts.get(key, 0) or 0)} endpoints", callback_data=f"adm_ai_omega_category_{key}", style="success" if key == "ai" else "primary"))
     cap += f"<b>Total synchronized:</b> {total} endpoints\n<b>Last sync:</b> {esc(str(last))}\n"
     if meta:
         cap += f"<b>Changes:</b> +{meta.get('new', 0)} new · {meta.get('updated', 0)} updated · {meta.get('unavailable', 0)} unavailable\n"
@@ -24476,8 +24493,7 @@ def render_adm_ai_omega_group(call: types.CallbackQuery, group: str, page: int =
     pages = max(1, (len(cards) + page_size - 1) // page_size)
     page = min(max(0, page), pages - 1)
     shown = cards[page * page_size:(page + 1) * page_size]
-    model_total = sum(max(1, len(x.get("model_options") or [])) for x in cards)
-    cap = f"<b>📂 Omega / {esc(label)}</b>\n{G['div_eq']}\n<b>{len(cards)} endpoints · {model_total} models</b> · Page {page + 1}/{pages}\nSelect an endpoint to inspect its path, method, request format, and response.\n\n"
+    cap = f"<b>📂 Omega / {esc(label)}</b>\n{G['div_eq']}\n<b>{len(cards)} endpoints</b> · Page {page + 1}/{pages}\nSelect an endpoint to inspect its path, method, request format, and response.\n\n"
     kb = types.InlineKeyboardMarkup(row_width=1)
     for card in shown:
         cap += f"• <b>{esc(card['name'])}</b> — <code>{esc(card['path'])}</code>\n"
