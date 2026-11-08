@@ -6504,6 +6504,20 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         group = data[len("adm_ai_omega_category_"):]
         if group in _OMEGA_SYNC_GROUPS:
             return render_adm_ai_omega_group(call, group)
+    if data.startswith("adm_ai_omega_page_image_generation_"):
+        raw_page = data[len("adm_ai_omega_page_image_generation_"):]
+        try:
+            page = max(0, int(raw_page))
+        except (TypeError, ValueError):
+            ack(call, "Invalid Image Generation page.", show_alert=True)
+            return render_adm_ai_omega_group(call, "image_generation", 0)
+        ack(call, "Loading Image Generation…")
+        try:
+            return render_adm_ai_omega_group(call, "image_generation", page)
+        except Exception as error:
+            print(f"[omega_browser] image page render failed: {type(error).__name__}: {error}", flush=True)
+            bot.send_message(call.message.chat.id, "❌ Could not render that Image Generation page. Please sync the Omega catalogue and try again.")
+            return render_adm_ai_omega_categories(call)
     if data.startswith("adm_ai_omega_page_"):
         parts = data[len("adm_ai_omega_page_"):].rsplit("_", 1)
         if len(parts) == 2 and parts[0] in _OMEGA_SYNC_GROUPS:
