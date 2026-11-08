@@ -808,7 +808,7 @@ def _build_cipher_ai_context(model_name: str, prompt: Optional[str] = None) -> s
     plans_info = []
     for plan_key, details in PLAN_LIMITS.items():
         pool_parts = []
-        for pool_mode, pool_label in (("chat", "Chatting"), ("coding", "Coding")):
+        for pool_mode, pool_label in (("chat", "Chatting"), ("coding", "Coding"), ("image", "Image Generation")):
             if not _ai_pool_enabled(pool_mode):
                 pool_parts.append(f"{pool_label}: OFF")
                 continue
@@ -6534,7 +6534,13 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             ack(call, "Model choice not found. Synchronize again.", show_alert=True); return render_adm_ai_omega_categories(call)
         card, model_id = selected
         if prefix.endswith("add_"):
-            USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_model_name", "endpoint": card["url"], "format": card.get("format", "omega_text"), "model_id": model_id}
+            USER_STATES[call.from_user.id] = {
+                "flow": "await_adm_ai_model_name", "endpoint": card["url"],
+                "format": "image" if card.get("category") == "image_generation" else card.get("format", "omega_text"),
+                "model_id": model_id, "method": card.get("method", "GET"),
+                "methods": card.get("methods", []) or [], "params_schema": card.get("params", {}) or {},
+                "category": card.get("category", "ai"),
+            }
             kb = types.InlineKeyboardMarkup(row_width=1)
             kb.add(Btn("↩ Back to Omega Browser", callback_data="adm_ai_model_flow_back", style="danger"))
             bot.send_message(call.message.chat.id, f"What should this model be called in the bot?\n\nEndpoint: <code>{esc(card['path'])}</code>\nModel: <code>{esc(model_id)}</code>", parse_mode="HTML", reply_markup=kb)
@@ -6554,7 +6560,13 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         card = _omega_card(data[len("adm_ai_omega_endpoint_add_"):])
         if not card: ack(call, "Endpoint not found", show_alert=True); return
         model_id = card.get("model_id") or ((card.get("model_options") or [""])[0])
-        USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_model_name", "endpoint": card["url"], "format": card.get("format", "omega_text"), "model_id": model_id}
+        USER_STATES[call.from_user.id] = {
+            "flow": "await_adm_ai_model_name", "endpoint": card["url"],
+            "format": "image" if card.get("category") == "image_generation" else card.get("format", "omega_text"),
+            "model_id": model_id, "method": card.get("method", "GET"),
+            "methods": card.get("methods", []) or [],
+            "params_schema": card.get("params", {}) or {}, "category": card.get("category", "ai"),
+        }
         kb = types.InlineKeyboardMarkup(row_width=1)
         kb.add(Btn("↩ Back to Omega Browser", callback_data="adm_ai_model_flow_back", style="danger"))
         bot.send_message(call.message.chat.id, f"What should <code>{esc(card['path'])}</code> be called in the bot?", parse_mode="HTML", reply_markup=kb)
@@ -6599,7 +6611,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return
     if data.startswith("adm_ai_omega_format_"):
         fmt = data[len("adm_ai_omega_format_"):].lower()
-        if fmt not in {"omega_text", "model_message", "openai"}:
+        if fmt not in {"image", "omega_text", "model_message", "openai"}:
             ack(call, "Unknown request format", show_alert=True); return
         return _save_runtime_ai_model(call.from_user.id, fmt, call.message.chat.id)
     if data == "adm_ai_omega_reload":
@@ -6674,8 +6686,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         set_setting("ai_global_enabled", not cur)
         ack(call, f"Global AI: {'ON' if not cur else 'OFF'}")
         return render_adm_ai_config(call)
-    if data in ("adm_ai_toggle_chat_pool", "adm_ai_toggle_coding_pool"):
-        mode = "coding" if data.endswith("coding_pool") else "chat"
+    if data in ("adm_ai_toggle_chat_pool", "adm_ai_toggle_coding_pool", "adm_ai_toggle_image_pool"):
+        mode = data[len("adm_ai_toggle_"):-len("_pool")]
         cur = _ai_pool_enabled(mode)
         set_setting(f"ai_{mode}_pool_enabled", not cur)
         audit(call.from_user.id, f"ai_{mode}_pool", f"now={'off' if cur else 'on'}")
@@ -22972,6 +22984,82 @@ def _enforce_lord_cipher_identity(user_request: str, response: str) -> str:
     # and still contain all three required words. Use the verified product fact.
     return _lord_cipher_identity_answer()
 
+
+def _generate_ai_image(model_key: str, prompt: str) -> Optional[Any]:
+    """Execute an admin-added image endpoint using its documented schema."""
+    spec = _custom_ai_models().get(str(model_key or "").lower()) or {}
+    if str(spec.get("format") or "").lower() != "image":
+        return None
+    endpoint = str(spec.get("endpoint") or "").strip()
+    if not endpoint:
+        return None
+    schema = spec.get("params_schema") if isinstance(spec.get("params_schema"), dict) else {}
+    names = {str(name).lower(): str(name) for name in schema}
+    prompt_name = next((names[name] for name in ("prompt", "text", "q", "query", "description", "message") if name in names), "prompt")
+    params: Dict[str, Any] = {}
+    for name, definition in schema.items():
+        definition = definition if isinstance(definition, dict) else {}
+        lower = str(name).lower()
+        if str(name) == prompt_name:
+            params[name] = str(prompt or "").strip()[:2000]
+        elif lower in {"model", "modelid", "model_id"} and spec.get("model_id"):
+            params[name] = str(spec["model_id"])
+        elif definition.get("default") is not None:
+            params[name] = definition["default"]
+        elif isinstance(definition.get("enum"), list) and definition["enum"]:
+            params[name] = "generate" if "generate" in definition["enum"] else definition["enum"][0]
+    if prompt_name not in params:
+        params[prompt_name] = str(prompt or "").strip()[:2000]
+    method = str(spec.get("method") or "GET").upper()
+    methods = {str(value).upper() for value in (spec.get("methods") or [])}
+    if "GET" in methods:
+        method = "GET"
+    try:
+        response = AI_HTTP.request(
+            method, endpoint, params=params if method == "GET" else None,
+            json=params if method != "GET" else None, timeout=(5, 60),
+        )
+        if response.status_code != 200:
+            return None
+        content_type = str(response.headers.get("content-type") or "").lower()
+        if content_type.startswith("image/") and response.content:
+            return response.content
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("success") is False:
+            return None
+        encoded = payload.get("b64_json") or payload.get("base64")
+        if encoded:
+            try:
+                return base64.b64decode(str(encoded).split(",", 1)[-1])
+            except Exception:
+                return None
+        def find_url(value: Any) -> Optional[str]:
+            if isinstance(value, str) and value.startswith("https://"):
+                return value
+            if isinstance(value, dict):
+                for key in ("url", "image_url", "image", "output", "result", "data"):
+                    found = find_url(value.get(key))
+                    if found:
+                        return found
+            if isinstance(value, list):
+                for item in value:
+                    found = find_url(item)
+                    if found:
+                        return found
+            return None
+        image_url = find_url(payload)
+        if not image_url:
+            return None
+        image_response = AI_HTTP.get(image_url, timeout=(5, 60))
+        image_type = str(image_response.headers.get("content-type") or "").lower()
+        if image_response.status_code != 200 or not image_type.startswith("image/") or not image_response.content:
+            return None
+        return image_response.content
+    except Exception as error:
+        print(f"[ai_image] generation failed: {type(error).__name__}", flush=True)
+        return None
+
+
 def handle_ai_chat_message(m: types.Message) -> None:
     """Processes user messages and routes them to the Kaalix AI API."""
     print(f"[ai_chat] message from {m.from_user.id}: {m.text[:50]}", flush=True)
@@ -22998,10 +23086,29 @@ def handle_ai_chat_message(m: types.Message) -> None:
         else:
             if mode not in _AI_MODE_LABELS or not _ai_pool_enabled(mode) or not get_plan_ai_models(plan, mode=mode):
                 mode = "chat"
-            ai_response = _call_ai_api(
-                _build_ai_request(m.text, m.from_user.id), user_plan=plan, uid=m.from_user.id,
-                preferred_model=_ai_selected_model(m.from_user.id, plan, mode), mode=mode,
-            )
+            if mode == "image":
+                image_model = _ai_selected_model(m.from_user.id, plan, mode)
+                image_result = _generate_ai_image(image_model, m.text) if image_model else None
+                if image_result:
+                    photo = io.BytesIO(image_result)
+                    photo.name = "generated-image.png"
+                    bot.send_photo(
+                        m.chat.id,
+                        photo,
+                        caption=f"🎨 <b>{esc(ai_label(image_model))}</b>\n{esc(m.text[:800])}",
+                        parse_mode="HTML",
+                    )
+                    try:
+                        bot.delete_message(m.chat.id, loading_msg.message_id)
+                    except Exception:
+                        pass
+                    return
+                ai_response = None
+            else:
+                ai_response = _call_ai_api(
+                    _build_ai_request(m.text, m.from_user.id), user_plan=plan, uid=m.from_user.id,
+                    preferred_model=_ai_selected_model(m.from_user.id, plan, mode), mode=mode,
+                )
         
         if ai_response:
             primary_model = ai_model_tag(m.from_user.id, plan)
@@ -23858,6 +23965,7 @@ for _agent_id, _agent_label in {**_AGENTS_CHAT_MODELS, **_AGENTS_CODER_MODELS}.i
     _AI_OPERATIVE_LABELS[_AGENTS_INTERNAL_KEYS[_agent_id]] = _agent_label
 
 _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
+_AI_BASE_OPERATIVE_LABELS = dict(_AI_OPERATIVE_LABELS)
 def _public_ai_model_name(model: str) -> str:
     """Public label for an operative key.
 
@@ -23867,7 +23975,7 @@ def _public_ai_model_name(model: str) -> str:
     look-alike models apart (e.g. Claude vs Claude Chat vs Claude Haiku).
     """
     key = str(model or "").strip().lower()
-    if key in _AI_OPERATIVE_KEYS:
+    if key in _AI_OPERATIVE_KEYS or key in _AI_IMAGE_MODEL_KEYS:
         return ai_label(key)
     return "Cipher AI"
 
@@ -23891,7 +23999,9 @@ for _plan_models in _AI_PLAN_DEFAULT_MODELS.values():
     _plan_models[:] = [key for key in _plan_models if key in _AI_OPERATIVE_KEYS]
     _plan_models.extend(key for key in _AI_AGENTS_CHAT_DEFAULT_KEYS if key not in _plan_models)
 
-_AI_MODE_LABELS = {"chat": "Chatting", "coding": "Coding"}
+_AI_IMAGE_MODEL_LABELS: Dict[str, str] = {}
+_AI_IMAGE_MODEL_KEYS = tuple(_AI_IMAGE_MODEL_LABELS)
+_AI_MODE_LABELS = {"chat": "Chatting", "coding": "Coding", "image": "Image Generation"}
 # Every registered operative is assignable to either pool. Defaults are
 # categorized for convenience, but the admin can move any model between them.
 _AI_CODING_DEFAULT_MODELS = list(_AI_OPERATIVE_KEYS)
@@ -23906,6 +24016,7 @@ _AI_CODING_MODEL_KEYS = _AI_OPERATIVE_KEYS
 _AI_MODE_DEFAULT_MODELS = {
     "chat": _AI_PLAN_DEFAULT_MODELS,
     "coding": {plan: list(_AI_CODING_DEFAULT_MODELS) for plan in _AI_PLAN_DEFAULT_MODELS},
+    "image": {plan: list(_AI_IMAGE_MODEL_KEYS) for plan in _AI_PLAN_DEFAULT_MODELS},
 }
 
 def _custom_ai_models() -> Dict[str, Dict[str, Any]]:
@@ -23921,11 +24032,20 @@ def _custom_ai_models() -> Dict[str, Dict[str, Any]]:
 
 def _refresh_ai_catalog_state() -> None:
     """Merge persisted custom models into the in-memory catalog."""
-    global _AI_OPERATIVE_KEYS, _AI_CODING_MODEL_KEYS
+    global _AI_OPERATIVE_KEYS, _AI_CODING_MODEL_KEYS, _AI_IMAGE_MODEL_KEYS, _AI_IMAGE_MODEL_LABELS
+    operative_labels = dict(_AI_BASE_OPERATIVE_LABELS)
+    image_labels: Dict[str, str] = {}
     for key, spec in _custom_ai_models().items():
-        _AI_OPERATIVE_LABELS[key] = str(spec.get("label") or key)
-    _AI_OPERATIVE_KEYS = tuple(_AI_OPERATIVE_LABELS)
+        if str(spec.get("format") or "").lower() == "image":
+            image_labels[key] = str(spec.get("label") or key)
+        else:
+            operative_labels[key] = str(spec.get("label") or key)
+    _AI_OPERATIVE_LABELS.clear()
+    _AI_OPERATIVE_LABELS.update(operative_labels)
+    _AI_OPERATIVE_KEYS = tuple(operative_labels)
     _AI_CODING_MODEL_KEYS = _AI_OPERATIVE_KEYS
+    _AI_IMAGE_MODEL_LABELS = image_labels
+    _AI_IMAGE_MODEL_KEYS = tuple(image_labels)
 
 def _template_value(value: Any, prompt: str, model_id: str, mode: str) -> Any:
     if isinstance(value, str):
@@ -23953,6 +24073,8 @@ def _custom_model_builder(spec: Dict[str, Any]) -> Callable[[str], Dict[str, Any
     return build
 
 def _ai_operative_enabled(key: str) -> bool:
+    if key in _AI_IMAGE_MODEL_KEYS:
+        return bool(get_setting(f"ai_operative_{key}_enabled", True))
     default_enabled = True
     return key in _AI_OPERATIVE_KEYS and bool(
         get_setting(f"ai_operative_{key}_enabled", default_enabled)
@@ -23968,6 +24090,8 @@ def _ai_pool_enabled(mode: str = "chat") -> bool:
     return mode in _AI_MODE_LABELS and bool(get_setting(f"ai_{mode}_pool_enabled", True))
 
 def _ai_mode_allowed_keys(mode: str = "chat") -> Tuple[str, ...]:
+    if str(mode or "chat").lower() == "image":
+        return _AI_IMAGE_MODEL_KEYS
     return _AI_CODING_MODEL_KEYS if str(mode or "chat").lower() == "coding" else _AI_OPERATIVE_KEYS
 
 def _create_ai_engine() -> AIEngine:
@@ -24056,6 +24180,8 @@ def reload_ai_runtime() -> None:
     AI_MODEL_CIRCUIT_OPEN_UNTIL = AI_ENGINE.circuit_open_until
 
 def ai_label(key: str) -> str:
+    if key in _AI_IMAGE_MODEL_LABELS:
+        return _AI_IMAGE_MODEL_LABELS[key]
     return _AI_OPERATIVE_LABELS.get(key, key.upper())
 
 def get_plan_ai_models(plan: str, include_disabled: bool = False, mode: str = "chat") -> List[str]:
@@ -24265,6 +24391,7 @@ def _omega_endpoint_label(endpoint: str) -> str:
 
 def _show_ai_model_format_choices(chat_id: int) -> None:
     kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🎨 Documentation-driven image", callback_data="adm_ai_omega_format_image", style="success"))
     kb.add(Btn("📝 Omega text", callback_data="adm_ai_omega_format_omega_text", style="primary"))
     kb.add(Btn("💬 Model + message", callback_data="adm_ai_omega_format_model_message", style="primary"))
     kb.add(Btn("🔌 OpenAI-compatible", callback_data="adm_ai_omega_format_openai", style="success"))
@@ -24291,7 +24418,13 @@ def _save_runtime_ai_model(uid: int, fmt: str, chat_id: int) -> None:
     if not label or not model_id or not endpoint or not key:
         bot.send_message(chat_id, f"{G['no']} The model details were incomplete. Please start again."); return
     custom = _custom_ai_models()
-    custom[key] = {"label": label, "endpoint": endpoint, "format": fmt, "model_id": model_id}
+    custom[key] = {
+        "label": label, "endpoint": endpoint, "format": fmt, "model_id": model_id,
+        "method": str(st.get("method") or "GET").upper(),
+        "methods": st.get("methods") or [],
+        "params_schema": st.get("params_schema") or {},
+        "category": st.get("category") or ("image_generation" if fmt == "image" else "ai"),
+    }
     set_setting("ai_custom_models", custom)
     reload_ai_runtime()
     audit(uid, "ai_runtime_model_save", f"key={key} endpoint={endpoint} format={fmt}")
@@ -24367,11 +24500,19 @@ def _omega_sync_group(item: Dict[str, Any]) -> Optional[str]:
     """
     category = str(item.get("category") or "").strip().lower()
     text = f"{item.get('name', '')} {item.get('description', '')} {item.get('route', '')}".lower()
-    image_terms = ("image generator", "image generation", "image editor", "text to image", "text-to-image", "image ai", "logo generator", "artgen", "image maker", "image synthesis")
+    schema = item.get("paramsSchema") or {}
+    schema_names = {str(key).lower() for key in schema} if isinstance(schema, dict) else set()
+    action_values = set()
+    action_schema = schema.get("action") if isinstance(schema, dict) else None
+    if isinstance(action_schema, dict) and isinstance(action_schema.get("enum"), list):
+        action_values = {str(value).lower() for value in action_schema["enum"]}
+    image_terms = ("image generator", "image generation", "image editor", "image-to-image", "text to image", "text-to-image", "image ai", "image models", "logo generator", "artgen", "image maker", "image synthesis", "nano banana", "nanobanana")
+    image_capable_action = bool(action_values & {"image", "generate", "text-to-image", "image-generation", "edit"})
+    image_prompt_schema = bool(schema_names & {"prompt", "query", "text", "description"})
     media_terms = ("video generator", "video", "audio", "music", "media", "transcri", "downloader", "stream", "subtitle")
     image_tool_terms = ("image converter", "image upscaler", "image-upscaler", "watermark", "photo editor")
     if category in {"ai", "ai ", "ai-agent"}:
-        if any(term in text for term in image_terms):
+        if any(term in text for term in image_terms) or (image_capable_action and image_prompt_schema):
             return "image_generation"
         if any(term in text for term in media_terms):
             return "media"
