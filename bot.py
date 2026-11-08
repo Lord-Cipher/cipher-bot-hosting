@@ -6508,9 +6508,16 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         parts = data[len("adm_ai_omega_page_"):].rsplit("_", 1)
         if len(parts) == 2 and parts[0] in _OMEGA_SYNC_GROUPS:
             try:
+                ack(call, "Loading next page…")
                 return render_adm_ai_omega_group(call, parts[0], max(0, int(parts[1])))
-            except ValueError:
-                pass
+            except (TypeError, ValueError) as error:
+                print(f"[omega_browser] invalid page callback: {error}", flush=True)
+            except Exception as error:
+                print(f"[omega_browser] page render failed: {type(error).__name__}: {error}", flush=True)
+                ack(call, "Could not load that page. Showing the category again.", show_alert=True)
+                return render_adm_ai_omega_group(call, parts[0], 0)
+        ack(call, "Invalid catalogue page.", show_alert=True)
+        return render_adm_ai_omega_categories(call)
     if data == "adm_ai_omega_sync":
         ack(call, "Synchronizing Omega catalogue…")
         try:
@@ -6581,9 +6588,6 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return
     if data == "adm_ai_omega_add":
         kb = types.InlineKeyboardMarkup(row_width=1)
-        for key in _AI_TARGET_LEGACY_KEYS:
-            if key in _OMEGATECH_MODELS:
-                kb.add(Btn(f"Use {ai_label(key)} endpoint", callback_data=f"adm_ai_omega_use_{key}", style="primary"))
         kb.add(Btn("🌐 Enter another Omega endpoint", callback_data="adm_ai_omega_custom_endpoint", style="success"))
         kb.add(Btn(f"{G['back']} Omega Browser", callback_data="adm_ai_omega_browser", style="danger"))
         bot.send_message(call.message.chat.id, "<b>Choose an Omega endpoint</b>\n\nYou can reuse one endpoint for multiple models, or enter another Omega route.", parse_mode="HTML", reply_markup=kb)
@@ -6611,7 +6615,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return
     if data.startswith("adm_ai_omega_format_"):
         fmt = data[len("adm_ai_omega_format_"):].lower()
-        if fmt not in {"image", "omega_text", "model_message", "openai"}:
+        if fmt not in {"multi", "image", "omega_text", "model_message", "openai"}:
             ack(call, "Unknown request format", show_alert=True); return
         return _save_runtime_ai_model(call.from_user.id, fmt, call.message.chat.id)
     if data == "adm_ai_omega_reload":
@@ -6643,18 +6647,19 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             results.append(f"{'✅' if outcome.ok else '❌'} {esc(ai_label(model_key))} — {elapsed:.2f}s")
         bot.send_message(call.message.chat.id, "<b>🧪 Model test results</b>\n\n" + "\n".join(results), parse_mode="HTML")
         return render_adm_ai_omega_browser(call)
-    if data.startswith("adm_ai_omega_try_"):
-        model_key = data[len("adm_ai_omega_try_"):].lower()
-        if model_key not in _AI_OPERATIVE_KEYS:
-            ack(call, "Unknown model", show_alert=True); return render_adm_ai_omega_browser(call)
-        USER_STATES[call.from_user.id] = {"flow": "await_adm_ai_endpoint_prompt", "model": model_key}
-        bot.send_message(call.message.chat.id, f"Send a prompt for <b>{esc(ai_label(model_key))}</b>.\n\nThe bot will send it to the endpoint and show the real response.", parse_mode="HTML")
-        return
     if data.startswith("adm_ai_omega_test_"):
         model_key = data[len("adm_ai_omega_test_"):].lower()
-        if model_key not in _AI_OPERATIVE_KEYS:
+        if model_key not in set(_AI_OPERATIVE_KEYS) | set(_AI_IMAGE_MODEL_KEYS):
             ack(call, "Unknown model", show_alert=True); return render_adm_ai_omega_browser(call)
         ack(call, "Testing model…")
+        if model_key in _AI_IMAGE_MODEL_KEYS:
+            image = _generate_ai_image(model_key, "A simple colorful geometric test image")
+            if image:
+                photo = io.BytesIO(image); photo.name = "active-ai-test.png"
+                bot.send_photo(call.message.chat.id, photo, caption=f"✅ <b>{esc(ai_label(model_key))}</b> passed.", parse_mode="HTML")
+            else:
+                bot.send_message(call.message.chat.id, f"❌ <b>{esc(ai_label(model_key))}</b> failed to return a live image.", parse_mode="HTML")
+            return render_adm_ai_omega_active_ai(call)
         result = AI_ENGINE.complete(model_key, "Reply with exactly: API connection successful")
         if result.ok:
             bot.send_message(call.message.chat.id, f"✅ <b>{esc(ai_label(model_key))}</b> passed.\n<code>{esc(result.text[:300])}</code>", parse_mode="HTML")
@@ -22988,7 +22993,10 @@ def _enforce_lord_cipher_identity(user_request: str, response: str) -> str:
 def _generate_ai_image(model_key: str, prompt: str) -> Optional[Any]:
     """Execute an admin-added image endpoint using its documented schema."""
     spec = _custom_ai_models().get(str(model_key or "").lower()) or {}
-    if str(spec.get("format") or "").lower() != "image":
+    capabilities = {str(value).lower() for value in (spec.get("capabilities") or [])}
+    if not capabilities:
+        capabilities = {"image"} if str(spec.get("format") or "").lower() == "image" else set()
+    if "image" not in capabilities:
         return None
     endpoint = str(spec.get("endpoint") or "").strip()
     if not endpoint:
@@ -24036,9 +24044,12 @@ def _refresh_ai_catalog_state() -> None:
     operative_labels = dict(_AI_BASE_OPERATIVE_LABELS)
     image_labels: Dict[str, str] = {}
     for key, spec in _custom_ai_models().items():
-        if str(spec.get("format") or "").lower() == "image":
+        capabilities = {str(value).lower() for value in (spec.get("capabilities") or [])}
+        if not capabilities:
+            capabilities = {"image"} if str(spec.get("format") or "").lower() == "image" else {"chat", "coding"}
+        if "image" in capabilities:
             image_labels[key] = str(spec.get("label") or key)
-        else:
+        if capabilities & {"chat", "coding"}:
             operative_labels[key] = str(spec.get("label") or key)
     _AI_OPERATIVE_LABELS.clear()
     _AI_OPERATIVE_LABELS.update(operative_labels)
@@ -24068,6 +24079,8 @@ def _custom_model_builder(spec: Dict[str, Any]) -> Callable[[str], Dict[str, Any
         if _fmt in {"openai", "openai_compatible"}:
             return {"model": _model_id, "messages": [{"role": "user", "content": prompt}]}
         if _fmt in {"model_message", "action_model"}:
+            return {"action": "chat", "model": _model_id, "message": prompt}
+        if _fmt == "multi":
             return {"action": "chat", "model": _model_id, "message": prompt}
         return {"text": prompt}
     return build
@@ -24391,6 +24404,7 @@ def _omega_endpoint_label(endpoint: str) -> str:
 
 def _show_ai_model_format_choices(chat_id: int) -> None:
     kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(Btn("🔀 General-purpose: chat + coding + image", callback_data="adm_ai_omega_format_multi", style="success"))
     kb.add(Btn("🎨 Documentation-driven image", callback_data="adm_ai_omega_format_image", style="success"))
     kb.add(Btn("📝 Omega text", callback_data="adm_ai_omega_format_omega_text", style="primary"))
     kb.add(Btn("💬 Model + message", callback_data="adm_ai_omega_format_model_message", style="primary"))
@@ -24420,6 +24434,7 @@ def _save_runtime_ai_model(uid: int, fmt: str, chat_id: int) -> None:
     custom = _custom_ai_models()
     custom[key] = {
         "label": label, "endpoint": endpoint, "format": fmt, "model_id": model_id,
+        "capabilities": (["chat", "coding", "image"] if fmt == "multi" else (["image"] if fmt == "image" else ["chat", "coding"])),
         "method": str(st.get("method") or "GET").upper(),
         "methods": st.get("methods") or [],
         "params_schema": st.get("params_schema") or {},
@@ -24700,7 +24715,7 @@ def render_adm_ai_omega_ai(call: types.CallbackQuery) -> None:
 def render_adm_ai_omega_active_ai(call: types.CallbackQuery) -> None:
     """Show implemented runtime models without changing plan pools."""
     health = get_setting("ai_health", {}) or {}
-    models = list(_AI_OPERATIVE_KEYS)
+    models = list(dict.fromkeys(list(_AI_OPERATIVE_KEYS) + list(_AI_IMAGE_MODEL_KEYS)))
     cap = (
         f"<b>🤖 Active AI</b>\n{G['div_eq']}\n"
         "Implemented models currently registered in the runtime.\n"
@@ -24723,10 +24738,7 @@ def render_adm_ai_omega_active_ai(call: types.CallbackQuery) -> None:
         ]
         visibility = ", ".join(plans) or "not assigned"
         cap += f"{status} <b>{esc(ai_label(model))}</b> · <i>{esc(visibility)}</i>\n"
-        kb.add(
-            Btn(f"💬 {ai_label(model)[:20]}", callback_data=f"adm_ai_omega_try_{model}", style="primary"),
-            Btn("🧪 Test", callback_data=f"adm_ai_omega_test_{model}", style="success"),
-        )
+        kb.add(Btn("🧪 Test", callback_data=f"adm_ai_omega_test_{model}", style="success"))
     if not models:
         cap += "No implemented AI models are registered.\n"
     cap += f"\n{G['div']}Use AI Config to change plan visibility.{FOOTER}"
@@ -24754,9 +24766,7 @@ def render_adm_ai_omega_endpoint(call: types.CallbackQuery, slug: str) -> None:
         cap += "\n<b>Models on this shared endpoint:</b>\n" + "\n".join(f"• <code>{esc(model)}</code>" for model in options[:12]) + "\n"
         for index, model in enumerate(options[:12]):
             kb.add(Btn(f"➕ Add {str(model)[:28]}", callback_data=f"adm_ai_omega_model_add_{slug}_{index}", style="success"))
-            kb.add(Btn(f"🧪 Test {str(model)[:28]}", callback_data=f"adm_ai_omega_model_test_{slug}_{index}", style="primary"))
     else:
-        kb.add(Btn("🧪 Try Endpoint", callback_data=f"adm_ai_omega_endpoint_try_{slug}", style="success"))
         kb.add(Btn("➕ Add to AI Catalog", callback_data=f"adm_ai_omega_endpoint_add_{slug}", style="success"))
     group = card.get("category", "ai")
     kb.add(Btn(f"{G['back']} {_OMEGA_SYNC_GROUPS.get(group, 'AI')} Endpoints", callback_data=f"adm_ai_omega_category_{group}", style="danger"))
@@ -24781,7 +24791,6 @@ def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
         route = _OMEGATECH_MODELS.get(key)
         if route:
             cap += f"• <b>{esc(ai_label(key))}</b> — <code>{esc(_omega_endpoint_label(route[0]))}</code>\n"
-            kb.add(Btn(f"💬 Try {ai_label(key)[:22]}", callback_data=f"adm_ai_omega_try_{key}", style="primary"))
     if custom:
         cap += f"\n<b>{sc('Runtime models')}</b>:\n"
         for endpoint, keys in grouped.items():
@@ -24791,14 +24800,12 @@ def render_adm_ai_omega_browser(call: types.CallbackQuery) -> None:
             check = health.get(key, {}) if isinstance(health, dict) else {}
             status = "✅" if check.get("ok") else ("❌" if check else "⚪")
             cap += f"• {status} <b>{esc(spec.get('label', key))}</b> — <code>{esc(_omega_endpoint_label(spec.get('endpoint', '')))}</code>\n"
-            kb.add(Btn(f"💬 Try {str(spec.get('label', key))[:20]}", callback_data=f"adm_ai_omega_try_{key}", style="success"))
             kb.add(Btn(f"🗑️ Remove {str(spec.get('label', key))[:18]}", callback_data=f"adm_ai_omega_delete_{key}", style="danger"))
     cap += f"\n{sc('Choose an endpoint, then follow the guided setup. One endpoint can serve many models.')}{FOOTER}"
     kb.add(Btn("➕ Add / Update Runtime Model", callback_data="adm_ai_omega_add", style="success"))
     kb.add(Btn("🤖 Active AI Models", callback_data="adm_ai_omega_active_ai", style="success"))
     kb.add(Btn("📚 Browse Omega Categories", callback_data="adm_ai_omega_categories", style="primary"))
     kb.add(Btn("🔄 Sync Omega Catalogue", callback_data="adm_ai_omega_sync", style="success"))
-    kb.add(Btn("🧪 Test All Models", callback_data="adm_ai_omega_test_all", style="primary"))
     kb.add(Btn("🔍 Discover Omega Models", callback_data="adm_ai_omega_discover", style="primary"))
     health_on = bool(get_setting("ai_health_enabled", False))
     kb.add(Btn(f"{'🟢' if health_on else '🔴'} Auto Health Checks: {'ON' if health_on else 'OFF'}", callback_data="adm_ai_omega_health_toggle", style="success" if health_on else "danger"))
