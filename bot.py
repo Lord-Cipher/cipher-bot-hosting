@@ -134,6 +134,11 @@ def support_contact() -> str:
     value = str(get_setting("support_contact", SUPPORT_USR) or SUPPORT_USR).strip()
     return value or SUPPORT_USR
 
+def support_channel() -> str:
+    """Return the administrator-configured support/update channel."""
+    value = str(get_setting("support_channel", UPDATE_CH) or UPDATE_CH).strip()
+    return value or UPDATE_CH
+
 def normalize_support_contact(raw: str) -> Optional[str]:
     """Validate a Telegram support username or public t.me link."""
     value = str(raw or "").strip()
@@ -6036,6 +6041,17 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             parse_mode="HTML",
         )
         return ack(call)
+    if data == "adm_set_support_channel":
+        if not admin_only_call(call, "view_stats"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_adm_support_channel"}
+        bot.send_message(
+            call.message.chat.id,
+            f"{G['settings']} Send the support/update Telegram channel username or HTTPS link.\n"
+            f"Examples: <code>@your_updates_channel</code> or <code>https://t.me/your_updates_channel</code>.\n"
+            f"Current: <code>{esc(support_channel())}</code>\n/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return ack(call)
     if data == "adm_approval_toggle":
         cur = approval_required()
         set_approval_required(not cur)
@@ -11609,6 +11625,25 @@ def on_text(m: types.Message) -> None:
             USER_STATES.pop(uid, None)
             audit(uid, "support_contact_updated", contact)
             bot.reply_to(m, f"{G['ok']} Support contact updated to <code>{esc(contact)}</code>.", parse_mode="HTML")
+            return
+        if flow == "await_adm_support_channel":
+            if not is_admin(uid):
+                USER_STATES.pop(uid, None)
+                return
+            channel = normalize_support_contact(text)
+            if not channel:
+                bot.reply_to(
+                    m,
+                    "Invalid support channel. Send a Telegram username such as "
+                    "<code>@your_updates_channel</code> or an HTTPS link such as "
+                    "<code>https://t.me/your_updates_channel</code>.",
+                    parse_mode="HTML",
+                )
+                return
+            set_setting("support_channel", channel)
+            USER_STATES.pop(uid, None)
+            audit(uid, "support_channel_updated", channel)
+            bot.reply_to(m, f"{G['ok']} Support channel updated to <code>{esc(channel)}</code>.", parse_mode="HTML")
             return
         if flow == "await_adm_resource_threshold":
             if not is_admin(uid):
@@ -18103,7 +18138,7 @@ def render_help(call: types.CallbackQuery) -> None:
         f"{bullet('Coupon', 'Coupon menu → Redeem')}\n"
         f"{bullet('Trial', 'One-time 48h Pro trial')}\n"
         f"{bullet('Tickets', 'Private support tickets')}\n"
-        f"{G['div']}\nUpdates: {UPDATE_CH}{FOOTER}"
+        f"{G['div']}\nUpdates: {support_channel()}{FOOTER}"
     )
     show_menu(call.message.chat.id, PHOTOS.get("help", PHOTOS["main"]), cap, back_main_kb(), call=call)
 def render_support(call: types.CallbackQuery) -> None:
@@ -18111,7 +18146,7 @@ def render_support(call: types.CallbackQuery) -> None:
         f"<b>{G['broadcast']} {sc('Support')}</b>\n"
         f"{G['div_eq']}\n"
         f"{bullet('DM', support_contact())}\n"
-        f"{bullet('Channel', UPDATE_CH)}\n"
+        f"{bullet('Channel', support_channel())}\n"
         f"{G['div']}\n"
         f"{sc('Or open a ticket from Tickets menu')}.{FOOTER}"
     )
@@ -19812,6 +19847,7 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
         f"{G['div_eq']}\n"
         f"{bullet('Brand', BRAND_TAG)}\n"
         f"{bullet('Support Contact', support_contact())}\n"
+        f"{bullet('Support Channel', support_channel())}\n"
         f"{bullet('Announce Ch', ANNOUNCE_CHANNEL or '—')}\n"
         f"{bullet('Maintenance', 'ON' if on else 'OFF')}\n"
         f"{bullet('TG Backup Ch', _tg_backup_channel() or '—')}\n"
@@ -19822,7 +19858,10 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
         Btn("\u270f\ufe0f  Brand Name",      callback_data="adm_set_brand",       style="primary"),
         Btn("\U0001f4e3  Announce Ch",       callback_data="adm_set_announce",    style="primary"),
     )
-    kb.add(Btn("🆘  Support Contact", callback_data="adm_set_support", style="primary"))
+    kb.add(
+        Btn("🆘  Support Contact", callback_data="adm_set_support", style="primary"),
+        Btn("📢  Support Channel", callback_data="adm_set_support_channel", style="primary"),
+    )
     kb.add(
         Btn("\U0001f451  Transfer Owner",    callback_data="adm_set_owner",       style="danger"),
         Btn("\U0001f527  Maint Mode",        callback_data="adm_maint",           style="danger"),
