@@ -11157,24 +11157,6 @@ def on_document(m: types.Message) -> None:
         else:
             bot.reply_to(m, f"{G['no']} {sc('Import failed')}: <code>{esc(msg)}</code>", parse_mode="HTML")
         return
-    if st.get("flow") == "await_recovery_password":
-        USER_STATES.pop(uid, None)
-        if not is_owner(uid):
-            return
-        password = str(m.text or "").strip()
-        if len(password) < 12:
-            bot.reply_to(m, "Recovery password must be at least 12 characters. Nothing was saved.")
-            return
-        global RECOVERY_PASSPHRASE_RUNTIME
-        RECOVERY_PASSPHRASE_RUNTIME = password
-        set_setting("github_recovery_password_mode", True)
-        try:
-            bot.delete_message(m.chat.id, m.message_id)
-        except Exception:
-            pass
-        bot.send_message(m.chat.id, "Recovery password set for this panel session. Keep it safe; it is required on the replacement account.", protect_content=True)
-        audit(uid, "recovery_password_set", "runtime_only")
-        return
     if st.get("flow") == "await_import_recovery":
         USER_STATES.pop(uid, None)
         if not is_owner(uid):
@@ -11280,6 +11262,33 @@ def on_text(m: types.Message) -> None:
 
     st = USER_STATES.get(uid) or {}
     flow = st.get("flow")
+    if flow == "await_recovery_password":
+        if not is_owner(uid):
+            USER_STATES.pop(uid, None)
+            return
+        password = text
+        if len(password) < 12:
+            bot.reply_to(m, "Recovery password must be at least 12 characters. Nothing was saved.")
+            return
+        try:
+            global RECOVERY_PASSPHRASE_RUNTIME
+            RECOVERY_PASSPHRASE_RUNTIME = password
+            set_setting("github_recovery_password_mode", True)
+            USER_STATES.pop(uid, None)
+            try:
+                bot.delete_message(m.chat.id, m.message_id)
+            except Exception:
+                pass
+            bot.send_message(
+                m.chat.id,
+                "Recovery password set for this panel session. Keep it safe; it is required on the replacement account.",
+                protect_content=True,
+            )
+            audit(uid, "recovery_password_set", "runtime_only")
+        except Exception as exc:
+            USER_STATES[uid] = {"flow": "await_recovery_password"}
+            bot.reply_to(m, f"Recovery password could not be saved: <code>{esc(str(exc)[:300])}</code>", parse_mode="HTML")
+        return
     if flow == "await_adm_vps_wizard":
         return _handle_adm_vps_wizard_text(m, st)
     if flow in {"await_adm_node_edit", "await_adm_node_add"}:
