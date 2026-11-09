@@ -3277,16 +3277,17 @@ def install_deps(bot_dir: Path, kind: str, log: List[str]) -> bool:
             if not pkg.exists():
                 log.append(f"[{G['ok']}] no package.json; using Node.js built-ins only")
                 return True
-            if (bot_dir / "node_modules").exists():
-                log.append(f"[{G['ok']}] node_modules cached, skipping npm install")
-                return True
             npm = shutil.which("npm")
             node = shutil.which("node")
             if not node or not npm:
                 log.append(f"[{G['warn']}] Node.js and npm are required for this deployment (node={node or 'missing'}, npm={npm or 'missing'})")
                 return False
             lock = bot_dir / "package-lock.json"
-            command = [npm, "ci" if lock.exists() else "install", "--omit=dev", "--no-audit", "--no-fund"]
+            # Never trust an existing node_modules directory: uploads and
+            # provider restores can leave it present but empty or incomplete.
+            # Reconcile it on every start. Include devDependencies because
+            # many bot projects place runtime adapters there for deployment.
+            command = [npm, "ci" if lock.exists() else "install", "--include=dev", "--no-audit", "--no-fund"]
             log.append(f"{G['div']} {' '.join(command[1:3])} {G['div']}")
             r = subprocess.run(
                 command,

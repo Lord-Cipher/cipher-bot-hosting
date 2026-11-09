@@ -33,7 +33,7 @@ def _dependency_install_command(remote: str, runtime: str, plan: str, uid: int, 
             "if [ -f /app/package.json ]; then "
             "cp /app/package.json /app/.deps/package.json && "
             "if [ -f /app/package-lock.json ]; then cp /app/package-lock.json /app/.deps/package-lock.json; fi && "
-            "cd /app/.deps && npm install --ignore-scripts --no-audit --no-fund; "
+            "cd /app/.deps && if [ -f package-lock.json ]; then npm ci --include=dev --ignore-scripts --no-audit --no-fund; else npm install --include=dev --ignore-scripts --no-audit --no-fund; fi; "
             "fi"
         )
     else:
