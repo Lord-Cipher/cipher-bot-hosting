@@ -4,25 +4,22 @@ import base64, errno, os, posixpath, shlex, stat, time
 from pathlib import Path
 from typing import Any, Dict, Iterator
 from sandbox_runtime import limits_for_plan
-from node_manager import load_ssh_private_key
+from node_manager import connect_ssh
 
 
 def _client(node: Dict[str, Any], secret: str, timeout: int = 10):
-    import paramiko
-    if not secret:
-        raise ValueError("remote credential required")
-    c = paramiko.SSHClient(); c.load_system_host_keys(); c.set_missing_host_key_policy(paramiko.RejectPolicy())
-    kwargs = {"hostname": node.get("hostname") or node.get("ipv4") or node.get("ipv6"), "port": int(node.get("ssh_port", 22)), "username": node.get("username"), "timeout": timeout, "banner_timeout": timeout, "auth_timeout": timeout}
-    if node.get("auth_method", "key") == "password":
-        kwargs["password"] = secret
-    else:
-        kwargs["pkey"] = load_ssh_private_key(secret)
-    c.connect(**kwargs); return c
+    return connect_ssh(node, secret, timeout=timeout)
 
 
 def _run(c, command: str, timeout: int = 60):
-    _, stdout, stderr = c.exec_command(command, timeout=timeout)
-    out, err = stdout.read().decode("utf-8", "replace"), stderr.read().decode("utf-8", "replace")
+    begin, end = "__CIPHER_CMD_BEGIN__", "__CIPHER_CMD_END__"
+    wrapped = f"printf '{begin}\\n'; {command}; _cipher_status=$?; printf '\\n{end}\\n'; exit $_cipher_status"
+    _, stdout, stderr = c.exec_command(wrapped, timeout=timeout)
+    raw_out = stdout.read().decode("utf-8", "replace")
+    out = raw_out
+    if begin in raw_out and end in raw_out:
+        out = raw_out.split(begin, 1)[1].split(end, 1)[0].lstrip("\r\n")
+    err = stderr.read().decode("utf-8", "replace")
     return stdout.channel.recv_exit_status(), out, err
 
 
@@ -264,8 +261,9 @@ def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path
         if identity_code or len(identity) < 2 or not all(value.isdigit() for value in identity[:2]):
             return {"ok": False, "error": "Could not determine the remote SSH user's numeric UID/GID."}
         uid, gid = int(identity[0]), int(identity[1])
-        if uid == 0:
-            return {"ok": False, "error": "Use a non-root SSH account with Docker access for Sandbox isolation."}
+        # Root SSH is common on VPS providers. Keep the host-side connection
+        # usable, but run the workload and dependency installer unprivileged.
+        runtime_uid, runtime_gid = (65532, 65532) if uid == 0 else (uid, gid)
         run_remote(f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true; rm -rf -- {shlex.quote(remote)}; mkdir -p {shlex.quote(remote)}/.deps {shlex.quote(remote)}/.cipher-runtime-data && chmod 700 {shlex.quote(remote)}")
         for rel, payload in _iter_project_payloads(local_dir):
             dst = posixpath.join(remote, rel)
@@ -283,19 +281,18 @@ def deploy(node: Dict[str, Any], secret: str, bot_id: str, local_dir: str | Path
         else:
             _put_via_exec(node, secret, env_path, env_payload)
             run_remote(f"chmod 600 {shlex.quote(env_path)}")
+        if uid == 0:
+            run_remote(f"chown -R {runtime_uid}:{runtime_gid} {shlex.quote(remote)}")
         lim = limits_for_plan(plan)
-        dep_cmd = _dependency_install_command(remote, runtime, plan, uid, gid)
+        dep_cmd = _dependency_install_command(remote, runtime, plan, runtime_uid, runtime_gid)
         dep_code, _, dep_err = run_remote(dep_cmd, timeout=900)
         if dep_code:
             return {"ok": False, "error": dep_err[-300:] or "Remote dependency installation failed."}
         image_cmd = "node:22-slim node" if runtime == "node" else "python:3.11-slim python"
         network_mode = "bridge" if network else "none"
-        node_modules_mount = (
-            f" -v {shlex.quote(remote+'/.deps/node_modules')}:/app/node_modules:ro"
-            if runtime == "node" else ""
-        )
+        node_modules_env = " -e NODE_PATH=/app/.deps/node_modules" if runtime == "node" else ""
         python_path = " -e PYTHONPATH=/app/.deps" if runtime == "python" else ""
-        cmd = f"docker run -d --rm --name {shlex.quote(container)} --cpus {shlex.quote(lim['cpus'])} --memory {shlex.quote(lim['memory'])} --pids-limit {int(lim['pids'])} --read-only --cap-drop ALL --security-opt no-new-privileges:true --user {uid}:{gid} --network {network_mode} --env-file {shlex.quote(env_path)} -v {shlex.quote(remote)}:/app:ro -v {shlex.quote(remote+'/.deps')}:/app/.deps:ro -v {shlex.quote(remote+'/.cipher-runtime-data')}:/app/.cipher-runtime-data:rw{node_modules_mount} --tmpfs /app/.tmp_run:rw,noexec,nosuid,size=64m,uid={uid},gid={gid} --tmpfs /tmp:rw,noexec,nosuid,size=64m{python_path} -w /app {image_cmd} {shlex.quote(entry)}"
+        cmd = f"docker run -d --rm --name {shlex.quote(container)} --cpus {shlex.quote(lim['cpus'])} --memory {lim['memory']} --pids-limit {int(lim['pids'])} --read-only --cap-drop ALL --security-opt no-new-privileges:true --user {runtime_uid}:{runtime_gid} --network {network_mode} --env-file {shlex.quote(env_path)} -v {shlex.quote(remote)}:/app:ro -v {shlex.quote(remote+'/.deps')}:/app/.deps:ro -v {shlex.quote(remote+'/.cipher-runtime-data')}:/app/.cipher-runtime-data:rw{node_modules_env} --tmpfs /tmp:rw,noexec,nosuid,size=64m{python_path} -w /app {image_cmd} {shlex.quote(entry)}"
         code, out, err = run_remote(cmd)
         if code or not out.strip():
             return {"ok": False, "error": err[-300:] or "Docker startup failed."}

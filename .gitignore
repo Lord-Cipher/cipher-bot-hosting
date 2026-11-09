@@ -3,3 +3,4 @@ cipher_vault.json
 cipher_vault.env
 __pycache__/
 *.pyc
+storage/data/ssh_known_hosts

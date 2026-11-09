@@ -100,7 +100,6 @@ def build_run_command(bot_id: str, workdir: str | Path, entrypoint: str, plan: s
     else:
         node_modules = deps / "node_modules"
         node_modules.mkdir(parents=True, exist_ok=True)
-        cmd += ["-v", f"{node_modules}:/app/node_modules:ro"]
-    cmd += ["--tmpfs", "/app/.tmp_run:rw,noexec,nosuid,size=64m,uid=65532,gid=65532"]
+        cmd += ["-e", "NODE_PATH=/app/.deps/node_modules"]
     cmd += ["-w", "/app", image, executable, str(entry)]
     return cmd

@@ -102,6 +102,63 @@ def load_ssh_private_key(secret: str):
     ) from last_error
 
 
+def _ssh_known_hosts_path() -> Path:
+    """Return the panel-owned host-key pin file used for SSH VPS nodes."""
+    return Path(os.environ.get("CIPHER_SSH_KNOWN_HOSTS", "storage/data/ssh_known_hosts")).expanduser()
+
+
+def connect_ssh(node: Dict[str, Any], secret: str, timeout: int = 10):
+    """Connect to an SSH node and pin its host key on first contact.
+
+    A previously pinned key must still match, so changing a VPS host key fails
+    closed. This replaces the old requirement that every VPS be pre-installed
+    in the panel process user's system known_hosts file.
+    """
+    import paramiko
+
+    if not secret:
+        raise ValueError("remote credential required")
+    host = node.get("hostname") or node.get("ipv4") or node.get("ipv6")
+    if not host or not node.get("username"):
+        raise ValueError("SSH host and username required")
+    known_hosts = _ssh_known_hosts_path()
+    known_hosts.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        known_hosts.touch(mode=0o600, exist_ok=True)
+        known_hosts.chmod(0o600)
+    except OSError:
+        pass
+    client = paramiko.SSHClient()
+    client.load_system_host_keys()
+    try:
+        client.load_host_keys(str(known_hosts))
+    except (OSError, paramiko.SSHException):
+        pass
+    # AutoAddPolicy only accepts a previously unseen key; Paramiko still
+    # raises BadHostKey when a pinned host presents a different key.
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    kwargs = {
+        "hostname": host, "port": int(node.get("ssh_port", 22)),
+        "username": node["username"], "timeout": timeout,
+        "banner_timeout": timeout, "auth_timeout": timeout,
+    }
+    if node.get("auth_method", "key") == "password":
+        kwargs["password"] = secret
+    else:
+        kwargs["pkey"] = load_ssh_private_key(secret)
+    try:
+        client.connect(**kwargs)
+        try:
+            client.save_host_keys(str(known_hosts))
+            known_hosts.chmod(0o600)
+        except OSError:
+            pass
+        return client
+    except Exception:
+        client.close()
+        raise
+
+
 def local_capabilities() -> Dict[str, Any]:
     usage = shutil.disk_usage(Path.cwd())
     return {
@@ -153,23 +210,22 @@ def test_ssh_node(node: Dict[str, Any], secret: str, timeout: int = 8) -> Dict[s
         return {"state": "NEEDS CREDENTIALS", "reason": "SSH host and username required"}
     if not secret:
         return {"state": "NEEDS CREDENTIALS", "reason": "Encrypted SSH credential required"}
-    client = paramiko.SSHClient()
+    client = None
     try:
-        client.load_system_host_keys()
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        kwargs = {"hostname": host, "port": int(node.get("ssh_port", 22)), "username": node["username"], "timeout": timeout, "banner_timeout": timeout, "auth_timeout": timeout}
-        if node.get("auth_method", "key") == "password":
-            kwargs["password"] = secret
-        else:
-            try:
-                key = load_ssh_private_key(secret)
-            except Exception as exc:
+        try:
+            client = connect_ssh(node, secret, timeout=timeout)
+        except ValueError as exc:
+            return {"state": "NEEDS CREDENTIALS", "reason": str(exc)}
+        except Exception as exc:
+            if node.get("auth_method", "key") != "password" and "key" in str(exc).lower():
                 return {"state": "NEEDS CREDENTIALS", "reason": f"Invalid private key: {exc}"}
-            kwargs["pkey"] = key
-        client.connect(**kwargs)
-        command = "uname -s; uname -m; getconf _NPROCESSORS_ONLN; awk '/MemTotal/ {print $2}' /proc/meminfo; df -Pk / | tail -1; docker info --format '{{.ServerVersion}}' 2>/dev/null || echo ''; python3 --version 2>/dev/null || echo ''; node --version 2>/dev/null || echo ''; awk '{print $1}' /proc/loadavg; free -b 2>/dev/null | awk '/Mem:/ {print $2, $3, $7}' || true; df -Pk / 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $5}' || true"
+            raise
+        command = "printf '__CIPHER_PROBE_BEGIN__\\n'; uname -s; uname -m; getconf _NPROCESSORS_ONLN; awk '/MemTotal/ {print $2}' /proc/meminfo; df -Pk / | tail -1; docker info --format '{{.ServerVersion}}' 2>/dev/null || echo ''; python3 --version 2>/dev/null || echo ''; node --version 2>/dev/null || echo ''; awk '{print $1}' /proc/loadavg; free -b 2>/dev/null | awk '/Mem:/ {print $2, $3, $7}' || true; df -Pk / 2>/dev/null | awk 'NR==2 {gsub(/%/, \"\", $5); print $5}' || true; printf '__CIPHER_PROBE_END__\\n'"
         _, stdout, _ = client.exec_command(command, timeout=timeout)
-        lines = [line.strip() for line in stdout.read().decode("utf-8", "replace").splitlines()]
+        raw = stdout.read().decode("utf-8", "replace")
+        if "__CIPHER_PROBE_BEGIN__" in raw and "__CIPHER_PROBE_END__" in raw:
+            raw = raw.split("__CIPHER_PROBE_BEGIN__", 1)[1].split("__CIPHER_PROBE_END__", 1)[0]
+        lines = [line.strip() for line in raw.strip().splitlines()]
         docker_version = lines[5] if len(lines) > 5 else ""
         caps = {"os": lines[0] if len(lines)>0 else "", "architecture": lines[1] if len(lines)>1 else "", "cpuCores": lines[2] if len(lines)>2 else "", "ramKb": lines[3] if len(lines)>3 else "", "disk": lines[4] if len(lines)>4 else "", "docker": bool(docker_version), "dockerVersion": docker_version, "python": lines[6] if len(lines)>6 else "", "node": lines[7] if len(lines)>7 else ""}
         if len(lines) > 8:
@@ -197,7 +253,8 @@ def test_ssh_node(node: Dict[str, Any], secret: str, timeout: int = 8) -> Dict[s
     except (paramiko.SSHException, OSError, socket.timeout) as exc:
         return {"state": "OFFLINE", "reason": str(exc)[:160]}
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 def test_node(node: Dict[str, Any], timeout: int = 5, secret: str = "") -> Dict[str, Any]:

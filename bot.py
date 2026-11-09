@@ -5918,7 +5918,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
     if data == "adm_node_add":
         if not admin_only_call(call, "full_access"): return
         USER_STATES[call.from_user.id] = {"flow": "await_adm_node_add"}
-        bot.send_message(call.message.chat.id, "Send node JSON as a regular text message or attach a .json file. Include name, connection_type, provider, hostname/IP, port, username, and auth_method. Do not include passwords or private keys; save those later through Credentials.")
+        bot.send_message(call.message.chat.id, "Send node JSON as a regular text message or attach a .json file. Include name, connection_type, hostname/IP, port, username, and auth_method. Provider metadata is optional and is not used for SSH connection decisions. Do not include passwords or private keys; save those later through Credentials.")
         ack(call)
         return
     if data.startswith("adm_node_test:"):
@@ -20715,7 +20715,6 @@ def action_adm_vps_wizard_auth(call: types.CallbackQuery, auth_method: str) -> N
         ack(call, "VPS wizard expired. Start again.", show_alert=True)
         return
     fields = {
-        "provider": "self-hosted",
         "username": values["username"],
         "ssh_port": int(values.get("ssh_port", 22)),
         "auth_method": auth_method,
