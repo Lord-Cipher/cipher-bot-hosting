@@ -2940,6 +2940,8 @@ def confirm_kb(yes_cb: str, no_cb: str = "menu_main", yes_label: str = "Confirm"
     )
     return kb
 RUNNING: Dict[str, Dict[str, Any]] = {}    # bot_id -> {proc, kind, started, log, ...}
+RECOVERY_PASSWORD_MIN = 10
+RECOVERY_PASSWORD_MAX = 15
 RECOVERY_PASSPHRASE_RUNTIME = ""  # set by the owner in Admin; never written to disk
 START_TIME: float = time.time()            # panel boot time, for uptime card
 _LOCK_FH_KEEPALIVE: Any = None             # singleton-lock fd, kept alive for the process lifetime
@@ -7259,7 +7261,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         bot.send_message(
             call.message.chat.id,
             f"<b>🔑 {sc('Set Recovery Password')}</b>\n{G['div']}\n"
-            f"{sc('Send a password of at least 12 characters. It is kept only in this panel process and is never displayed or written to the database.')}\n"
+            f"{sc('Send a password from 10 to 15 characters. It is kept only in this panel process and is never displayed or written to the database.')}\n"
             f"{sc('The same password protects Full Recovery files and new GitHub Vault snapshots. Use it on the new Telegram account before restoring either one.')}",
             parse_mode="HTML", protect_content=True,
         )
@@ -11267,8 +11269,8 @@ def on_text(m: types.Message) -> None:
             USER_STATES.pop(uid, None)
             return
         password = text
-        if len(password) < 12:
-            bot.reply_to(m, "Recovery password must be at least 12 characters. Nothing was saved.")
+        if not RECOVERY_PASSWORD_MIN <= len(password) <= RECOVERY_PASSWORD_MAX:
+            bot.reply_to(m, f"Recovery password must be between {RECOVERY_PASSWORD_MIN} and {RECOVERY_PASSWORD_MAX} characters. Nothing was saved.")
             return
         try:
             global RECOVERY_PASSPHRASE_RUNTIME
@@ -14829,7 +14831,7 @@ def _portable_recovery_passphrase() -> str:
     configured = _recovery_secret_value()
     if len(configured) < 12:
         raise RuntimeError(
-            "Set the Recovery Password in Admin → Import / Export (at least 12 characters) before exporting or importing recovery. "
+            f"Set the Recovery Password in Admin → Import / Export ({RECOVERY_PASSWORD_MIN}–{RECOVERY_PASSWORD_MAX} characters) before exporting or importing recovery. "
             "The same password is used across bot-token rotation and migrations."
         )
     return configured
@@ -15797,7 +15799,7 @@ def _recovery_secret_value() -> str:
 def _recovery_vault_key() -> str:
     """Derive the stable GitHub snapshot key from the recovery password."""
     password = _recovery_secret_value()
-    if len(password) < 12:
+    if not RECOVERY_PASSWORD_MIN <= len(password) <= RECOVERY_PASSWORD_MAX:
         return ""
     derived = hashlib.pbkdf2_hmac(
         "sha256", password.encode("utf-8"), b"cipher-github-vault-key-v1", 600_000, 32,

@@ -127,7 +127,7 @@ healthy worker. If no worker is available, a deployment can wait in the queue
 until capacity returns. Explicit node assignments remain authoritative.
 
 For a full migration or clean rebuild, use **Admin → Import/Export → Set
-Recovery Password** to choose a stable password of at least 12 characters
+Recovery Password** to choose a stable password from 10 to 15 characters
 before exporting **Full Recovery**. Import the resulting `.cipher-backup` after
 deployment by setting the same password in the new panel; it restores the database, settings,
 encrypted key caches, bot files, and sandbox files. The passphrase is

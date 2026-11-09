@@ -34,6 +34,8 @@ VAULT_SYNC_LOCK = threading.Lock()
 REQUIRED_STATE_DIRS = ("storage", "sandbox")
 PORTABLE_FORMAT = "cipher-portable-backup-v1"
 PORTABLE_KDF_ITERATIONS = 390000
+RECOVERY_PASSWORD_MIN = 10
+RECOVERY_PASSWORD_MAX = 15
 
 
 def _safe_rel(path: Path, root: Path) -> str:
@@ -73,8 +75,8 @@ def _archive(base_dir: Path) -> tuple[bytes, Dict[str, Any]]:
 
 
 def _portable_key(passphrase: str, salt: bytes) -> bytes:
-    if not isinstance(passphrase, str) or len(passphrase) < 12:
-        raise ValueError("Recovery passphrase must be at least 12 characters.")
+    if not isinstance(passphrase, str) or not RECOVERY_PASSWORD_MIN <= len(passphrase) <= RECOVERY_PASSWORD_MAX:
+        raise ValueError(f"Recovery passphrase must be between {RECOVERY_PASSWORD_MIN} and {RECOVERY_PASSWORD_MAX} characters.")
     return base64.urlsafe_b64encode(PBKDF2HMAC(
         algorithm=hashes.SHA256(), length=32, salt=salt,
         iterations=PORTABLE_KDF_ITERATIONS,

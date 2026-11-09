@@ -107,7 +107,7 @@ automatically placed bots prefer the healthy worker with the lowest measured
 resource pressure. An explicit bot-to-node assignment remains authoritative.
 
 For disaster recovery, use **Admin → Import / Export → Set Recovery Password**
-and choose a stable password of at least 12 characters before selecting **Full
+and choose a stable password from 10 to 15 characters before selecting **Full
 Recovery**. The `.cipher-backup` bundle is passphrase-protected and
 contains the database, settings, encrypted key caches, uploaded bot state, and
 sandbox state. Import it with **Import Recovery** after a clean deployment to
