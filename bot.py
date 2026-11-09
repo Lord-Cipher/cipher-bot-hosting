@@ -10319,6 +10319,7 @@ def render_adm_import_export(call: types.CallbackQuery) -> None:
         f"{bullet('Database File',  fmt_bytes(db_size))}\n"
         f"{G['div']}\n"
         f"{sc('Full Recovery exports encrypted storage, sandbox, database, settings, and key caches for disaster recovery. ')}\n"
+        f"{sc('Set CIPHER_RECOVERY_PASSPHRASE to a stable secret before exporting so recovery survives bot-token rotation or migration to a new Telegram account.')}\n"
         f"{sc('Import: upload a previously exported config to restore settings. ')}\n"
         f"{sc('User Export: CSV of all users.')}{FOOTER}"
     )
@@ -10393,7 +10394,7 @@ def action_adm_export_recovery(call: types.CallbackQuery) -> None:
             import io
             fname = f"cipher_recovery_{now_utc().strftime('%Y%m%d_%H%M%S')}.cipher-backup"
             bot.send_document(call.message.chat.id, (fname, io.BytesIO(data)),
-                              caption=f"<b>🧳 Complete Cipher Recovery</b>\n{bullet('Size', fmt_bytes(len(data)))}\nKeep this file with the same bot token/owner identity, or set CIPHER_RECOVERY_PASSPHRASE before importing.",
+                              caption=f"<b>🧳 Complete Cipher Recovery</b>\n{bullet('Size', fmt_bytes(len(data)))}\nThis bundle uses CIPHER_RECOVERY_PASSPHRASE. Keep that secret separately; it remains valid after changing the bot token or Telegram account.",
                               parse_mode="HTML")
             audit(call.from_user.id, "export_portable_recovery", f"size={len(data)}")
         except Exception as exc:
@@ -14779,11 +14780,14 @@ def _export_full_db():
     return _json.dumps(payload, indent=2, default=str).encode("utf-8")
 
 def _portable_recovery_passphrase() -> str:
-    """Return the stable secret used by the one-file recovery bundle."""
+    """Return the administrator-managed secret used by recovery bundles."""
     configured = str(os.getenv("CIPHER_RECOVERY_PASSPHRASE", "") or "").strip()
-    if len(configured) >= 12:
-        return configured
-    return f"{TOKEN}|{OWNER_ID}|cipher-portable-recovery"
+    if len(configured) < 12:
+        raise RuntimeError(
+            "Set CIPHER_RECOVERY_PASSPHRASE (at least 12 characters) before exporting or importing recovery. "
+            "It must remain the same across bot-token rotation and migrations."
+        )
+    return configured
 
 def _import_full_db(data):
     import json as _json

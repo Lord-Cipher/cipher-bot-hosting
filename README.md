@@ -106,15 +106,20 @@ colored bars. **Refresh All Metrics** probes every enabled worker, while new
 automatically placed bots prefer the healthy worker with the lowest measured
 resource pressure. An explicit bot-to-node assignment remains authoritative.
 
-For disaster recovery, use **Admin → Import / Export → Full Recovery**. The
-`.cipher-backup` bundle is passphrase-protected and contains the database,
-settings, encrypted key caches, uploaded bot state, and sandbox state. Import
-it with **Import Recovery** after a clean deployment to restore the panel as it
-was. By default the recovery secret is derived from the same bot token and
-owner identity; for migration to a different identity, set the same
-`CIPHER_RECOVERY_PASSPHRASE` (at least 12 characters) on both installations.
-Cipher Vault GitHub snapshots now use the expanded v2 recovery manifest and
-continue to capture the same state automatically.
+For disaster recovery, use **Admin → Import / Export → Full Recovery**. Before
+exporting, set a stable administrator-managed `CIPHER_RECOVERY_PASSPHRASE` of
+at least 12 characters. The `.cipher-backup` bundle is passphrase-protected and
+contains the database, settings, encrypted key caches, uploaded bot state, and
+sandbox state. Import it with **Import Recovery** after a clean deployment to
+restore the panel as it was. The recovery secret is independent of `BOT_TOKEN`
+and `OWNER_ID`, so rotating the bot token or moving to a new Telegram account
+does not invalidate new bundles. Keep the passphrase in a password manager;
+without it, an encrypted bundle cannot be opened.
+
+For GitHub Vault snapshots, preserve the same `CIPHER_VAULT_KEY` during a
+migration, or first restore a Full Recovery bundle containing the encrypted key
+cache. `CIPHER_RECOVERY_PASSPHRASE` protects portable Full Recovery bundles; it
+does not replace the GitHub token or Vault encryption key.
 
 After an SSH VPS is registered and its host key and credentials are saved, the
 owner can open **Admin → Infrastructure Nodes**, select the node, and press
