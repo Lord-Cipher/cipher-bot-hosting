@@ -116,12 +116,14 @@ and `OWNER_ID`, so rotating the bot token or moving to a new Telegram account
 does not invalidate new bundles. Keep the passphrase in a password manager;
 without it, an encrypted bundle cannot be opened.
 
-The optional `CIPHER_RECOVERY_PASSPHRASE` environment variable can still
-provide the password for automated deployments, but normal users do not need
-to edit environment variables. For GitHub Vault snapshots, preserve the same `CIPHER_VAULT_KEY` during a
-migration, or first restore a Full Recovery bundle containing the encrypted key
-cache. `CIPHER_RECOVERY_PASSPHRASE` protects portable Full Recovery bundles; it
-does not replace the GitHub token or Vault encryption key.
+New GitHub Vault snapshots use the same Admin-panel Recovery Password for
+encryption. The GitHub token is used only for repository access. Set the same
+Recovery Password in the new panel, configure the GitHub repository/token, and
+restore snapshots without needing the old Telegram bot token. Existing legacy
+snapshots made before password mode was enabled still require their original
+`CIPHER_VAULT_KEY` or an earlier Full Recovery restore. The optional
+`CIPHER_RECOVERY_PASSPHRASE` environment variable can provide the same password
+for automated deployments.
 
 After an SSH VPS is registered and its host key and credentials are saved, the
 owner can open **Admin → Infrastructure Nodes**, select the node, and press

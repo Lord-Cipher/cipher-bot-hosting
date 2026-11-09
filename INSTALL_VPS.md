@@ -137,9 +137,10 @@ bundles. Store it separately in a password manager; it cannot be recovered from
 the backup file.
 
 The optional `CIPHER_RECOVERY_PASSPHRASE` environment variable can be used for
-automated deployments instead of the Admin-panel flow. For GitHub Vault snapshots, also preserve `CIPHER_VAULT_KEY`, or restore a Full
-Recovery bundle first so its encrypted key cache is restored before importing
-GitHub snapshots.
+automated deployments instead of the Admin-panel flow. New GitHub Vault
+snapshots use the same Recovery Password for encryption, while the GitHub token
+is used only for repository access. Existing legacy snapshots still require
+their original `CIPHER_VAULT_KEY` or a restored Full Recovery key cache.
 
 ### 1. Prepare the worker VPS
 

@@ -7260,7 +7260,7 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             call.message.chat.id,
             f"<b>🔑 {sc('Set Recovery Password')}</b>\n{G['div']}\n"
             f"{sc('Send a password of at least 12 characters. It is kept only in this panel process and is never displayed or written to the database.')}\n"
-            f"{sc('Use the same password on the new Telegram account before importing the .cipher-backup file.')}",
+            f"{sc('The same password protects Full Recovery files and new GitHub Vault snapshots. Use it on the new Telegram account before restoring either one.')}",
             parse_mode="HTML", protect_content=True,
         )
         return
@@ -11167,6 +11167,7 @@ def on_document(m: types.Message) -> None:
             return
         global RECOVERY_PASSPHRASE_RUNTIME
         RECOVERY_PASSPHRASE_RUNTIME = password
+        set_setting("github_recovery_password_mode", True)
         try:
             bot.delete_message(m.chat.id, m.message_id)
         except Exception:
@@ -14816,7 +14817,7 @@ def _export_full_db():
 
 def _portable_recovery_passphrase() -> str:
     """Return the administrator-managed secret used by recovery bundles."""
-    configured = str(RECOVERY_PASSPHRASE_RUNTIME or os.getenv("CIPHER_RECOVERY_PASSPHRASE", "") or "").strip()
+    configured = _recovery_secret_value()
     if len(configured) < 12:
         raise RuntimeError(
             "Set the Recovery Password in Admin → Import / Export (at least 12 characters) before exporting or importing recovery. "
@@ -15779,6 +15780,22 @@ def _vault_runtime_key() -> str:
         return ""
 
 
+def _recovery_secret_value() -> str:
+    """Return the current Admin-panel or environment recovery password."""
+    return str(RECOVERY_PASSPHRASE_RUNTIME or os.getenv("CIPHER_RECOVERY_PASSPHRASE", "") or "").strip()
+
+
+def _recovery_vault_key() -> str:
+    """Derive the stable GitHub snapshot key from the recovery password."""
+    password = _recovery_secret_value()
+    if len(password) < 12:
+        return ""
+    derived = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), b"cipher-github-vault-key-v1", 600_000, 32,
+    )
+    return base64.urlsafe_b64encode(derived).decode("ascii")
+
+
 def _ensure_vault_runtime_key() -> str:
   """Create a persistent encrypted vault key when the panel manages the vault."""
   current = _vault_runtime_key()
@@ -15867,8 +15884,13 @@ def _vault_config() -> Dict[str, str]:
         repo = repo[:-4]
     runtime_token = _vault_runtime_token()
     token = runtime_token or value("CIPHER_VAULT_TOKEN") or os.getenv("GITHUB_TOKEN", "").strip()
-    key = value("CIPHER_VAULT_KEY") or _vault_runtime_key()
-    if token and repo and not key:
+    password_mode = bool(get_setting("github_recovery_password_mode", False))
+    key = value("CIPHER_VAULT_KEY")
+    if not key and (password_mode or _recovery_secret_value()):
+        key = _recovery_vault_key()
+    if not key and not password_mode:
+        key = _vault_runtime_key()
+    if token and repo and not key and not password_mode:
         key = _ensure_vault_runtime_key()
 
     return {
