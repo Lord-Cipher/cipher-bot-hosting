@@ -341,7 +341,7 @@ def bootstrap_docker_worker(node: Dict[str, Any], secret: str, pull_images: bool
     pulls only the pinned runtime image tags used by this project. The caller
     must be an authorized administrator.
     """
-    pull_cmd = "root_cmd docker pull node:22-slim\nroot_cmd docker pull python:3.11-slim" if pull_images else ":"
+    pull_cmd = "docker_retry node:22-slim\ndocker_retry python:3.11-slim" if pull_images else ":"
     script = r'''set -eu
 root_cmd() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -365,6 +365,18 @@ if ! command -v docker >/dev/null 2>&1; then
     echo "ERROR: unsupported Linux package manager (need apt-get, dnf, or yum)" >&2; exit 21
   fi
 fi
+docker_retry() {
+  image="$1"
+  attempt=1
+  while [ "$attempt" -le 4 ]; do
+    echo "CIPHER_DOCKER_PULL image=$image attempt=$attempt"
+    if root_cmd docker pull "$image"; then return 0; fi
+    if [ "$attempt" -lt 4 ]; then sleep $((attempt * 5)); fi
+    attempt=$((attempt + 1))
+  done
+  echo "ERROR: Docker Hub pull failed after 4 attempts: $image" >&2
+  return 1
+}
 if command -v systemctl >/dev/null 2>&1; then
   root_cmd systemctl enable --now docker
 elif command -v service >/dev/null 2>&1; then
