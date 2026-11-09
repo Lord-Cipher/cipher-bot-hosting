@@ -249,7 +249,8 @@ def test_ssh_node(node: Dict[str, Any], secret: str, timeout: int = 8) -> Dict[s
             pass
         return {"state": "AUTHENTICATED", "capabilities": caps}
     except (paramiko.AuthenticationException, paramiko.BadAuthenticationType):
-        return {"state": "AUTHENTICATION FAILED", "reason": "SSH authentication failed"}
+        method = "password" if node.get("auth_method", "key") == "password" else "private key"
+        return {"state": "AUTHENTICATION FAILED", "reason": f"SSH {method} authentication failed; verify the username, port, and credential."}
     except (paramiko.SSHException, OSError, socket.timeout) as exc:
         return {"state": "OFFLINE", "reason": str(exc)[:160]}
     finally:

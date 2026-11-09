@@ -11387,9 +11387,15 @@ def on_text(m: types.Message) -> None:
                 return
             store = _node_credentials()
             if not store:
-                bot.reply_to(m, "Credential encryption is not configured.")
+                bot.reply_to(m, "VPS credential encryption could not be initialized. Check that the panel storage directory is writable and retry.")
                 return
-            store.put(node_id, secret)
+            try:
+                store.put(node_id, secret)
+                if store.get(node_id) != secret:
+                    raise RuntimeError("credential verification failed")
+            except Exception as exc:
+                bot.reply_to(m, f"VPS credential save failed: {esc(str(exc)[:180])}", parse_mode="HTML")
+                return
             nodes = _nodes_load()
             if node_id in nodes:
                 nodes[node_id]["secret_ref"] = "encrypted"
@@ -20531,9 +20537,39 @@ def _nodes_load() -> Dict[str, Any]:
     return dict(db_load().get("nodes", {}) or {})
 def _nodes_save(nodes: Dict[str, Any]) -> None:
     db = db_load(); db["nodes"] = nodes; db_save(db)
+def _node_credential_key() -> str:
+    """Return the independent Fernet key used for VPS credentials.
+
+    VPS passwords must not depend on Cipher Vault/GitHub being configured.
+    The key itself is kept in the panel keyring, while only its key ID is
+    stored in panel settings.
+    """
+    key_id = str(get_setting("node_credentials_key_id", "") or "")
+    if key_id:
+        stored = KEYRING.fetch(key_id)
+        if stored:
+            try:
+                Fernet(stored)
+                return stored.decode("ascii")
+            except Exception:
+                pass
+
+    # Preserve credentials created by older builds that reused the vault key,
+    # then migrate that key into the dedicated keyring slot.
+    legacy_key = str(_vault_config().get("key", "") or "")
+    try:
+        candidate = legacy_key.encode("ascii") if legacy_key else KEYRING.new_key()
+        Fernet(candidate)
+    except Exception:
+        candidate = KEYRING.new_key()
+    new_id = secrets.token_urlsafe(16)
+    if not KEYRING.store(new_id, candidate, {"purpose": "node_credentials"}):
+        return ""
+    set_setting("node_credentials_key_id", new_id)
+    return candidate.decode("ascii")
 def _node_credentials() -> Optional[CredentialStore]:
     try:
-        key = _vault_config().get("key", "")
+        key = _node_credential_key()
         return CredentialStore(BASE_DIR / "storage" / "node_credentials.json", key) if key else None
     except Exception:
         return None
