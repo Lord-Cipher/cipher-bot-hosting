@@ -2940,6 +2940,7 @@ def confirm_kb(yes_cb: str, no_cb: str = "menu_main", yes_label: str = "Confirm"
     )
     return kb
 RUNNING: Dict[str, Dict[str, Any]] = {}    # bot_id -> {proc, kind, started, log, ...}
+RECOVERY_PASSPHRASE_RUNTIME = ""  # set by the owner in Admin; never written to disk
 START_TIME: float = time.time()            # panel boot time, for uptime card
 _LOCK_FH_KEEPALIVE: Any = None             # singleton-lock fd, kept alive for the process lifetime
 _runner_lock = threading.Lock()
@@ -7251,6 +7252,18 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             f"{G['warn']} {sc('This replaces storage and sandbox state with the encrypted backup')} .\n"
             f"{sc('Send the .cipher-backup file now, or')} /cancel.", parse_mode="HTML")
         return
+    if data == "adm_recovery_password":
+        if not is_owner(call.from_user.id):
+            ack(call, "Owner only"); return
+        USER_STATES[call.from_user.id] = {"flow": "await_recovery_password"}
+        bot.send_message(
+            call.message.chat.id,
+            f"<b>🔑 {sc('Set Recovery Password')}</b>\n{G['div']}\n"
+            f"{sc('Send a password of at least 12 characters. It is kept only in this panel process and is never displayed or written to the database.')}\n"
+            f"{sc('Use the same password on the new Telegram account before importing the .cipher-backup file.')}",
+            parse_mode="HTML", protect_content=True,
+        )
+        return
     if data == "adm_import_reset":
         if not is_owner(call.from_user.id): ack(call, "Owner only"); return
         USER_STATES[call.from_user.id] = {"flow": "await_adm_factory_reset"}
@@ -10319,7 +10332,7 @@ def render_adm_import_export(call: types.CallbackQuery) -> None:
         f"{bullet('Database File',  fmt_bytes(db_size))}\n"
         f"{G['div']}\n"
         f"{sc('Full Recovery exports encrypted storage, sandbox, database, settings, and key caches for disaster recovery. ')}\n"
-        f"{sc('Set CIPHER_RECOVERY_PASSPHRASE to a stable secret before exporting so recovery survives bot-token rotation or migration to a new Telegram account.')}\n"
+        f"{sc('Set the recovery password below before exporting or importing. It is independent of the bot token and Telegram account.')}\n"
         f"{sc('Import: upload a previously exported config to restore settings. ')}\n"
         f"{sc('User Export: CSV of all users.')}{FOOTER}"
     )
@@ -10332,6 +10345,11 @@ def render_adm_import_export(call: types.CallbackQuery) -> None:
         Btn("🧳  Fᴜʟʟ Rᴇᴄᴏᴠᴇʀʏ", callback_data="adm_export_recovery", style="success"),
         Btn("♻️  Iᴍᴘᴏʀᴛ Rᴇᴄᴏᴠᴇʀʏ", callback_data="adm_import_recovery", style="danger"),
     )
+    kb.add(Btn(
+        "🔑  Recovery Password: SET" if RECOVERY_PASSPHRASE_RUNTIME else "🔑  Set Recovery Password",
+        callback_data="adm_recovery_password",
+        style="success" if RECOVERY_PASSPHRASE_RUNTIME else "primary",
+    ))
     kb.add(
         Btn("👥  Exᴘᴏʀᴛ Uꜱᴇʀꜱ CSV",callback_data="adm_user_export_csv", style="primary"),
         Btn("🗄️  Fᴏʀᴄᴇ Bᴀᴄᴋᴜᴘ",   callback_data="adm_force_backup",    style="primary"),
@@ -11138,6 +11156,23 @@ def on_document(m: types.Message) -> None:
             bot.reply_to(m, f"{G['ok']} {esc(msg)}", parse_mode="HTML")
         else:
             bot.reply_to(m, f"{G['no']} {sc('Import failed')}: <code>{esc(msg)}</code>", parse_mode="HTML")
+        return
+    if st.get("flow") == "await_recovery_password":
+        USER_STATES.pop(uid, None)
+        if not is_owner(uid):
+            return
+        password = str(m.text or "").strip()
+        if len(password) < 12:
+            bot.reply_to(m, "Recovery password must be at least 12 characters. Nothing was saved.")
+            return
+        global RECOVERY_PASSPHRASE_RUNTIME
+        RECOVERY_PASSPHRASE_RUNTIME = password
+        try:
+            bot.delete_message(m.chat.id, m.message_id)
+        except Exception:
+            pass
+        bot.send_message(m.chat.id, "Recovery password set for this panel session. Keep it safe; it is required on the replacement account.", protect_content=True)
+        audit(uid, "recovery_password_set", "runtime_only")
         return
     if st.get("flow") == "await_import_recovery":
         USER_STATES.pop(uid, None)
@@ -14781,11 +14816,11 @@ def _export_full_db():
 
 def _portable_recovery_passphrase() -> str:
     """Return the administrator-managed secret used by recovery bundles."""
-    configured = str(os.getenv("CIPHER_RECOVERY_PASSPHRASE", "") or "").strip()
+    configured = str(RECOVERY_PASSPHRASE_RUNTIME or os.getenv("CIPHER_RECOVERY_PASSPHRASE", "") or "").strip()
     if len(configured) < 12:
         raise RuntimeError(
-            "Set CIPHER_RECOVERY_PASSPHRASE (at least 12 characters) before exporting or importing recovery. "
-            "It must remain the same across bot-token rotation and migrations."
+            "Set the Recovery Password in Admin → Import / Export (at least 12 characters) before exporting or importing recovery. "
+            "The same password is used across bot-token rotation and migrations."
         )
     return configured
 

@@ -126,17 +126,18 @@ If an automatically assigned worker goes offline, the bot tries another
 healthy worker. If no worker is available, a deployment can wait in the queue
 until capacity returns. Explicit node assignments remain authoritative.
 
-For a full migration or clean rebuild, set a stable
-`CIPHER_RECOVERY_PASSPHRASE` (at least 12 characters) before exporting **Full
-Recovery** from the Import/Export panel. Import the resulting `.cipher-backup`
-after deployment with the same passphrase; it restores the database, settings,
+For a full migration or clean rebuild, use **Admin → Import/Export → Set
+Recovery Password** to choose a stable password of at least 12 characters
+before exporting **Full Recovery**. Import the resulting `.cipher-backup` after
+deployment by setting the same password in the new panel; it restores the database, settings,
 encrypted key caches, bot files, and sandbox files. The passphrase is
 independent of the Telegram bot token and owner ID, so token rotation, a frozen
 Telegram account, or migration to a new bot account does not invalidate new
 bundles. Store it separately in a password manager; it cannot be recovered from
 the backup file.
 
-For GitHub Vault snapshots, also preserve `CIPHER_VAULT_KEY`, or restore a Full
+The optional `CIPHER_RECOVERY_PASSPHRASE` environment variable can be used for
+automated deployments instead of the Admin-panel flow. For GitHub Vault snapshots, also preserve `CIPHER_VAULT_KEY`, or restore a Full
 Recovery bundle first so its encrypted key cache is restored before importing
 GitHub snapshots.
 

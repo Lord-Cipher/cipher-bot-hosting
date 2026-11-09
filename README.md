@@ -106,9 +106,9 @@ colored bars. **Refresh All Metrics** probes every enabled worker, while new
 automatically placed bots prefer the healthy worker with the lowest measured
 resource pressure. An explicit bot-to-node assignment remains authoritative.
 
-For disaster recovery, use **Admin → Import / Export → Full Recovery**. Before
-exporting, set a stable administrator-managed `CIPHER_RECOVERY_PASSPHRASE` of
-at least 12 characters. The `.cipher-backup` bundle is passphrase-protected and
+For disaster recovery, use **Admin → Import / Export → Set Recovery Password**
+and choose a stable password of at least 12 characters before selecting **Full
+Recovery**. The `.cipher-backup` bundle is passphrase-protected and
 contains the database, settings, encrypted key caches, uploaded bot state, and
 sandbox state. Import it with **Import Recovery** after a clean deployment to
 restore the panel as it was. The recovery secret is independent of `BOT_TOKEN`
@@ -116,7 +116,9 @@ and `OWNER_ID`, so rotating the bot token or moving to a new Telegram account
 does not invalidate new bundles. Keep the passphrase in a password manager;
 without it, an encrypted bundle cannot be opened.
 
-For GitHub Vault snapshots, preserve the same `CIPHER_VAULT_KEY` during a
+The optional `CIPHER_RECOVERY_PASSPHRASE` environment variable can still
+provide the password for automated deployments, but normal users do not need
+to edit environment variables. For GitHub Vault snapshots, preserve the same `CIPHER_VAULT_KEY` during a
 migration, or first restore a Full Recovery bundle containing the encrypted key
 cache. `CIPHER_RECOVERY_PASSPHRASE` protects portable Full Recovery bundles; it
 does not replace the GitHub token or Vault encryption key.
