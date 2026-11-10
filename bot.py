@@ -13645,15 +13645,20 @@ def _handle_bot_upload(m: types.Message) -> None:
         while not _scan_heartbeat_stop.wait(1.0):
             with _scan_progress_lock:
                 current = _scan_last_edit[1]
-            if 0 <= current < 95:
-                _scan_progress(min(95, current + 1), "AI analysis in progress...")
+            if 0 <= current < 74:
+                _scan_progress(min(74, current + 1), "AI analysis in progress...")
+
+    def _security_progress(pct: int, status: str) -> None:
+        # Reserve the final 25% for encryption and actual service startup.
+        # This prevents the security phase from reaching 100% prematurely.
+        _scan_progress(int(max(0, min(100, pct)) * 0.75), status)
 
     threading.Thread(target=_scan_heartbeat, name="scan-progress", daemon=True).start()
     try:
-        scan = _run_security_scan(files_added, uploader_uid=m.from_user.id, progress_cb=_scan_progress)
+        scan = _run_security_scan(files_added, uploader_uid=m.from_user.id, progress_cb=_security_progress)
     finally:
         _scan_heartbeat_stop.set()
-    _scan_progress(100, "Security verdict ready")
+    _scan_progress(78, "Security verdict ready")
     recommend = scan.get("recommendation", "APPROVE")
     risk      = scan.get("risk_score", 0)
     verdict   = scan.get("verdict", "SAFE")
