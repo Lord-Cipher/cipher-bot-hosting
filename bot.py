@@ -13654,10 +13654,6 @@ def _handle_bot_upload(m: types.Message) -> None:
     finally:
         _scan_heartbeat_stop.set()
     _scan_progress(100, "Security verdict ready")
-    # Telegram edits are asynchronous from the user's perspective. Keep the
-    # completed state visible briefly so the bar cannot appear to jump from a
-    # throttled intermediate value straight to a deleted message.
-    time.sleep(0.75)
     recommend = scan.get("recommendation", "APPROVE")
     risk      = scan.get("risk_score", 0)
     verdict   = scan.get("verdict", "SAFE")
@@ -13665,13 +13661,11 @@ def _handle_bot_upload(m: types.Message) -> None:
     threats   = scan.get("all_threats") or []
     decoded_payloads = scan.get("decoded_payloads", [])
 
-    # Delete the "scanning..." notice
-    try:
-        bot.delete_message(m.chat.id, _scan_msg.message_id)
-    except Exception:
-        pass
-
     if recommend == "REJECT":
+        try:
+            bot.delete_message(m.chat.id, _scan_msg.message_id)
+        except Exception:
+            pass
         # Hard block — wipe everything, alert user + admin
         rmrf(bot_dir)
         threat_lines = "\n".join(f"• {esc(t)}" for t in threats[:5])
@@ -13735,6 +13729,10 @@ def _handle_bot_upload(m: types.Message) -> None:
         not is_owner(uid) and not is_admin(uid) and OWNER_ID > 0
     )
     if needs_approval:
+        try:
+            bot.delete_message(m.chat.id, _scan_msg.message_id)
+        except Exception:
+            pass
         doc_db["approval_status"] = "pending"
         doc_db["status"] = "pending_approval"
     elif scan.get("recommendation") == "APPROVE" and not sandbox_on:
@@ -13813,9 +13811,10 @@ def _handle_bot_upload(m: types.Message) -> None:
             f"{status}"
         )
 
-    # Send one message — then keep editing it (avoids spamming)
-    sent   = bot.reply_to(m, _make_bar(0, sc("Starting...")), parse_mode="HTML")
-    msg_id = sent.message_id
+    # Continue editing the scan message instead of creating a second progress
+    # message that jumps back to 0%. Final 100% is reserved for a running bot.
+    _scan_progress(80, sc("Upload secured — preparing startup..."))
+    msg_id = _scan_msg.message_id
     cid    = m.chat.id
 
     def _edit(pct: int, status: str, kind_str: str = "") -> None:
@@ -13835,19 +13834,12 @@ def _handle_bot_upload(m: types.Message) -> None:
     # ── auto-start the freshly uploaded bot ──────────────────────
     def _bg_start(doc: Dict[str, Any]) -> None:
         try:
-            _edit(10, sc("Decrypting files..."))
-            time.sleep(0.8)
-            _edit(30, sc("Installing dependencies..."))
-            time.sleep(0.8)
-            _edit(50, sc("Setting up environment..."))
-            time.sleep(0.8)
-            _edit(70, sc("Launching bot..."))
+            _edit(90, sc("Starting service..."))
             res = start_child(doc)
             if res.get("ok"):
                 _edit(100,
                       f"<b>{G['play']} {sc('Bot is running!')}</b>",
                       res.get("kind", ""))
-                time.sleep(1.5)
                 # delete the loading message
                 try:
                     bot.delete_message(cid, msg_id)
