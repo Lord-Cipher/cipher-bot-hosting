@@ -4101,9 +4101,17 @@ def _stop_tunnel(bot_id: str) -> bool:
         pass
     return True
 def restart_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
-    stop_child(b["_id"], manual=manual)
-    time.sleep(1)
-    return start_child(b, manual=manual)
+    bot_id = str(b.get("_id", ""))
+    if not bot_id:
+        return {"ok": False, "error": "Bot ID is missing."}
+    stopped = stop_child(bot_id, manual=manual)
+    if not stopped.get("ok"):
+        return {"ok": False, "error": f"Could not stop the existing service: {stopped.get('error', 'unknown error')}"}
+    # Remote cleanup and local process-group termination are synchronous, but
+    # reload the record so cleared container IDs/status and recent edits are
+    # not overwritten by a stale callback object.
+    latest = find_bot(bot_id) or b
+    return start_child(latest, manual=manual)
 def child_status(bot_id: str, b_doc: Dict[str, Any]) -> Dict[str, Any]:
     info = RUNNING.get(bot_id)
     running = bool(info and info["proc"].poll() is None)
@@ -18565,9 +18573,25 @@ def action_bot_restart(call: types.CallbackQuery, bot_id: str) -> None:
         ack(call, "Not found / not yours"); return
     loading(call, "Restarting bot")
     def _bg():
-        res = restart_child(b, manual=True)
-        ack(call, "Restarted" if res["ok"] else f"Err: {res.get('error')}")
-        render_bot_view(call, bot_id)
+        try:
+            res = restart_child(b, manual=True)
+            if res.get("ok"):
+                ack(call, "Restarted")
+            else:
+                ack(call, f"Err: {res.get('error', 'restart failed')}", show_alert=True)
+                try:
+                    bot.send_message(call.message.chat.id, f"{G['no']} Restart failed: <code>{esc(res.get('error', 'unknown error'))}</code>", parse_mode="HTML")
+                except Exception:
+                    pass
+            render_bot_view(call, bot_id)
+        except Exception as exc:
+            print(f"[restart] bot={bot_id} error={exc}", file=sys.stderr, flush=True)
+            ack(call, "Restart failed", show_alert=True)
+            try:
+                bot.send_message(call.message.chat.id, f"{G['no']} Restart failed: <code>{esc(str(exc)[:500])}</code>", parse_mode="HTML")
+            except Exception:
+                pass
+            render_bot_view(call, bot_id)
     threading.Thread(target=_bg, daemon=True).start()
 def action_bot_logs(call: types.CallbackQuery, bot_id: str) -> None:
     b = find_bot(bot_id)
