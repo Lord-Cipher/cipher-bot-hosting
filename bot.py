@@ -12262,6 +12262,21 @@ def on_text(m: types.Message) -> None:
             audit(uid, "tg_backup_channel_set", ch)
             bot.reply_to(m, f"{G['ok']} {sc('Backup channel set to')} <code>{esc(ch)}</code>.", parse_mode="HTML")
             return
+        if flow == "await_tg_backup_interval":
+            if not is_owner(uid): USER_STATES.pop(uid, None); return
+            try:
+                interval = int(text)
+            except (TypeError, ValueError):
+                bot.reply_to(m, f"{G['no']} Send a whole number of hours from 1 to 168.")
+                return
+            if not 1 <= interval <= 168:
+                bot.reply_to(m, f"{G['no']} The interval must be from 1 to 168 hours.")
+                return
+            set_setting("tg_backup_interval_h", interval)
+            USER_STATES.pop(uid, None)
+            audit(uid, "tg_full_recovery_interval_set", f"hours={interval}")
+            bot.reply_to(m, f"{G['ok']} Automatic full-recovery interval set to <b>{interval} hour(s)</b>.", parse_mode="HTML")
+            return
         if flow == "await_gh_branch":
             gh_set_config({"branch": text}); gh_load_config()
             USER_STATES.pop(uid, None); bot.reply_to(m, f"{G['ok']} {sc('branch saved')}"); return
@@ -16046,46 +16061,27 @@ def _tg_backup_channel() -> str:
     # destination channel in the admin panel. Never use OWNER_ID as a fallback.
     return str(get_setting("tg_backup_channel", "") or "").strip()
 def tg_channel_backup_now() -> Dict[str, Any]:
-    """Zip the entire DB + settings + bot_data and send to a Telegram channel."""
+    """Export and send the encrypted full-recovery bundle to Telegram."""
     ch = _tg_backup_channel()
     if not ch:
         return {"ok": False, "error": "tg_backup_channel not configured"}
     try:
-        out_dir = BASE_DIR / "exports"
-        out_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        target = out_dir / f"tg_backup_{stamp}.zip"
-        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
-            for name in ("user_data.json", "settings.json", "audit.log", "github_config.json"):
-                p = BASE_DIR / "storage" / name
-                if p.exists():
-                    zf.write(p, arcname=name)
-            bot_data = BASE_DIR / "storage" / "bot_data"
-            if bot_data.exists():
-                for f in bot_data.iterdir():
-                    if f.is_file():
-                        zf.write(f, arcname=f"bot_data/{f.name}")
-            photos_dir = DIRS.get("photos")
-            if photos_dir and photos_dir.exists():
-                for f in photos_dir.iterdir():
-                    if f.is_file() and f.name.startswith("custom_"):
-                        zf.write(f, arcname=f"photos/{f.name}")
-        sz = target.stat().st_size
-        with target.open("rb") as fh:
-            bot.send_document(
-                ch, fh,
-                caption=(
-                    f"<b>\U0001f4be {sc('Telegram Channel Backup')}</b>\n"
-                    f"{bullet('Time', stamp)}\n"
-                    f"{bullet('Size', fmt_bytes(sz))}\n"
-                    f"{bullet('Brand', BRAND_TAG)}"
-                ),
-                parse_mode="HTML",
-                visible_file_name=f"simran_backup_{stamp}.zip",
-            )
-        target.unlink(missing_ok=True)
-        audit(0, "tg_channel_backup", f"channel={ch} size={sz}")
-        return {"ok": True, "size": sz, "channel": ch}
+        data = export_portable_backup(BASE_DIR, _portable_recovery_passphrase())
+        fname = f"cipher_recovery_{stamp}.cipher-backup"
+        bot.send_document(
+            ch, (fname, io.BytesIO(data)),
+            caption=(
+                f"<b>🧳 {sc('Full Cipher Recovery Backup')}</b>\n"
+                f"{bullet('Time', stamp)}\n"
+                f"{bullet('Size', fmt_bytes(len(data)))}\n"
+                f"{bullet('Encryption', 'Recovery password required')}\n"
+                f"{bullet('Brand', BRAND_TAG)}"
+            ),
+            parse_mode="HTML",
+        )
+        audit(0, "tg_channel_full_recovery", f"channel={ch} size={len(data)}")
+        return {"ok": True, "size": len(data), "channel": ch, "filename": fname}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 def tg_channel_restore_latest() -> Dict[str, Any]:
@@ -16108,7 +16104,8 @@ def render_adm_tg_channel_backup(call: types.CallbackQuery) -> None:
         f"{bullet('Interval', f'{auto_interval}h')}\n"
         f"{G['div']}\n"
         f"{sc('Set a channel, add bot as admin, then enable backup.')}.\n"
-        f"{sc('Bot will zip all data and send to the channel')}.{FOOTER}"
+        f"{sc('The bot will send an encrypted full-recovery bundle to the channel')}.\n"
+        f"{sc('Use the same Recovery Password on a replacement account to restore it')}.{FOOTER}"
     )
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -16116,9 +16113,10 @@ def render_adm_tg_channel_backup(call: types.CallbackQuery) -> None:
         Btn("\U0001f4be  B\u1d00\u1d04\u1d0b\u1d1c\u1d18 N\u1d0f\u1d21", callback_data="adm_tg_bkp_now", style="success"),
     )
     kb.add(
-        Btn(f"{'OK' if auto_on else 'OFF'}  A\u1d1c\u1d1b\u1d0f", callback_data="adm_tg_bkp_toggle_auto",
+        Btn(f"{'OK' if auto_on else 'OFF'}  A\u1d1c\u1b1b\u1d0f", callback_data="adm_tg_bkp_toggle_auto",
             style="success" if auto_on else "danger"),
-        Btn("\U0001f4e5  R\u1d07\u02e2\u1d1b\u1d0f\u0280\u1d07", callback_data="adm_tg_bkp_restore", style="danger"),
+        Btn("⏱️  Sᴇᴛ Iɴᴛᴇʀᴠᴀʟ", callback_data="adm_tg_bkp_set_interval", style="primary"),
+        Btn("\U0001f4e5  R\u1d07\u02e2\u1d1bᴏʀᴇ", callback_data="adm_tg_bkp_restore", style="danger"),
     )
     kb.add(Btn(f"{G['back']}  A\u1d05\u1d0d\u026a\u0274", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
@@ -20299,6 +20297,17 @@ def _render_admin_subroute_extras(call: types.CallbackQuery, data: str) -> None:
         bot.send_message(call.message.chat.id,
             f"\U0001f4e1 {sc('Send the channel handle or numeric ID (add bot as admin first)')}.\n"
             f"<code>@MyChannel</code> or <code>-1001234567890</code>", parse_mode="HTML"); return
+    if data == "adm_tg_bkp_set_interval":
+        if not is_owner(uid): ack(call, "Owner only"); return
+        USER_STATES[uid] = {"flow": "await_tg_backup_interval"}
+        current_interval = int(get_setting("tg_backup_interval_h", 6))
+        bot.send_message(
+            call.message.chat.id,
+            f"⏱️ {sc('Send the automatic full-recovery interval in whole hours')} (1–168).\n"
+            f"{bullet('Current', f'{current_interval} hour(s)')}\n/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return
     if data == "adm_tg_bkp_toggle_auto":
         if not is_owner(uid): ack(call, "Owner only"); return
         cur = bool(get_setting("tg_backup_auto", False))
@@ -20307,7 +20316,7 @@ def _render_admin_subroute_extras(call: types.CallbackQuery, data: str) -> None:
         return render_adm_tg_channel_backup(call)
     if data == "adm_tg_bkp_restore":
         ack(call, "See latest zip in channel")
-        bot.send_message(uid, f"\U0001f4e5 {sc('Download the latest backup zip from your channel and upload it manually to restore')}."); return
+        bot.send_message(uid, f"\U0001f4e5 {sc('Download the latest .cipher-backup from your channel, set the same Recovery Password, then use Admin → Import / Export → Import Recovery')}."); return
 
     # Approval group callbacks
     if data == "adm_grpv_toggle":
