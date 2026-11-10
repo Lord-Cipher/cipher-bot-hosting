@@ -1,5 +1,36 @@
 # Deploying on Render
 
+## Recommended setup
+
+Create a **Web Service** from this repository using Render's native **Python**
+runtime. The repository includes [`render.yaml`](render.yaml), so you can use
+**New → Blueprint** and select this repository. For manual setup, use:
+
+```text
+Build Command: pip install -r requirements.txt
+Start Command: python3 bot.py
+Health Check Path: /
+```
+
+Add the following service environment variables. Enter `BOT_TOKEN` and
+`OWNER_ID` as secrets:
+
+```text
+BOT_TOKEN=your Telegram bot token
+OWNER_ID=your numeric Telegram user ID
+FORCE_POLLING=true
+WEBHOOK_ENABLED=false
+PYTHONUNBUFFERED=1
+```
+
+The message `Failed to fetch (api.render.com)` comes from the Render
+Dashboard/API, not from `python3 bot.py`. If it appears before a deploy starts,
+refresh the dashboard, sign in again, temporarily disable a VPN or browser
+extension, and reconnect the GitHub repository. If a deploy has started, open
+**Deploys → Logs**; the first traceback after `python3 bot.py` is the relevant
+application error. Do not enter the start command anywhere except Render's
+**Start Command** field.
+
 Cipher Vault key generation is automatic on Render. Configure `BOT_TOKEN`, `OWNER_ID`, and the private vault repository/token in the service Variables tab. Do not set `CIPHER_VAULT_KEY` for a new installation; the bot generates and stores it in its encrypted keyring.
 
 Render services use an ephemeral filesystem by default. Attach a paid Render persistent disk and mount it at the application storage path. For this Dockerfile, use `/app/storage`. If deploying with Render's native Python runtime, mount the disk at the absolute `storage` path under the service source directory instead. Only files under the disk mount survive deploys and restarts.
