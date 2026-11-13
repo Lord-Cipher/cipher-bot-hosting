@@ -128,6 +128,8 @@ def firebase_backup_now(base_dir: str | Path, passphrase: str) -> Dict[str, Any]
     """Upload one encrypted recovery bundle and atomically publish LATEST.json."""
     if not _configured():
         return {"ok": False, "skipped": True, "error": "Firebase backup is not configured."}
+    if not str(passphrase or "").strip():
+        return {"ok": False, "skipped": True, "error": "Recovery password is not configured."}
     try:
         data = export_portable_backup(base_dir, passphrase)
         digest = hashlib.sha256(data).hexdigest()
@@ -193,14 +195,19 @@ def firebase_auto_loop(base_dir: str | Path, passphrase_getter, interval_seconds
     """Periodic provider loop; failures are logged and leave GitHub available."""
     while True:
         try:
-            time.sleep(max(300, int(interval_seconds)))
             if not _configured():
-                continue
-            result = firebase_backup_now(base_dir, passphrase_getter())
-            print(
-                f"[firebase-backup] ok={result.get('ok')} skipped={result.get('skipped', False)} "
-                f"error={result.get('error', '')}",
-                flush=True,
-            )
+                pass
+            else:
+                result = firebase_backup_now(base_dir, passphrase_getter())
+                print(
+                    f"[firebase-backup] ok={result.get('ok')} skipped={result.get('skipped', False)} "
+                    f"error={result.get('error', '')}",
+                    flush=True,
+                )
+            # The first sync is immediate after startup. The loop then waits
+            # for the normal interval, so a new VPS has no 30-minute exposure
+            # window before its first backup attempt.
+            time.sleep(max(300, int(interval_seconds)))
         except Exception as exc:
             print(f"[firebase-backup] loop error: {exc}", flush=True)
+            time.sleep(max(300, int(interval_seconds)))

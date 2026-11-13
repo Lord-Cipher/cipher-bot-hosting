@@ -149,9 +149,10 @@ CIPHER_RECOVERY_PASSPHRASE=your-10-to-15-character-password
 secret text variables. On startup, Firebase is attempted first, but only when
 the local database and state directories are empty. If Firebase is unavailable
 or its integrity check fails, the existing GitHub restore is attempted. Manual
-`.cipher-backup` import remains the final fallback. A background Firebase
-snapshot is created every 30 minutes; GitHub continues its own configured
-backup schedule as a second independent copy.
+`.cipher-backup` import remains the final fallback. Firebase performs its first
+automatic sync immediately at startup, then creates another snapshot every 30
+minutes; GitHub continues its own configured backup schedule as a second
+independent copy.
 
 If environment variables are not available yet, open **Admin → Vault
 Management → Configure Firebase** and send the complete service-account JSON,
@@ -162,6 +163,12 @@ Admin-panel credential and bucket; it does not alter deployment secrets.
 Use **Test Firebase Connection** to verify authenticated bucket access without
 writing data, and **Firebase Sync Now** to create and publish an encrypted
 snapshot immediately.
+
+Firestore being enabled in the Firebase project does not automatically back up
+this application's files. The implementation uses authenticated Cloud Storage
+for the encrypted binary recovery bundle because it contains the database,
+uploaded files, key cache, and sandbox state. Firestore can store other
+application data, but the recovery password still protects the full bundle.
 
 After an SSH VPS is registered and its host key and credentials are saved, the
 owner can open **Admin → Infrastructure Nodes**, select the node, and press

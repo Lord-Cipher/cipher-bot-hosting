@@ -159,7 +159,9 @@ text but not mounted files. Keep either service-account form outside Git. The
 panel uploads encrypted timestamped `.cipher-backup` objects and a validated
 latest pointer, retaining the newest 30 snapshots by default. On a clean boot
 it tries Firebase first, falls back to GitHub if Firebase is unavailable or
-invalid, and keeps manual `.cipher-backup` import as the final fallback.
+invalid, and keeps manual `.cipher-backup` import as the final fallback. The
+Firebase worker performs its first sync immediately after startup and repeats
+every 30 minutes.
 Firebase Storage requires the Firebase project to use the Blaze plan.
 
 If you prefer not to configure secrets during deployment, leave those
