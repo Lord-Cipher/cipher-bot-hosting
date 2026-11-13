@@ -157,7 +157,9 @@ independent copy.
 If environment variables are not available yet, open **Admin → Vault
 Management → Configure Firebase** and send the complete service-account JSON,
 then set the Storage bucket name. The JSON is encrypted with the panel's
-existing keyring and is never echoed back. Deployment environment variables
+existing keyring and is never echoed back. The panel automatically derives the
+default bucket as `<project_id>.firebasestorage.app` from the JSON, so no bucket
+entry is required for standard Firebase projects. Deployment environment variables
 take precedence over Admin-panel values. **Clear Firebase** removes only the
 Admin-panel credential and bucket; it does not alter deployment secrets.
 Use **Test Firebase Connection** to verify authenticated bucket access without

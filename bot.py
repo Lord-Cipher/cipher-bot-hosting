@@ -11905,8 +11905,10 @@ def on_text(m: types.Message) -> None:
                 except Exception:
                     pass
                 _store_firebase_service_json(raw)
-                USER_STATES[uid] = {"flow": "await_firebase_bucket"}
-                bot.send_message(m.chat.id, f"{G['ok']} Service account encrypted. Now send the Firebase Storage bucket name.", protect_content=True)
+                _apply_firebase_runtime_config()
+                USER_STATES.pop(uid, None)
+                bucket = str(get_setting("firebase_storage_bucket", "") or "")
+                bot.send_message(m.chat.id, f"{G['ok']} Service account encrypted. Firebase bucket auto-filled as <code>{esc(bucket)}</code>. Use <b>Set Firebase Bucket</b> only for a custom bucket.", parse_mode="HTML", protect_content=True)
             except (ValueError, json.JSONDecodeError) as exc:
                 USER_STATES.pop(uid, None)
                 bot.send_message(m.chat.id, f"{G['no']} Invalid Firebase service-account JSON: {sc(str(exc)[:240])}")
@@ -15914,8 +15916,15 @@ def _firebase_runtime_service_json() -> str:
         return ""
 def _apply_firebase_runtime_config() -> None:
     """Apply encrypted Admin settings without overriding deployment secrets."""
+    service_json = _firebase_runtime_service_json()
+    if not get_setting("firebase_storage_bucket", "") and service_json:
+        try:
+            project_id = str(json.loads(service_json).get("project_id", "") or "").strip()
+            if re.fullmatch(r"[a-z0-9][a-z0-9-]{4,28}[a-z0-9]", project_id):
+                set_setting("firebase_storage_bucket", f"{project_id}.firebasestorage.app")
+        except Exception:
+            pass
     if not os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON"):
-        service_json = _firebase_runtime_service_json()
         if service_json:
             os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"] = service_json
     if not os.getenv("FIREBASE_STORAGE_BUCKET"):
@@ -15937,6 +15946,8 @@ def _store_firebase_service_json(service_json: str) -> None:
     old_key_id = str(get_setting("firebase_service_key_id", "") or "")
     set_setting("firebase_service_key_id", key_id)
     set_setting("firebase_service_cipher", base64.b64encode(cipher).decode("ascii"))
+    if not get_setting("firebase_storage_bucket", "") and not os.getenv("FIREBASE_STORAGE_BUCKET"):
+        set_setting("firebase_storage_bucket", f"{parsed['project_id']}.firebasestorage.app")
     if old_key_id and old_key_id != key_id:
         try:
             KEYRING.wipe(old_key_id)
