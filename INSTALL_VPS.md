@@ -162,6 +162,13 @@ it tries Firebase first, falls back to GitHub if Firebase is unavailable or
 invalid, and keeps manual `.cipher-backup` import as the final fallback.
 Firebase Storage requires the Firebase project to use the Blaze plan.
 
+If you prefer not to configure secrets during deployment, leave those
+variables unset and use **Admin → Vault Management → Configure Firebase** after
+the bot starts. Send the service-account JSON and then the Storage bucket name.
+The panel encrypts the JSON with its existing keyring. Environment variables,
+when present, take precedence over the Admin-panel values; **Clear Firebase**
+removes only the panel-managed copy.
+
 ### 1. Prepare the worker VPS
 
 On an Ubuntu/Debian worker, install SSH and Docker:

@@ -5882,6 +5882,47 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_github(call)
     if data == "adm_vault":
         return render_adm_vault(call)
+    if data == "adm_firebase_config":
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_firebase_json"}
+        bot.send_message(
+            call.message.chat.id,
+            "Send the complete Firebase service-account JSON. It will be encrypted immediately and never displayed or logged.",
+            protect_content=True,
+        )
+        ack(call)
+        return
+    if data == "adm_firebase_bucket":
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_firebase_bucket"}
+        bot.send_message(call.message.chat.id, "Send the Firebase Storage bucket name, for example <code>bot-hosting-b307.firebasestorage.app</code>.", parse_mode="HTML")
+        ack(call)
+        return
+    if data == "adm_firebase_clear":
+        if not admin_only_call(call, "full_access"): return
+        old_key_id = str(get_setting("firebase_service_key_id", "") or "")
+        set_setting("firebase_service_key_id", "")
+        set_setting("firebase_service_cipher", "")
+        set_setting("firebase_storage_bucket", "")
+        if old_key_id:
+            try: KEYRING.wipe(old_key_id)
+            except Exception: pass
+        audit(call.from_user.id, "firebase_config_cleared", "credential and bucket removed")
+        ack(call, "Firebase configuration cleared")
+        return render_adm_vault(call)
+    if data == "adm_firebase_backup":
+        if not admin_only_call(call, "full_access"): return
+        _apply_firebase_runtime_config()
+        ack(call, "Firebase backup started…")
+        uid = call.from_user.id
+        def _run_firebase_backup() -> None:
+            result = firebase_backup_now(BASE_DIR, _recovery_secret_value())
+            bot.send_message(uid, f"<b>{'OK' if result.get('ok') else G['no']} Firebase Backup</b>\n"
+                                  f"{bullet('Snapshot', result.get('object', '—'))}\n"
+                                  f"{bullet('Size', fmt_bytes(result.get('sizeBytes', 0)))}\n"
+                                  f"{bullet('Error', result.get('error', 'none'))}", parse_mode="HTML")
+        threading.Thread(target=_run_firebase_backup, daemon=True, name="firebase-force-backup").start()
+        return
     if data == "adm_vault_token":
         if not admin_only_call(call, "full_access"): return
         USER_STATES[call.from_user.id] = {"flow": "await_vault_token"}
@@ -11842,6 +11883,36 @@ def on_text(m: types.Message) -> None:
             return _handle_clone_token(m, st)
         if flow == "await_clone_chat_id":
             return _handle_clone_chat_id(m, st)
+        if flow == "await_firebase_json":
+            raw = text.strip()
+            try:
+                try:
+                    bot.delete_message(m.chat.id, m.message_id)
+                except Exception:
+                    pass
+                _store_firebase_service_json(raw)
+                USER_STATES[uid] = {"flow": "await_firebase_bucket"}
+                bot.send_message(m.chat.id, f"{G['ok']} Service account encrypted. Now send the Firebase Storage bucket name.", protect_content=True)
+            except (ValueError, json.JSONDecodeError) as exc:
+                USER_STATES.pop(uid, None)
+                bot.send_message(m.chat.id, f"{G['no']} Invalid Firebase service-account JSON: {sc(str(exc)[:240])}")
+            except Exception as exc:
+                USER_STATES.pop(uid, None)
+                bot.send_message(m.chat.id, f"{G['no']} Could not securely save the Firebase credential: {sc(str(exc)[:240])}")
+            return
+        if flow == "await_firebase_bucket":
+            bucket = text.strip()
+            if bucket.startswith("gs://"):
+                bucket = bucket[5:]
+            if not re.fullmatch(r"[A-Za-z0-9._-]{3,255}", bucket):
+                bot.reply_to(m, f"{G['no']} Invalid bucket name. Send only the bucket name, without spaces or a URL.")
+                return
+            set_setting("firebase_storage_bucket", bucket)
+            _apply_firebase_runtime_config()
+            USER_STATES.pop(uid, None)
+            audit(uid, "firebase_config_set", f"bucket={bucket}; credential encrypted")
+            bot.reply_to(m, f"{G['ok']} Firebase is configured for <code>{esc(bucket)}</code>.", parse_mode="HTML")
+            return
         if flow == "await_vault_token":
             USER_STATES.pop(uid, None)
             token = text.strip()
@@ -15816,6 +15887,47 @@ def _vault_runtime_key() -> str:
 def _recovery_secret_value() -> str:
     """Return the current Admin-panel or environment recovery password."""
     return str(RECOVERY_PASSPHRASE_RUNTIME or os.getenv("CIPHER_RECOVERY_PASSPHRASE", "") or "").strip()
+def _firebase_runtime_service_json() -> str:
+    """Decrypt the optional Admin-panel Firebase service account JSON."""
+    key_id = str(get_setting("firebase_service_key_id", "") or "")
+    cipher_text = str(get_setting("firebase_service_cipher", "") or "")
+    if not key_id or not cipher_text:
+        return ""
+    try:
+        key = KEYRING.fetch(key_id)
+        return decrypt_with(key, base64.b64decode(cipher_text)).decode("utf-8")
+    except Exception:
+        return ""
+def _apply_firebase_runtime_config() -> None:
+    """Apply encrypted Admin settings without overriding deployment secrets."""
+    if not os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON"):
+        service_json = _firebase_runtime_service_json()
+        if service_json:
+            os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"] = service_json
+    if not os.getenv("FIREBASE_STORAGE_BUCKET"):
+        bucket = str(get_setting("firebase_storage_bucket", "") or "").strip()
+        if bucket:
+            os.environ["FIREBASE_STORAGE_BUCKET"] = bucket
+def _firebase_panel_configured() -> bool:
+    return bool(_firebase_runtime_service_json() and get_setting("firebase_storage_bucket", ""))
+def _store_firebase_service_json(service_json: str) -> None:
+    """Encrypt and atomically replace the Admin-panel Firebase credential."""
+    parsed = json.loads(service_json)
+    if not isinstance(parsed, dict) or parsed.get("type") != "service_account":
+        raise ValueError("The JSON must be a Firebase service-account object.")
+    if not parsed.get("project_id") or not parsed.get("client_email") or not parsed.get("private_key"):
+        raise ValueError("The service-account JSON is missing required fields.")
+    key_id, key, cipher = encrypt_file(service_json.encode("utf-8"))
+    if not KEYRING.store(key_id, key, {"purpose": "firebase_service_account"}):
+        raise RuntimeError("Encrypted key storage is unavailable.")
+    old_key_id = str(get_setting("firebase_service_key_id", "") or "")
+    set_setting("firebase_service_key_id", key_id)
+    set_setting("firebase_service_cipher", base64.b64encode(cipher).decode("ascii"))
+    if old_key_id and old_key_id != key_id:
+        try:
+            KEYRING.wipe(old_key_id)
+        except Exception:
+            pass
 
 
 def _recovery_vault_key() -> str:
@@ -21107,7 +21219,10 @@ def action_adm_node_refresh_images(call: types.CallbackQuery, node_id: str) -> N
 def render_adm_vault(call: types.CallbackQuery) -> None:
     if not admin_only_call(call, "full_access"):
         return
+    _apply_firebase_runtime_config()
     status = cipher_vault_status(); last = status.get("last") or {}
+    firebase = firebase_status()
+    firebase_retention = f"{firebase.get('retention', 30)} snapshots"
     state = "CONNECTED" if status.get("configured") else "NOT CONFIGURED"
     key_state = "AUTO-MANAGED" if status.get("keyManaged") else "WAITING FOR TOKEN"
     cap = (f"<b>🔐 Cipher Vault</b>\n{G['div_eq']}\n"
@@ -21117,12 +21232,20 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
            f"{bullet('Last Sync', last.get('createdAt', '—'))}\n"
            f"{bullet('Files', last.get('fileCount', '—'))}\n"
            f"{bullet('Archive', fmt_bytes(last.get('sizeBytes', 0)) if last else '—')}\n{G['div']}"
-           "Encrypted snapshots contain platform state and bot infrastructure." + FOOTER)
+           f"Encrypted snapshots contain platform state and bot infrastructure.\n{G['div']}"
+           f"<b>☁ Firebase Recovery</b>\n"
+           f"{bullet('Status', 'CONFIGURED' if firebase.get('configured') else 'NOT CONFIGURED')}\n"
+           f"{bullet('Bucket', firebase.get('bucket') or '—')}\n"
+           f"{bullet('Retention', firebase_retention)}" + FOOTER)
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn("Set GitHub Token", callback_data="adm_vault_token", style="primary"),
            Btn("Change Repository", callback_data="adm_vault_repo", style="primary"),
            Btn("Initialize / Sync Vault", callback_data="adm_vault_force", style="success"),
            Btn("Vault History", callback_data="adm_vault_history", style="primary"))
+    kb.add(Btn("Configure Firebase", callback_data="adm_firebase_config", style="primary"),
+           Btn("Set Firebase Bucket", callback_data="adm_firebase_bucket", style="primary"))
+    kb.add(Btn("Firebase Backup Now", callback_data="adm_firebase_backup", style="success"),
+           Btn("Clear Firebase", callback_data="adm_firebase_clear", style="danger"))
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("security", PHOTOS["admin"]), cap, kb, call=call)
 def action_adm_vault_force(call: types.CallbackQuery) -> None:
@@ -22423,6 +22546,7 @@ def main() -> int:
     _load_required_groups()
     _apply_plan_overrides()
     _apply_payment_method_overrides()
+    _apply_firebase_runtime_config()
     # Restore from Firebase first. It is intentionally protected by an
     # empty-install check; a restart must never overwrite newer local data.
     firebase_restored = False

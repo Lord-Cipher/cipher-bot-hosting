@@ -132,8 +132,9 @@ provider. The panel uploads an encrypted `.cipher-backup` object and then
 atomically updates a small `LATEST.json` pointer. It retains the newest 30
 snapshot objects by default, and the recovery password is never uploaded
 separately. Firebase Storage requires the Firebase project to use the Blaze
-plan. The Firebase Admin SDK uses a service account from a deployment secret;
-never commit its JSON key to this repository.
+plan. The Firebase Admin SDK uses a service account from either a deployment
+secret or the encrypted Admin-panel configuration; never commit its JSON key
+to this repository.
 
 Set these deployment variables on the control-panel host:
 
@@ -151,6 +152,13 @@ or its integrity check fails, the existing GitHub restore is attempted. Manual
 `.cipher-backup` import remains the final fallback. A background Firebase
 snapshot is created every 30 minutes; GitHub continues its own configured
 backup schedule as a second independent copy.
+
+If environment variables are not available yet, open **Admin → Vault
+Management → Configure Firebase** and send the complete service-account JSON,
+then set the Storage bucket name. The JSON is encrypted with the panel's
+existing keyring and is never echoed back. Deployment environment variables
+take precedence over Admin-panel values. **Clear Firebase** removes only the
+Admin-panel credential and bucket; it does not alter deployment secrets.
 
 After an SSH VPS is registered and its host key and credentials are saved, the
 owner can open **Admin → Infrastructure Nodes**, select the node, and press

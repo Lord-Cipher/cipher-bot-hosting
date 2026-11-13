@@ -2,8 +2,8 @@
 
 This module is deliberately independent of Telegram and GitHub. It stores the
 same encrypted portable recovery bundle used by the manual export flow. The
-Firebase service account is supplied through deployment secrets, never through
-panel settings or the repository.
+Firebase service account is supplied through deployment secrets or the encrypted
+Admin-panel runtime configuration, never through the repository.
 """
 from __future__ import annotations
 
