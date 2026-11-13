@@ -170,7 +170,9 @@ Password at the time of the action. Sync encrypts the current state and
 uploads it; Restore downloads and verifies the latest snapshot before
 decrypting it. Restore is blocked when meaningful local data is present, so a
 new empty installation can be recovered safely without overwriting an active
-installation.
+installation. This is provider-neutral: the same flow works when moving to a
+new VPS, Telegram account, Railway, Render, Replit, Pterodactyl, or another
+compatible hosting provider.
 
 Firestore being enabled in the Firebase project does not automatically back up
 this application's files. The implementation uses authenticated Cloud Storage
