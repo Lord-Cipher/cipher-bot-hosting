@@ -158,6 +158,15 @@ Interval**. It accepts values from **5 minutes** to **7 days**; the default is
 30 minutes. The worker reads the saved value for each cycle, so later changes
 apply without changing code or restarting the panel.
 
+The Firebase panel also provides a health dashboard with backup availability,
+last successful sync/restore, last failure, and failure detail. Automatic
+failures generate a throttled Admin alert. **Preview Latest Backup** verifies
+the pointer, checksum, and Recovery Password by decrypting into a temporary
+directory without changing live files. The **Firebase → GitHub** and
+**GitHub → Firebase** actions are password-gated migrations and require an
+empty local state so an existing installation cannot be overwritten by
+accident.
+
 GitHub bot upgrades are protected by a Firebase pre-upgrade snapshot. If
 Firebase is configured but the Recovery Password is unavailable, the upgrade
 stops before replacing files. After a successful upgrade, a second snapshot is

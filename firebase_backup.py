@@ -12,6 +12,7 @@ import json
 import os
 import re
 import time
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -119,7 +120,14 @@ def firebase_check_connection() -> Dict[str, Any]:
             return {"ok": False, "configured": True, "error": "Firebase Storage bucket was not found."}
         latest = bucket.blob(_POINTER_NAME)
         has_latest = bool(latest.exists())
-        return {"ok": True, "configured": True, "bucket": bucket.name, "hasLatest": has_latest}
+        result = {"ok": True, "configured": True, "bucket": bucket.name, "hasLatest": has_latest}
+        if has_latest:
+            try:
+                pointer = json.loads(latest.download_as_bytes().decode("utf-8"))
+                result.update({"createdAt": pointer.get("createdAt"), "sizeBytes": pointer.get("sizeBytes", 0), "fileCount": pointer.get("fileCount", 0)})
+            except Exception:
+                result["hasLatest"] = False
+        return result
     except Exception as exc:
         return {"ok": False, "configured": True, "error": str(exc)}
 
@@ -143,6 +151,7 @@ def firebase_backup_now(base_dir: str | Path, passphrase: str) -> Dict[str, Any]
             "object": object_name,
             "sha256": digest,
             "sizeBytes": len(data),
+            "fileCount": len(json.loads(data.decode("utf-8")).get("files", [])) if data.startswith(b"{") else 0,
             "createdAt": datetime.now(timezone.utc).isoformat(),
         }
         bucket.blob(_POINTER_NAME).upload_from_string(
@@ -212,6 +221,34 @@ def firebase_restore_now(base_dir: str | Path, passphrase: str, overwrite: bool 
         if result.get("ok"):
             result.update({"source": "firebase", "object": object_name, "sizeBytes": len(data)})
         return result
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def firebase_preview(base_dir: str | Path, passphrase: str) -> Dict[str, Any]:
+    """Validate/decrypt the latest snapshot in a temporary directory only."""
+    if not _configured():
+        return {"ok": False, "error": "Firebase is not configured."}
+    if not str(passphrase or "").strip():
+        return {"ok": False, "error": "Recovery password is required."}
+    try:
+        bucket = _bucket()
+        pointer = json.loads(bucket.blob(_POINTER_NAME).download_as_bytes().decode("utf-8"))
+        object_name = str(pointer.get("object") or "")
+        if not re.fullmatch(r"cipher-backups/snapshots/[A-Za-z0-9TZ-]+-[0-9a-f]{12}\.cipher-backup", object_name):
+            raise ValueError("Firebase backup pointer is invalid")
+        data = bucket.blob(object_name).download_as_bytes()
+        if hashlib.sha256(data).hexdigest() != str(pointer.get("sha256") or ""):
+            raise ValueError("Firebase backup integrity check failed")
+        with tempfile.TemporaryDirectory(prefix="cipher-firebase-preview-") as temp_dir:
+            result = import_portable_backup(temp_dir, data, passphrase, overwrite=True)
+            if not result.get("ok"):
+                return result
+        return {"ok": True, "source": "firebase", "object": object_name,
+                "createdAt": pointer.get("createdAt", "—"),
+                "sizeBytes": pointer.get("sizeBytes", len(data)),
+                "fileCount": pointer.get("fileCount", 0),
+                "sha256": pointer.get("sha256", "")}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 

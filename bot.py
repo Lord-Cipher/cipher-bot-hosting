@@ -38,7 +38,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
 from vault_sync import download_latest_snapshot, materialize_snapshot, sync_vault, export_portable_backup, import_portable_backup
-from firebase_backup import firebase_auto_loop, firebase_backup_now, firebase_check_connection, firebase_restore_now, firebase_restore_on_boot, firebase_status
+from firebase_backup import firebase_auto_loop, firebase_backup_now, firebase_check_connection, firebase_preview, firebase_restore_now, firebase_restore_on_boot, firebase_status
 from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
 from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle, bootstrap_docker_worker, refresh_docker_images
@@ -5922,6 +5922,24 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         bot.send_message(call.message.chat.id, "Send the Recovery Password for the Firebase restore. Restore is allowed automatically only when local data is empty.", protect_content=True)
         ack(call)
         return
+    if data == "adm_firebase_preview":
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_firebase_preview_password"}
+        bot.send_message(call.message.chat.id, "Send the Recovery Password to validate the latest Firebase snapshot without changing local files.", protect_content=True)
+        ack(call)
+        return
+    if data == "adm_firebase_to_github":
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_firebase_to_github_password"}
+        bot.send_message(call.message.chat.id, "Send the Recovery Password to copy the latest Firebase snapshot into GitHub Vault. Local state must be empty.", protect_content=True)
+        ack(call)
+        return
+    if data == "adm_github_to_firebase":
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_github_to_firebase_password"}
+        bot.send_message(call.message.chat.id, "Send the Recovery Password to copy the latest GitHub Vault snapshot into Firebase. Local state must be empty.", protect_content=True)
+        ack(call)
+        return
     if data == "adm_firebase_test":
         if not admin_only_call(call, "full_access"): return
         _apply_firebase_runtime_config()
@@ -11337,6 +11355,43 @@ def on_text(m: types.Message) -> None:
 
     st = USER_STATES.get(uid) or {}
     flow = st.get("flow")
+    if flow in {"await_firebase_preview_password", "await_firebase_to_github_password", "await_github_to_firebase_password"}:
+        if not is_owner(uid):
+            USER_STATES.pop(uid, None)
+            return
+        password = text
+        if not RECOVERY_PASSWORD_MIN <= len(password) <= RECOVERY_PASSWORD_MAX:
+            bot.reply_to(m, f"Recovery password must be between {RECOVERY_PASSWORD_MIN} and {RECOVERY_PASSWORD_MAX} characters.")
+            return
+        USER_STATES.pop(uid, None)
+        try:
+            bot.delete_message(m.chat.id, m.message_id)
+        except Exception:
+            pass
+        _apply_firebase_runtime_config()
+        if flow == "await_firebase_preview_password":
+            result = firebase_preview(BASE_DIR, password)
+            if result.get("ok"):
+                bot.send_message(uid, f"<b>🟢 Firebase Restore Preview</b>\n{bullet('Created', result.get('createdAt', '—'))}\n{bullet('Size', fmt_bytes(result.get('sizeBytes', 0)))}\n{bullet('Files', result.get('fileCount', '—'))}\n{bullet('SHA-256', result.get('sha256', '—'))}\nIntegrity and decryption: <b>VALID</b>", parse_mode="HTML")
+            else:
+                bot.send_message(uid, f"<b>🔴 Firebase Restore Preview Failed</b>\n{esc(str(result.get('error', 'unknown error'))[:1200])}", parse_mode="HTML")
+            return
+        bot.send_message(uid, "Provider migration started. It will stop safely if the destination is unavailable or local state is not empty.", protect_content=True)
+        def _run_migration() -> None:
+            try:
+                if flow == "await_firebase_to_github_password":
+                    restored = firebase_restore_now(BASE_DIR, password, overwrite=False)
+                    result = restored if not restored.get("ok") else cipher_vault_sync_now()
+                    direction = "Firebase → GitHub"
+                else:
+                    restored = cipher_vault_restore_now(overwrite=False)
+                    result = restored if not restored.get("ok") else firebase_backup_now(BASE_DIR, password)
+                    direction = "GitHub → Firebase"
+                bot.send_message(uid, f"<b>{'🟢' if result.get('ok') else '🔴'} {direction} Migration</b>\n{bullet('Result', 'completed' if result.get('ok') else result.get('error', 'failed'))}", parse_mode="HTML")
+            except Exception as exc:
+                bot.send_message(uid, f"🔴 Migration failed: <code>{esc(str(exc)[:1200])}</code>", parse_mode="HTML")
+        threading.Thread(target=_run_migration, daemon=True, name="firebase-provider-migration").start()
+        return
     if flow in {"await_firebase_sync_password", "await_firebase_restore_password"}:
         if not is_owner(uid):
             USER_STATES.pop(uid, None)
@@ -16038,6 +16093,24 @@ def _firebase_backup_interval_seconds() -> int:
     except (TypeError, ValueError):
         minutes = 30
     return max(300, min(10080 * 60, minutes * 60))
+
+
+def _firebase_auto_status(result: Dict[str, Any]) -> None:
+    if result.get("ok"):
+        set_setting("firebase_last_sync", ts_iso())
+        set_setting("firebase_backup_available", True)
+        return
+    error = str(result.get("error", "unknown Firebase backup failure"))[:300]
+    set_setting("firebase_last_failure", ts_iso())
+    set_setting("firebase_last_failure_error", error)
+    now = time.time()
+    last_alert = float(get_setting("firebase_last_alert_at", 0) or 0)
+    if OWNER_ID > 0 and now - last_alert >= 3600:
+        set_setting("firebase_last_alert_at", now)
+        try:
+            bot.send_message(OWNER_ID, f"🔴 Firebase backup failed:\n<code>{esc(error)}</code>", parse_mode="HTML")
+        except Exception:
+            pass
 
 
 def _recovery_vault_key() -> str:
@@ -21357,6 +21430,8 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
            f"{bullet('Backup Available', available_label)}\n"
            f"{bullet('Last Successful Sync', get_setting('firebase_last_sync', '—'))}\n"
            f"{bullet('Last Successful Restore', get_setting('firebase_last_restore', '—'))}\n"
+           f"{bullet('Last Failure', get_setting('firebase_last_failure', '—'))}\n"
+           f"{bullet('Failure Detail', get_setting('firebase_last_failure_error', '—'))}\n"
            f"{bullet('Backup Interval', f'{firebase_interval} minutes')}\n"
            f"{bullet('Retention', firebase_retention)}" + FOOTER)
     kb = types.InlineKeyboardMarkup(row_width=2)
@@ -21372,6 +21447,9 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
            Btn("Restore from Firebase", callback_data="adm_firebase_restore", style="primary"),
            Btn("Test Firebase Connection", callback_data="adm_firebase_test", style="primary"),
            Btn("Clear Firebase", callback_data="adm_firebase_clear", style="danger"))
+    kb.add(Btn("Preview Latest Backup", callback_data="adm_firebase_preview", style="primary"),
+           Btn("Firebase → GitHub", callback_data="adm_firebase_to_github", style="primary"),
+           Btn("GitHub → Firebase", callback_data="adm_github_to_firebase", style="primary"))
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("security", PHOTOS["admin"]), cap, kb, call=call)
 def action_adm_vault_force(call: types.CallbackQuery) -> None:
@@ -22706,11 +22784,7 @@ def main() -> int:
     threading.Thread(target=_cipher_vault_loop, daemon=True, name="cipher-vault-sync").start()
     threading.Thread(
         target=firebase_auto_loop,
-        args=(BASE_DIR, _recovery_secret_value, _firebase_backup_interval_seconds,
-              lambda result: (
-                  set_setting("firebase_last_sync", ts_iso()),
-                  set_setting("firebase_backup_available", True),
-              ) if result.get("ok") else None),
+        args=(BASE_DIR, _recovery_secret_value, _firebase_backup_interval_seconds, _firebase_auto_status),
         daemon=True,
         name="firebase-backup",
     ).start()
