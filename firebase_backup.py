@@ -216,7 +216,7 @@ def firebase_restore_now(base_dir: str | Path, passphrase: str, overwrite: bool 
         return {"ok": False, "error": str(exc)}
 
 
-def firebase_auto_loop(base_dir: str | Path, passphrase_getter, interval_seconds: int = 1800, status_callback=None) -> None:
+def firebase_auto_loop(base_dir: str | Path, passphrase_getter, interval_seconds=1800, status_callback=None) -> None:
     """Periodic provider loop; failures are logged and leave GitHub available."""
     while True:
         try:
@@ -234,7 +234,9 @@ def firebase_auto_loop(base_dir: str | Path, passphrase_getter, interval_seconds
             # The first sync is immediate after startup. The loop then waits
             # for the normal interval, so a new VPS has no 30-minute exposure
             # window before its first backup attempt.
-            time.sleep(max(300, int(interval_seconds)))
+            configured_interval = interval_seconds() if callable(interval_seconds) else interval_seconds
+            time.sleep(max(300, int(configured_interval)))
         except Exception as exc:
             print(f"[firebase-backup] loop error: {exc}", flush=True)
-            time.sleep(max(300, int(interval_seconds)))
+            configured_interval = interval_seconds() if callable(interval_seconds) else interval_seconds
+            time.sleep(max(300, int(configured_interval)))

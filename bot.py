@@ -5938,6 +5938,12 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             bot.send_message(uid, f"<b>{'🟢' if result.get('ok') else '🔴'} Firebase Connection {status}</b>\n{esc(str(detail)[:1200])}", parse_mode="HTML")
         threading.Thread(target=_run_firebase_test, daemon=True, name="firebase-connection-test").start()
         return
+    if data == "adm_firebase_interval":
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_firebase_interval"}
+        bot.send_message(call.message.chat.id, "Send the Firebase backup interval in minutes (minimum 5, maximum 10080 / 7 days). Example: <code>5</code>.", parse_mode="HTML")
+        ack(call)
+        return
     if data == "adm_vault_token":
         if not admin_only_call(call, "full_access"): return
         USER_STATES[call.from_user.id] = {"flow": "await_vault_token"}
@@ -11972,6 +11978,18 @@ def on_text(m: types.Message) -> None:
             audit(uid, "firebase_config_set", f"bucket={bucket}; credential encrypted")
             bot.reply_to(m, f"{G['ok']} Firebase is configured for <code>{esc(bucket)}</code>.", parse_mode="HTML")
             return
+        if flow == "await_firebase_interval":
+            try:
+                minutes = int(text.strip())
+                if not 5 <= minutes <= 10080:
+                    raise ValueError("interval must be between 5 minutes and 7 days")
+                set_setting("firebase_backup_interval_minutes", minutes)
+                USER_STATES.pop(uid, None)
+                audit(uid, "firebase_backup_interval_set", f"minutes={minutes}")
+                bot.reply_to(m, f"{G['ok']} Firebase backup interval set to <b>{minutes} minutes</b>.", parse_mode="HTML")
+            except (TypeError, ValueError) as exc:
+                bot.reply_to(m, f"{G['no']} Invalid interval: {esc(str(exc))}", parse_mode="HTML")
+            return
         if flow == "await_vault_token":
             USER_STATES.pop(uid, None)
             token = text.strip()
@@ -16012,6 +16030,14 @@ def _firebase_upgrade_snapshot(phase: str) -> Dict[str, Any]:
         set_setting("firebase_backup_available", True)
         audit(OWNER_ID, "firebase_upgrade_snapshot", phase)
     return result
+
+
+def _firebase_backup_interval_seconds() -> int:
+    try:
+        minutes = int(get_setting("firebase_backup_interval_minutes", 30) or 30)
+    except (TypeError, ValueError):
+        minutes = 30
+    return max(300, min(10080 * 60, minutes * 60))
 
 
 def _recovery_vault_key() -> str:
@@ -21312,6 +21338,7 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
     status = cipher_vault_status(); last = status.get("last") or {}
     firebase = firebase_status()
     firebase_retention = f"{firebase.get('retention', 30)} snapshots"
+    firebase_interval = max(5, _firebase_backup_interval_seconds() // 60)
     firebase_available = get_setting("firebase_backup_available", None)
     available_label = "YES" if firebase_available is True else "NO" if firebase_available is False else "UNKNOWN"
     state = "CONNECTED" if status.get("configured") else "NOT CONFIGURED"
@@ -21330,6 +21357,7 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
            f"{bullet('Backup Available', available_label)}\n"
            f"{bullet('Last Successful Sync', get_setting('firebase_last_sync', '—'))}\n"
            f"{bullet('Last Successful Restore', get_setting('firebase_last_restore', '—'))}\n"
+           f"{bullet('Backup Interval', f'{firebase_interval} minutes')}\n"
            f"{bullet('Retention', firebase_retention)}" + FOOTER)
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn("Set GitHub Token", callback_data="adm_vault_token", style="primary"),
@@ -21339,6 +21367,7 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
     kb.add(Btn("Configure Firebase", callback_data="adm_firebase_config", style="primary"),
            Btn("Set Firebase Bucket", callback_data="adm_firebase_bucket", style="primary"))
     kb.add(Btn("Set Recovery Password", callback_data="adm_recovery_password", style="primary"))
+    kb.add(Btn("Set Backup Interval", callback_data="adm_firebase_interval", style="primary"))
     kb.add(Btn("Firebase Sync Now", callback_data="adm_firebase_backup", style="success"),
            Btn("Restore from Firebase", callback_data="adm_firebase_restore", style="primary"),
            Btn("Test Firebase Connection", callback_data="adm_firebase_test", style="primary"),
@@ -22677,7 +22706,7 @@ def main() -> int:
     threading.Thread(target=_cipher_vault_loop, daemon=True, name="cipher-vault-sync").start()
     threading.Thread(
         target=firebase_auto_loop,
-        args=(BASE_DIR, _recovery_secret_value, 1800,
+        args=(BASE_DIR, _recovery_secret_value, _firebase_backup_interval_seconds,
               lambda result: (
                   set_setting("firebase_last_sync", ts_iso()),
                   set_setting("firebase_backup_available", True),

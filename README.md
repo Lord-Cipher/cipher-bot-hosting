@@ -153,6 +153,10 @@ or its integrity check fails, the existing GitHub restore is attempted. Manual
 automatic sync immediately at startup, then creates another snapshot every 30
 minutes; GitHub continues its own configured backup schedule as a second
 independent copy.
+The interval is editable from **Admin → Vault Management → Set Backup
+Interval**. It accepts values from **5 minutes** to **7 days**; the default is
+30 minutes. The worker reads the saved value for each cycle, so later changes
+apply without changing code or restarting the panel.
 
 GitHub bot upgrades are protected by a Firebase pre-upgrade snapshot. If
 Firebase is configured but the Recovery Password is unavailable, the upgrade
