@@ -216,7 +216,7 @@ def firebase_restore_now(base_dir: str | Path, passphrase: str, overwrite: bool 
         return {"ok": False, "error": str(exc)}
 
 
-def firebase_auto_loop(base_dir: str | Path, passphrase_getter, interval_seconds: int = 1800) -> None:
+def firebase_auto_loop(base_dir: str | Path, passphrase_getter, interval_seconds: int = 1800, status_callback=None) -> None:
     """Periodic provider loop; failures are logged and leave GitHub available."""
     while True:
         try:
@@ -224,6 +224,8 @@ def firebase_auto_loop(base_dir: str | Path, passphrase_getter, interval_seconds
                 pass
             else:
                 result = firebase_backup_now(base_dir, passphrase_getter())
+                if status_callback:
+                    status_callback(result)
                 print(
                     f"[firebase-backup] ok={result.get('ok')} skipped={result.get('skipped', False)} "
                     f"error={result.get('error', '')}",

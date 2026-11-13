@@ -5929,6 +5929,8 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         uid = call.from_user.id
         def _run_firebase_test() -> None:
             result = firebase_check_connection()
+            if result.get("ok"):
+                set_setting("firebase_backup_available", bool(result.get("hasLatest")))
             status = "CONNECTED" if result.get("ok") else "FAILED"
             detail = "Latest pointer found" if result.get("hasLatest") else "Bucket reachable; no backup has been synced yet"
             if not result.get("ok"):
@@ -11349,6 +11351,9 @@ def on_text(m: types.Message) -> None:
             bot.send_message(m.chat.id, "Firebase sync started…", protect_content=True)
             def _run_firebase_backup() -> None:
                 result = firebase_backup_now(BASE_DIR, password)
+                if result.get("ok"):
+                    set_setting("firebase_last_sync", ts_iso())
+                    set_setting("firebase_backup_available", True)
                 bot.send_message(uid, f"<b>{'OK' if result.get('ok') else G['no']} Firebase Sync</b>\n"
                                       f"{bullet('Snapshot', result.get('object', '—'))}\n"
                                       f"{bullet('Size', fmt_bytes(result.get('sizeBytes', 0)))}\n"
@@ -11358,6 +11363,9 @@ def on_text(m: types.Message) -> None:
             bot.send_message(m.chat.id, "Firebase restore started…", protect_content=True)
             def _run_firebase_restore() -> None:
                 result = firebase_restore_now(BASE_DIR, password)
+                if result.get("ok"):
+                    set_setting("firebase_last_restore", ts_iso())
+                    set_setting("firebase_backup_available", True)
                 bot.send_message(uid, f"<b>{'OK' if result.get('ok') else G['no']} Firebase Restore</b>\n"
                                       f"{bullet('Source', result.get('source', 'Firebase'))}\n"
                                       f"{bullet('Size', fmt_bytes(result.get('sizeBytes', 0)))}\n"
@@ -21283,6 +21291,8 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
     status = cipher_vault_status(); last = status.get("last") or {}
     firebase = firebase_status()
     firebase_retention = f"{firebase.get('retention', 30)} snapshots"
+    firebase_available = get_setting("firebase_backup_available", None)
+    available_label = "YES" if firebase_available is True else "NO" if firebase_available is False else "UNKNOWN"
     state = "CONNECTED" if status.get("configured") else "NOT CONFIGURED"
     key_state = "AUTO-MANAGED" if status.get("keyManaged") else "WAITING FOR TOKEN"
     cap = (f"<b>🔐 Cipher Vault</b>\n{G['div_eq']}\n"
@@ -21296,6 +21306,9 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
            f"<b>☁ Firebase Recovery</b>\n"
            f"{bullet('Status', 'CONFIGURED' if firebase.get('configured') else 'NOT CONFIGURED')}\n"
            f"{bullet('Bucket', firebase.get('bucket') or '—')}\n"
+           f"{bullet('Backup Available', available_label)}\n"
+           f"{bullet('Last Successful Sync', get_setting('firebase_last_sync', '—'))}\n"
+           f"{bullet('Last Successful Restore', get_setting('firebase_last_restore', '—'))}\n"
            f"{bullet('Retention', firebase_retention)}" + FOOTER)
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(Btn("Set GitHub Token", callback_data="adm_vault_token", style="primary"),
@@ -21304,6 +21317,7 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
            Btn("Vault History", callback_data="adm_vault_history", style="primary"))
     kb.add(Btn("Configure Firebase", callback_data="adm_firebase_config", style="primary"),
            Btn("Set Firebase Bucket", callback_data="adm_firebase_bucket", style="primary"))
+    kb.add(Btn("Set Recovery Password", callback_data="adm_recovery_password", style="primary"))
     kb.add(Btn("Firebase Sync Now", callback_data="adm_firebase_backup", style="success"),
            Btn("Restore from Firebase", callback_data="adm_firebase_restore", style="primary"),
            Btn("Test Firebase Connection", callback_data="adm_firebase_test", style="primary"),
@@ -22642,7 +22656,11 @@ def main() -> int:
     threading.Thread(target=_cipher_vault_loop, daemon=True, name="cipher-vault-sync").start()
     threading.Thread(
         target=firebase_auto_loop,
-        args=(BASE_DIR, _recovery_secret_value, 1800),
+        args=(BASE_DIR, _recovery_secret_value, 1800,
+              lambda result: (
+                  set_setting("firebase_last_sync", ts_iso()),
+                  set_setting("firebase_backup_available", True),
+              ) if result.get("ok") else None),
         daemon=True,
         name="firebase-backup",
     ).start()
