@@ -154,6 +154,14 @@ automatic sync immediately at startup, then creates another snapshot every 30
 minutes; GitHub continues its own configured backup schedule as a second
 independent copy.
 
+GitHub bot upgrades are protected by a Firebase pre-upgrade snapshot. If
+Firebase is configured but the Recovery Password is unavailable, the upgrade
+stops before replacing files. After a successful upgrade, a second snapshot is
+created so the updated bot files and platform state are backed up. Firebase
+stores persistent state and uploaded bot files; the platform's application
+source code remains versioned in GitHub and is deployed from the selected
+commit.
+
 If environment variables are not available yet, open **Admin → Vault
 Management → Configure Firebase** and send the complete service-account JSON,
 then set the Storage bucket name. The JSON is encrypted with the panel's

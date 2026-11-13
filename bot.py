@@ -15998,6 +15998,22 @@ def _store_firebase_service_json(service_json: str) -> None:
             pass
 
 
+def _firebase_upgrade_snapshot(phase: str) -> Dict[str, Any]:
+    """Protect platform state around a source upgrade when Firebase is enabled."""
+    _apply_firebase_runtime_config()
+    if not firebase_status().get("configured"):
+        return {"ok": True, "skipped": True, "reason": "Firebase is not configured."}
+    password = _recovery_secret_value()
+    if not password:
+        return {"ok": False, "error": "Firebase is configured but the Recovery Password is unavailable."}
+    result = firebase_backup_now(BASE_DIR, password)
+    if result.get("ok"):
+        set_setting("firebase_last_sync", ts_iso())
+        set_setting("firebase_backup_available", True)
+        audit(OWNER_ID, "firebase_upgrade_snapshot", phase)
+    return result
+
+
 def _recovery_vault_key() -> str:
     """Derive the stable GitHub snapshot key from the recovery password."""
     password = _recovery_secret_value()
@@ -16633,6 +16649,9 @@ def action_bot_gh_apply(call: types.CallbackQuery, bot_id: str) -> None:
         old_snapshot = {k: b.get(k) for k in ("enc_files", "dir", "gh_commit_sha", "gh_branch", "security_scan")}
         was_running = _gh_bot_is_running(bot_id)
         try:
+            pre_backup = _firebase_upgrade_snapshot("before_github_upgrade")
+            if not pre_backup.get("ok"):
+                raise RuntimeError(f"Upgrade stopped before changing files: {pre_backup.get('error', 'Firebase safety backup failed.')}")
             # Refuse a stale approval; the owner must review the newer head.
             from urllib.parse import quote
             latest_items = _gh_user_api(uid, f"/repos/{pending['repo']}/commits?sha={quote(str(pending['branch']), safe='')}&per_page=1")
@@ -16708,8 +16727,10 @@ def action_bot_gh_apply(call: types.CallbackQuery, bot_id: str) -> None:
                 except Exception: pass
                 try: KEYRING.remove(f.get("key_id", ""))
                 except Exception: pass
+            post_backup = _firebase_upgrade_snapshot("after_github_upgrade")
             audit(uid, "gh_sync_apply", f"bot={bot_id} commit={head}")
-            bot.send_message(uid, f"✅ GitHub update applied: <code>{esc(head[:12])}</code>." + (" Bot restarted successfully." if was_running else " Bot remains stopped; the update will be used next time it starts."), parse_mode="HTML")
+            backup_note = " Firebase snapshot updated." if post_backup.get("ok") else f" Firebase post-upgrade snapshot failed: {post_backup.get('error', 'unknown error')}"
+            bot.send_message(uid, f"✅ GitHub update applied: <code>{esc(head[:12])}</code>." + (" Bot restarted successfully." if was_running else " Bot remains stopped; the update will be used next time it starts.") + backup_note, parse_mode="HTML")
         except Exception as exc:
             if not manifest_switched:
                 for f in new_blobs:
