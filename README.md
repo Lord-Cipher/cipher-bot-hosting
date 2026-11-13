@@ -159,6 +159,9 @@ then set the Storage bucket name. The JSON is encrypted with the panel's
 existing keyring and is never echoed back. Deployment environment variables
 take precedence over Admin-panel values. **Clear Firebase** removes only the
 Admin-panel credential and bucket; it does not alter deployment secrets.
+Use **Test Firebase Connection** to verify authenticated bucket access without
+writing data, and **Firebase Sync Now** to create and publish an encrypted
+snapshot immediately.
 
 After an SSH VPS is registered and its host key and credentials are saved, the
 owner can open **Admin → Infrastructure Nodes**, select the node, and press

@@ -106,6 +106,24 @@ def firebase_status() -> Dict[str, Any]:
     }
 
 
+def firebase_check_connection() -> Dict[str, Any]:
+    """Authenticate and verify that the configured Storage bucket is reachable."""
+    if not _configured():
+        return {"ok": False, "configured": False, "error": "Firebase is not configured."}
+    try:
+        bucket = _bucket()
+        # exists() performs an authenticated bucket metadata request without
+        # creating or changing any user data.
+        exists = bool(bucket.exists())
+        if not exists:
+            return {"ok": False, "configured": True, "error": "Firebase Storage bucket was not found."}
+        latest = bucket.blob(_POINTER_NAME)
+        has_latest = bool(latest.exists())
+        return {"ok": True, "configured": True, "bucket": bucket.name, "hasLatest": has_latest}
+    except Exception as exc:
+        return {"ok": False, "configured": True, "error": str(exc)}
+
+
 def firebase_backup_now(base_dir: str | Path, passphrase: str) -> Dict[str, Any]:
     """Upload one encrypted recovery bundle and atomically publish LATEST.json."""
     if not _configured():

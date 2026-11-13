@@ -38,7 +38,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
 from vault_sync import download_latest_snapshot, materialize_snapshot, sync_vault, export_portable_backup, import_portable_backup
-from firebase_backup import firebase_auto_loop, firebase_backup_now, firebase_restore_on_boot, firebase_status
+from firebase_backup import firebase_auto_loop, firebase_backup_now, firebase_check_connection, firebase_restore_on_boot, firebase_status
 from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
 from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle, bootstrap_docker_worker, refresh_docker_images
@@ -5922,6 +5922,20 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
                                   f"{bullet('Size', fmt_bytes(result.get('sizeBytes', 0)))}\n"
                                   f"{bullet('Error', result.get('error', 'none'))}", parse_mode="HTML")
         threading.Thread(target=_run_firebase_backup, daemon=True, name="firebase-force-backup").start()
+        return
+    if data == "adm_firebase_test":
+        if not admin_only_call(call, "full_access"): return
+        _apply_firebase_runtime_config()
+        ack(call, "Testing Firebase connection…")
+        uid = call.from_user.id
+        def _run_firebase_test() -> None:
+            result = firebase_check_connection()
+            status = "CONNECTED" if result.get("ok") else "FAILED"
+            detail = "Latest pointer found" if result.get("hasLatest") else "Bucket reachable; no backup has been synced yet"
+            if not result.get("ok"):
+                detail = result.get("error", "Unknown Firebase error")
+            bot.send_message(uid, f"<b>{'🟢' if result.get('ok') else '🔴'} Firebase Connection {status}</b>\n{esc(str(detail)[:1200])}", parse_mode="HTML")
+        threading.Thread(target=_run_firebase_test, daemon=True, name="firebase-connection-test").start()
         return
     if data == "adm_vault_token":
         if not admin_only_call(call, "full_access"): return
@@ -21244,7 +21258,8 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
            Btn("Vault History", callback_data="adm_vault_history", style="primary"))
     kb.add(Btn("Configure Firebase", callback_data="adm_firebase_config", style="primary"),
            Btn("Set Firebase Bucket", callback_data="adm_firebase_bucket", style="primary"))
-    kb.add(Btn("Firebase Backup Now", callback_data="adm_firebase_backup", style="success"),
+    kb.add(Btn("Firebase Sync Now", callback_data="adm_firebase_backup", style="success"),
+           Btn("Test Firebase Connection", callback_data="adm_firebase_test", style="primary"),
            Btn("Clear Firebase", callback_data="adm_firebase_clear", style="danger"))
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS.get("security", PHOTOS["admin"]), cap, kb, call=call)
