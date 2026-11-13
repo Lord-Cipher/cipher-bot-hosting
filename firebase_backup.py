@@ -191,6 +191,31 @@ def firebase_restore_on_boot(base_dir: str | Path, passphrase: str) -> Dict[str,
         return {"ok": False, "error": str(exc)}
 
 
+def firebase_restore_now(base_dir: str | Path, passphrase: str, overwrite: bool = False) -> Dict[str, Any]:
+    """Restore the latest Firebase snapshot after an explicit Admin action."""
+    if not _configured():
+        return {"ok": False, "error": "Firebase is not configured."}
+    if not str(passphrase or "").strip():
+        return {"ok": False, "error": "Recovery password is required."}
+    if not overwrite and _local_state_present(base_dir):
+        return {"ok": False, "blocked": True, "error": "Local data is present; restore was blocked to prevent overwrite."}
+    try:
+        bucket = _bucket()
+        pointer = json.loads(bucket.blob(_POINTER_NAME).download_as_bytes().decode("utf-8"))
+        object_name = str(pointer.get("object") or "")
+        if not re.fullmatch(r"cipher-backups/snapshots/[A-Za-z0-9TZ-]+-[0-9a-f]{12}\.cipher-backup", object_name):
+            raise ValueError("Firebase backup pointer is invalid")
+        data = bucket.blob(object_name).download_as_bytes()
+        if hashlib.sha256(data).hexdigest() != str(pointer.get("sha256") or ""):
+            raise ValueError("Firebase backup integrity check failed")
+        result = import_portable_backup(base_dir, data, passphrase, overwrite=True)
+        if result.get("ok"):
+            result.update({"source": "firebase", "object": object_name, "sizeBytes": len(data)})
+        return result
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def firebase_auto_loop(base_dir: str | Path, passphrase_getter, interval_seconds: int = 1800) -> None:
     """Periodic provider loop; failures are logged and leave GitHub available."""
     while True:

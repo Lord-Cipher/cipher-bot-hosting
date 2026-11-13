@@ -38,7 +38,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
 from vault_sync import download_latest_snapshot, materialize_snapshot, sync_vault, export_portable_backup, import_portable_backup
-from firebase_backup import firebase_auto_loop, firebase_backup_now, firebase_check_connection, firebase_restore_on_boot, firebase_status
+from firebase_backup import firebase_auto_loop, firebase_backup_now, firebase_check_connection, firebase_restore_now, firebase_restore_on_boot, firebase_status
 from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
 from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle, bootstrap_docker_worker, refresh_docker_images
@@ -5912,16 +5912,15 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         return render_adm_vault(call)
     if data == "adm_firebase_backup":
         if not admin_only_call(call, "full_access"): return
-        _apply_firebase_runtime_config()
-        ack(call, "Firebase backup started…")
-        uid = call.from_user.id
-        def _run_firebase_backup() -> None:
-            result = firebase_backup_now(BASE_DIR, _recovery_secret_value())
-            bot.send_message(uid, f"<b>{'OK' if result.get('ok') else G['no']} Firebase Backup</b>\n"
-                                  f"{bullet('Snapshot', result.get('object', '—'))}\n"
-                                  f"{bullet('Size', fmt_bytes(result.get('sizeBytes', 0)))}\n"
-                                  f"{bullet('Error', result.get('error', 'none'))}", parse_mode="HTML")
-        threading.Thread(target=_run_firebase_backup, daemon=True, name="firebase-force-backup").start()
+        USER_STATES[call.from_user.id] = {"flow": "await_firebase_sync_password"}
+        bot.send_message(call.message.chat.id, "Send the Recovery Password for this Firebase sync. It will be used to encrypt the new backup and will not be displayed.", protect_content=True)
+        ack(call)
+        return
+    if data == "adm_firebase_restore":
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_firebase_restore_password"}
+        bot.send_message(call.message.chat.id, "Send the Recovery Password for the Firebase restore. Restore is allowed automatically only when local data is empty.", protect_content=True)
+        ack(call)
         return
     if data == "adm_firebase_test":
         if not admin_only_call(call, "full_access"): return
@@ -11305,6 +11304,7 @@ def on_other_media(m: types.Message) -> None:
     return
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def on_text(m: types.Message) -> None:
+    global RECOVERY_PASSPHRASE_RUNTIME
     if not _is_private(m):
         return
     if banned_block(m):
@@ -11329,6 +11329,42 @@ def on_text(m: types.Message) -> None:
 
     st = USER_STATES.get(uid) or {}
     flow = st.get("flow")
+    if flow in {"await_firebase_sync_password", "await_firebase_restore_password"}:
+        if not is_owner(uid):
+            USER_STATES.pop(uid, None)
+            return
+        password = text
+        if not RECOVERY_PASSWORD_MIN <= len(password) <= RECOVERY_PASSWORD_MAX:
+            bot.reply_to(m, f"Recovery password must be between {RECOVERY_PASSWORD_MIN} and {RECOVERY_PASSWORD_MAX} characters.")
+            return
+        USER_STATES.pop(uid, None)
+        try:
+            bot.delete_message(m.chat.id, m.message_id)
+        except Exception:
+            pass
+        RECOVERY_PASSPHRASE_RUNTIME = password
+        set_setting("github_recovery_password_mode", True)
+        _apply_firebase_runtime_config()
+        if flow == "await_firebase_sync_password":
+            bot.send_message(m.chat.id, "Firebase sync started…", protect_content=True)
+            def _run_firebase_backup() -> None:
+                result = firebase_backup_now(BASE_DIR, password)
+                bot.send_message(uid, f"<b>{'OK' if result.get('ok') else G['no']} Firebase Sync</b>\n"
+                                      f"{bullet('Snapshot', result.get('object', '—'))}\n"
+                                      f"{bullet('Size', fmt_bytes(result.get('sizeBytes', 0)))}\n"
+                                      f"{bullet('Error', result.get('error', 'none'))}", parse_mode="HTML")
+            threading.Thread(target=_run_firebase_backup, daemon=True, name="firebase-force-backup").start()
+        else:
+            bot.send_message(m.chat.id, "Firebase restore started…", protect_content=True)
+            def _run_firebase_restore() -> None:
+                result = firebase_restore_now(BASE_DIR, password)
+                bot.send_message(uid, f"<b>{'OK' if result.get('ok') else G['no']} Firebase Restore</b>\n"
+                                      f"{bullet('Source', result.get('source', 'Firebase'))}\n"
+                                      f"{bullet('Size', fmt_bytes(result.get('sizeBytes', 0)))}\n"
+                                      f"{bullet('Error', result.get('error', 'none'))}", parse_mode="HTML")
+            threading.Thread(target=_run_firebase_restore, daemon=True, name="firebase-force-restore").start()
+        audit(uid, "firebase_recovery_action", "sync" if flow == "await_firebase_sync_password" else "restore")
+        return
     if flow == "await_recovery_password":
         if not is_owner(uid):
             USER_STATES.pop(uid, None)
@@ -11338,7 +11374,6 @@ def on_text(m: types.Message) -> None:
             bot.reply_to(m, f"Recovery password must be between {RECOVERY_PASSWORD_MIN} and {RECOVERY_PASSWORD_MAX} characters. Nothing was saved.")
             return
         try:
-            global RECOVERY_PASSPHRASE_RUNTIME
             RECOVERY_PASSPHRASE_RUNTIME = password
             set_setting("github_recovery_password_mode", True)
             USER_STATES.pop(uid, None)
@@ -21270,6 +21305,7 @@ def render_adm_vault(call: types.CallbackQuery) -> None:
     kb.add(Btn("Configure Firebase", callback_data="adm_firebase_config", style="primary"),
            Btn("Set Firebase Bucket", callback_data="adm_firebase_bucket", style="primary"))
     kb.add(Btn("Firebase Sync Now", callback_data="adm_firebase_backup", style="success"),
+           Btn("Restore from Firebase", callback_data="adm_firebase_restore", style="primary"),
            Btn("Test Firebase Connection", callback_data="adm_firebase_test", style="primary"),
            Btn("Clear Firebase", callback_data="adm_firebase_clear", style="danger"))
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
