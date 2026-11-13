@@ -125,6 +125,33 @@ snapshots made before password mode was enabled still require their original
 `CIPHER_RECOVERY_PASSPHRASE` environment variable can provide the same password
 for automated deployments.
 
+### Firebase primary disaster recovery
+
+Firebase Cloud Storage can be enabled as the primary automatic recovery
+provider. The panel uploads an encrypted `.cipher-backup` object and then
+atomically updates a small `LATEST.json` pointer. It retains the newest 30
+snapshot objects by default, and the recovery password is never uploaded
+separately. Firebase Storage requires the Firebase project to use the Blaze
+plan. The Firebase Admin SDK uses a service account from a deployment secret;
+never commit its JSON key to this repository.
+
+Set these deployment variables on the control-panel host:
+
+```dotenv
+FIREBASE_STORAGE_BUCKET=your-project.firebasestorage.app
+GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/firebase-service-account.json
+CIPHER_RECOVERY_PASSPHRASE=your-10-to-15-character-password
+```
+
+`FIREBASE_SERVICE_ACCOUNT_JSON` may be used instead of
+`GOOGLE_APPLICATION_CREDENTIALS` when the hosting provider only supports
+secret text variables. On startup, Firebase is attempted first, but only when
+the local database and state directories are empty. If Firebase is unavailable
+or its integrity check fails, the existing GitHub restore is attempted. Manual
+`.cipher-backup` import remains the final fallback. A background Firebase
+snapshot is created every 30 minutes; GitHub continues its own configured
+backup schedule as a second independent copy.
+
 After an SSH VPS is registered and its host key and credentials are saved, the
 owner can open **Admin → Infrastructure Nodes**, select the node, and press
 **Prepare Docker**. The idempotent bootstrap uses the VPS package manager,

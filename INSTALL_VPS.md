@@ -142,6 +142,26 @@ snapshots use the same Recovery Password for encryption, while the GitHub token
 is used only for repository access. Existing legacy snapshots still require
 their original `CIPHER_VAULT_KEY` or a restored Full Recovery key cache.
 
+### Firebase primary recovery
+
+The panel can use Firebase Cloud Storage as the first automatic recovery
+provider. Add these variables to the private service environment:
+
+```dotenv
+FIREBASE_STORAGE_BUCKET=your-project.firebasestorage.app
+GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/firebase-service-account.json
+CIPHER_RECOVERY_PASSPHRASE=your-10-to-15-character-password
+```
+
+Use `FIREBASE_SERVICE_ACCOUNT_JSON` instead of
+`GOOGLE_APPLICATION_CREDENTIALS` when the hosting provider supports secret
+text but not mounted files. Keep either service-account form outside Git. The
+panel uploads encrypted timestamped `.cipher-backup` objects and a validated
+latest pointer, retaining the newest 30 snapshots by default. On a clean boot
+it tries Firebase first, falls back to GitHub if Firebase is unavailable or
+invalid, and keeps manual `.cipher-backup` import as the final fallback.
+Firebase Storage requires the Firebase project to use the Blaze plan.
+
 ### 1. Prepare the worker VPS
 
 On an Ubuntu/Debian worker, install SSH and Docker:

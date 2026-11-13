@@ -9,3 +9,4 @@ Pillow
 curl_cffi
 python-dotenv
 paramiko
+firebase-admin>=6.5,<8

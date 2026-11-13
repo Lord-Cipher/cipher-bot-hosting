@@ -38,6 +38,7 @@ import requests
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, jsonify, request
 from vault_sync import download_latest_snapshot, materialize_snapshot, sync_vault, export_portable_backup, import_portable_backup
+from firebase_backup import firebase_auto_loop, firebase_backup_now, firebase_restore_on_boot, firebase_status
 from node_manager import test_node, new_node, CredentialStore
 from sandbox_runtime import build_run_command, docker_available, install_dependencies_command
 from remote_worker import deploy as remote_deploy, control as remote_control, RemoteHandle, bootstrap_docker_worker, refresh_docker_images
@@ -1190,7 +1191,8 @@ SECRET_ENV_NAMES = {
     "OWNER_IDS", "SESSION_SECRET",
     "DATABASE_URL", "PGDATABASE", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD",
     "REPLIT_DB_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY",
-    "ANNOUNCE_CHANNEL",
+    "ANNOUNCE_CHANNEL", "FIREBASE_SERVICE_ACCOUNT_JSON",
+    "GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_STORAGE_BUCKET",
 }
 ENTRY_NODE = ("index.js", "bot.js", "main.js", "app.js")
 ENTRY_PY   = ("bot.py", "main.py", "app.py", "run.py")
@@ -22421,11 +22423,25 @@ def main() -> int:
     _load_required_groups()
     _apply_plan_overrides()
     _apply_payment_method_overrides()
-    # Restore from GitHub on boot
+    # Restore from Firebase first. It is intentionally protected by an
+    # empty-install check; a restart must never overwrite newer local data.
+    firebase_restored = False
     try:
-        res = gh_auto_restore_on_boot()
-        if res and res.get("ok"):
-            print(f"[boot] restored gh backup ({fmt_bytes(res.get('sizeBytes', 0))})", flush=True)
+        firebase_res = firebase_restore_on_boot(BASE_DIR, _recovery_secret_value())
+        if firebase_res.get("ok"):
+            firebase_restored = True
+            print(f"[boot] restored Firebase backup ({fmt_bytes(firebase_res.get('sizeBytes', 0))})", flush=True)
+        elif not firebase_res.get("skipped"):
+            print(f"[boot] Firebase restore unavailable: {firebase_res.get('error', 'unknown error')}", flush=True)
+    except Exception as exc:
+        print(f"[boot] Firebase restore failed: {exc}", flush=True)
+    # GitHub remains the automatic fallback when Firebase is not configured,
+    # unavailable, invalid, or did not restore anything.
+    try:
+        if not firebase_restored:
+            res = gh_auto_restore_on_boot()
+            if res and res.get("ok"):
+                print(f"[boot] restored gh backup ({fmt_bytes(res.get('sizeBytes', 0))})", flush=True)
     except Exception:
         pass
     try:
@@ -22438,6 +22454,12 @@ def main() -> int:
     threading.Thread(target=gh_repo_auto_check_loop, daemon=True, name="gh-auto-check").start()
     threading.Thread(target=_quota_history_loop, daemon=True, name="quota-history").start()
     threading.Thread(target=_cipher_vault_loop, daemon=True, name="cipher-vault-sync").start()
+    threading.Thread(
+        target=firebase_auto_loop,
+        args=(BASE_DIR, _recovery_secret_value, 1800),
+        daemon=True,
+        name="firebase-backup",
+    ).start()
     threading.Thread(target=cron_runner, daemon=True).start()
     threading.Thread(target=_verify_state_janitor, daemon=True, name="verify-janitor").start()
     _start_extra_background_threads()
