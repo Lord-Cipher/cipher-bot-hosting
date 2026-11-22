@@ -3574,10 +3574,11 @@ def start_child(b: Dict[str, Any], manual: bool = False) -> Dict[str, Any]:
             start_scan = dict(saved_scan)
             if not start_scan.get("recommendation"):
                 start_scan["recommendation"] = "APPROVE" if str(start_scan.get("verdict", "")).upper() == "SAFE" else "MANUAL_REVIEW"
-        if start_scan.get("recommendation") == "REJECT" or start_scan.get("verdict") == "DANGEROUS":
+        if ((start_scan.get("recommendation") == "REJECT" or start_scan.get("verdict") == "DANGEROUS")
+                and b.get("approval_status") != "approved"):
             return _start_failure(b, f"Security scan rejected this code: {start_scan.get('summary', 'dangerous code')}")
-        # Sandbox mode auto-approves non-dangerous manual-review results by
-        # containing them; the scanner's REJECT/DANGEROUS verdicts still stop.
+        # Sandbox mode contains non-dangerous manual-review results; dangerous
+        # results still require the explicit approval recorded above.
         if start_scan.get("recommendation") != "APPROVE" and not sandbox_on and b.get("approval_status") != "approved":
             b["status"] = "pending_approval"
             b["approval_status"] = "pending"
@@ -12350,11 +12351,6 @@ def on_text(m: types.Message) -> None:
                         
                     progress(75, f"Security scan — {len(files_added)} files")
                     scan = _run_security_scan(files_added, uploader_uid=uid)
-                    if scan.get("recommendation") == "REJECT":
-                        progress(100, "Stopped — security scan rejected this repository")
-                        bot.send_message(uid, f"{G['no']} Security scan rejected this repo.\n<code>{esc(scan.get('summary',''))}</code>", parse_mode="HTML")
-                        rmrf(bot_dir); return
-
                     # 5. Encrypt and store files
                     enc_files = []
                     total_files = max(1, len(files_added))
@@ -12381,10 +12377,10 @@ def on_text(m: types.Message) -> None:
                         "risk_score": scan.get("risk_score", 0),
                         "summary": scan.get("summary", ""),
                         "recommendation": clone_recommendation,
+                        "threats": (scan.get("all_threats") or [])[:20],
                     }
                     clone_needs_approval = (
-                        not clone_sandbox_on and clone_recommendation == "MANUAL_REVIEW" and
-                        not is_owner(uid) and not is_admin(uid) and OWNER_ID > 0
+                        clone_recommendation in {"MANUAL_REVIEW", "REJECT"} and OWNER_ID > 0
                     )
                     if clone_needs_approval:
                         doc["approval_status"] = "pending"
@@ -12398,6 +12394,23 @@ def on_text(m: types.Message) -> None:
                     d = db_load()
                     d["bots"][bot_id_new] = doc
                     db_save(d)
+                    if clone_needs_approval:
+                        info = {
+                            "user_id": uid,
+                            "user_name": u_doc.get("first_name", "") if isinstance(u_doc, dict) else "",
+                            "user_username": u_doc.get("username", "") if isinstance(u_doc, dict) else "",
+                            "chat_id": uid,
+                            "file_name": repo_url,
+                            "file_count": len(files_added),
+                            "size": sum(len(content) for _, content in files_added),
+                            "ts": ts_iso(),
+                            "source": "github",
+                        }
+                        pending_add(bot_id_new, info)
+                        try:
+                            _send_approval_request_to_admins(doc, info, None)
+                        except Exception as approval_error:
+                            print(f"[approval notify] {approval_error}")
                     audit(uid, "gh_clone", f"repo={repo_url} bot_id={bot_id_new}")
 
                     # Automatic Vault Backup
@@ -12405,11 +12418,12 @@ def on_text(m: types.Message) -> None:
 
                     progress(100, "Complete")
                     bot.send_message(uid,
-                        f"<b>{G['ok']} Repo cloned!</b>\n"
+                        f"<b>{G['warn'] if clone_needs_approval else G['ok']} "
+                        f"{'Repo cloned — pending admin security approval' if clone_needs_approval else 'Repo cloned!'}</b>\n"
                         f"{bullet('Bot', name)}\n"
                         f"{bullet('ID', bot_id_new)}\n"
                         f"{bullet('Files', len(files_added))}\n"
-                        f"{sc('Go to My Bots to start it.')}{FOOTER}", parse_mode="HTML")
+                        f"{sc('The repository is quarantined until an admin approves it.' if clone_needs_approval else 'Go to My Bots to start it.')}{FOOTER}", parse_mode="HTML")
                 except Exception as e:
                     rmrf(locals().get("bot_dir", ""))
                     progress(100, "Failed")
@@ -13416,7 +13430,10 @@ def _send_approval_request_to_admins(b: Dict[str, Any], info: Dict[str, Any],
         f"{bullet('File',     info.get('file_name'))}\n"
         f"{bullet('Files',    info.get('file_count'))}\n"
         f"{bullet('Size',     fmt_bytes(info.get('size', 0)))}\n"
-        f"{G['div']}"
+        f"{bullet('Verdict',  esc((b.get('security_scan') or {}).get('verdict', 'UNKNOWN')))}\n"
+        f"{bullet('Risk',      esc(str((b.get('security_scan') or {}).get('risk_score', 0)) + '/100'))}\n"
+        f"{bullet('Findings',  esc('; '.join((b.get('security_scan') or {}).get('threats', [])[:5]) or 'none'))}\n"
+        f"{G['div']}\n"
     )
     targets: List[int] = []
     if OWNER_ID:
@@ -13790,11 +13807,6 @@ def _handle_bot_upload(m: types.Message) -> None:
         bot.reply_to(m, f"{G['warn']} {sc('Suspicious filename, please rename')}.")
         return
     
-    # Block known malware-related names
-    malware_keywords = ["backdoor", "virus", "trojan", "malware", "exploit", "shell", "hack"]
-    if any(k in fname.lower() for k in malware_keywords):
-        bot.reply_to(m, f"{G['no']} {sc('Malware-related filename blocked')}.")
-        return
     try:
         f = bot.get_file(doc.file_id)
         raw = bot.download_file(f.file_path)
@@ -13894,46 +13906,15 @@ def _handle_bot_upload(m: types.Message) -> None:
     threats   = scan.get("all_threats") or []
     decoded_payloads = scan.get("decoded_payloads", [])
 
-    if recommend == "REJECT":
-        try:
-            bot.delete_message(m.chat.id, _scan_msg.message_id)
-        except Exception:
-            pass
-        # Hard block — wipe everything, alert user + admin
-        rmrf(bot_dir)
-        threat_lines = "\n".join(f"• {esc(t)}" for t in threats[:5])
-        bot.reply_to(
-            m,
-            f"<b>🚫 {sc('File Blocked — Security Threat Detected')}</b>\n"
-            f"{G['div']}\n"
-            f"{bullet('File',       fname)}\n"
-            f"{bullet('Risk Score', f'{risk}/100')}\n"
-            f"{bullet('Verdict',    verdict)}\n"
-            f"{G['div']}\n"
-            f"<b>{sc('Threats found')}:</b>\n{threat_lines or sc('See admin alert')}",
-            parse_mode="HTML",
-        )
-        notify_owner(
-            f"<b>🚨 {sc('DANGEROUS FILE BLOCKED BY SCANNER')}</b>\n"
-            f"{G['div']}\n"
-            f"{bullet('User',    '{} (@{})'.format(m.from_user.first_name or '', m.from_user.username or '-'))}\n"
-            f"{bullet('User ID', uid)}\n"
-            f"{bullet('File',    fname)}\n"
-            f"{bullet('Risk',    f'{risk}/100')}\n"
-            f"{bullet('Verdict', verdict)}\n"
-            f"<b>{sc('Top threats')}:</b>\n" +
-            "\n".join(f"• {esc(t)}" for t in threats[:3])
-        )
-        audit(uid, "security_reject", f"file={fname} risk={risk} verdict={verdict}")
-        log_notification("SECURITY", f"MALWARE BLOCKED: {fname} from UID {uid} (Risk: {risk}/100)", uid=uid)
-        return
-
-    if recommend == "MANUAL_REVIEW":
-        # Tag the bot record with scan info so admins see it in the approval panel
+    if recommend in {"REJECT", "MANUAL_REVIEW"}:
+        # Dangerous files are quarantined, not discarded. They remain encrypted
+        # and unreachable by the runtime until an administrator explicitly
+        # approves them through the existing approval queue.
         doc_db["security_scan"] = {
             "verdict": verdict, "risk_score": risk, "summary": summary,
             "recommendation": recommend,
             "ai_model": scan.get("ai_model", "pattern-only"),
+            "threats": threats[:20],
         }
     # ══ END SECURITY SCAN ════════════════════════════════════════
 
@@ -13958,8 +13939,7 @@ def _handle_bot_upload(m: types.Message) -> None:
     # ── Approval gate ───────────────────────────────────────────
     sandbox_on = bool(get_setting("sandbox_mode", False))
     needs_approval = (
-        not sandbox_on and scan.get("recommendation") == "MANUAL_REVIEW" and
-        not is_owner(uid) and not is_admin(uid) and OWNER_ID > 0
+        scan.get("recommendation") in {"MANUAL_REVIEW", "REJECT"} and OWNER_ID > 0
     )
     if needs_approval:
         try:
@@ -14003,13 +13983,15 @@ def _handle_bot_upload(m: types.Message) -> None:
             print(f"[approval notify] {e}")
         bot.reply_to(
             m,
-            f"<b>{G['warn']} {sc('Pending admin approval')}</b>\n"
+            f"<b>{G['warn']} {sc('Pending admin security approval')}</b>\n"
             f"{G['div']}\n"
             f"{bullet('Bot Name', name)}\n"
             f"{bullet('Files',    len(files_added))}\n"
             f"{bullet('Size',     fmt_bytes(total_size))}\n"
+            f"{bullet('Risk',     f'{risk}/100')}\n"
+            f"{bullet('Verdict',  verdict)}\n"
             f"{G['div']}\n"
-            f"{sc('Your bot will start automatically once an admin approves it')}.",
+            f"{sc('The upload is quarantined and will not run until an admin approves it')}.",
             parse_mode="HTML",
         )
         return
