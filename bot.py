@@ -11205,6 +11205,36 @@ def on_document(m: types.Message) -> None:
         if not is_admin(uid):
             USER_STATES.pop(uid, None); return
         return _handle_adm_product_file(m, st)
+    if st.get("flow") == "await_firebase_json":
+        # Telegram documents do not pass through on_text, so a JSON file must
+        # be downloaded and processed here instead of falling through to the
+        # normal hosted-bot upload flow.
+        USER_STATES.pop(uid, None)
+        try:
+            file_info = bot.get_file(m.document.file_id)
+            raw = bot.download_file(file_info.file_path)
+            if len(raw) > 256 * 1024:
+                raise ValueError("Firebase service-account JSON is too large")
+            service_json = raw.decode("utf-8-sig")
+            _store_firebase_service_json(service_json)
+            _apply_firebase_runtime_config()
+            try:
+                bot.delete_message(m.chat.id, m.message_id)
+            except Exception:
+                pass
+            bucket = str(get_setting("firebase_storage_bucket", "") or "")
+            audit(uid, "firebase_configured", "service-account JSON uploaded")
+            bot.send_message(
+                m.chat.id,
+                f"{G['ok']} Service account encrypted. Firebase bucket auto-filled as "
+                f"<code>{esc(bucket)}</code>. Use <b>Set Firebase Bucket</b> only for a custom bucket.",
+                parse_mode="HTML", protect_content=True,
+            )
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            bot.send_message(m.chat.id, f"{G['no']} Invalid Firebase service-account JSON: {sc(str(exc)[:240])}")
+        except Exception as exc:
+            bot.send_message(m.chat.id, f"{G['no']} Could not securely save the Firebase credential: {sc(str(exc)[:240])}")
+        return
     if st.get("flow") == "await_payment_proof":
         return _handle_payment_proof(m, st)
     if st.get("flow") == "await_topup_proof":
@@ -16017,9 +16047,18 @@ def _apply_firebase_runtime_config() -> None:
     service_json = _firebase_runtime_service_json()
     if not get_setting("firebase_storage_bucket", "") and service_json:
         try:
-            project_id = str(json.loads(service_json).get("project_id", "") or "").strip()
-            if re.fullmatch(r"[a-z0-9][a-z0-9-]{4,28}[a-z0-9]", project_id):
-                set_setting("firebase_storage_bucket", f"{project_id}.firebasestorage.app")
+            parsed = json.loads(service_json)
+            configured_bucket = str(
+                parsed.get("storage_bucket") or parsed.get("storageBucket") or ""
+            ).strip()
+            if configured_bucket.startswith("gs://"):
+                configured_bucket = configured_bucket[5:]
+            if configured_bucket and re.fullmatch(r"[A-Za-z0-9._-]{3,255}", configured_bucket):
+                set_setting("firebase_storage_bucket", configured_bucket)
+            else:
+                project_id = str(parsed.get("project_id", "") or "").strip()
+                if re.fullmatch(r"[a-z0-9][a-z0-9-]{4,28}[a-z0-9]", project_id):
+                    set_setting("firebase_storage_bucket", f"{project_id}.firebasestorage.app")
         except Exception:
             pass
     if not os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON"):
@@ -16045,7 +16084,13 @@ def _store_firebase_service_json(service_json: str) -> None:
     set_setting("firebase_service_key_id", key_id)
     set_setting("firebase_service_cipher", base64.b64encode(cipher).decode("ascii"))
     if not get_setting("firebase_storage_bucket", "") and not os.getenv("FIREBASE_STORAGE_BUCKET"):
-        set_setting("firebase_storage_bucket", f"{parsed['project_id']}.firebasestorage.app")
+        configured_bucket = str(parsed.get("storage_bucket") or parsed.get("storageBucket") or "").strip()
+        if configured_bucket.startswith("gs://"):
+            configured_bucket = configured_bucket[5:]
+        if configured_bucket and re.fullmatch(r"[A-Za-z0-9._-]{3,255}", configured_bucket):
+            set_setting("firebase_storage_bucket", configured_bucket)
+        else:
+            set_setting("firebase_storage_bucket", f"{parsed['project_id']}.firebasestorage.app")
     if old_key_id and old_key_id != key_id:
         try:
             KEYRING.wipe(old_key_id)
