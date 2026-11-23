@@ -30,7 +30,7 @@ def _configured() -> bool:
     )
 
 
-def _bucket():
+def _bucket(bucket_name: str | None = None):
     """Return an authenticated Firebase Storage bucket, or raise a useful error."""
     try:
         import firebase_admin
@@ -38,7 +38,7 @@ def _bucket():
     except ImportError as exc:
         raise RuntimeError("firebase-admin is not installed") from exc
 
-    bucket_name = str(os.getenv("FIREBASE_STORAGE_BUCKET") or "").strip()
+    bucket_name = str(bucket_name or os.getenv("FIREBASE_STORAGE_BUCKET") or "").strip()
     if not bucket_name:
         raise RuntimeError("FIREBASE_STORAGE_BUCKET is not configured")
     if bucket_name.startswith("gs://"):
@@ -65,11 +65,65 @@ def _bucket():
                 credentials.Certificate(credential_path),
                 {"storageBucket": bucket_name},
             )
-    try:
-        return storage.bucket(name=bucket_name, app=app)
-    except TypeError:
-        # Older firebase-admin releases accept only the app positional form.
-        return storage.bucket(bucket_name, app=app)
+    def make_bucket(name: str):
+        try:
+            return storage.bucket(name=name, app=app)
+        except TypeError:
+            # Older firebase-admin releases accept only the app positional form.
+            return storage.bucket(name, app=app)
+
+    bucket = make_bucket(bucket_name)
+    if bucket_name == str(os.getenv("FIREBASE_STORAGE_BUCKET") or "").strip():
+        try:
+            if bucket.exists():
+                return bucket
+        except Exception:
+            pass
+        for candidate in _bucket_candidates():
+            if candidate == bucket_name:
+                continue
+            try:
+                candidate_bucket = make_bucket(candidate)
+                if candidate_bucket.exists():
+                    os.environ["FIREBASE_STORAGE_BUCKET"] = candidate
+                    return candidate_bucket
+            except Exception:
+                continue
+    return bucket
+
+
+def _bucket_candidates() -> list[str]:
+    """Return ordered bucket names that can be inferred from the configuration.
+
+    A service-account JSON normally contains the project ID but not the Storage
+    bucket. Firebase projects commonly use either the newer ``firebasestorage``
+    domain or the legacy ``appspot.com`` bucket, so both are checked.
+    """
+    candidates: list[str] = []
+    configured = str(os.getenv("FIREBASE_STORAGE_BUCKET") or "").strip()
+    if configured.startswith("gs://"):
+        configured = configured[5:]
+    if configured:
+        candidates.append(configured)
+    raw_json = str(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or "").strip()
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+            explicit = str(parsed.get("storage_bucket") or parsed.get("storageBucket") or "").strip()
+            if explicit.startswith("gs://"):
+                explicit = explicit[5:]
+            if explicit:
+                candidates.append(explicit)
+            project_id = str(parsed.get("project_id") or "").strip()
+            if project_id:
+                candidates.extend((f"{project_id}.firebasestorage.app", f"{project_id}.appspot.com"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    unique: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in unique:
+            unique.append(candidate)
+    return unique
 
 
 def _retention() -> int:
@@ -111,25 +165,36 @@ def firebase_check_connection() -> Dict[str, Any]:
     """Authenticate and verify that the configured Storage bucket is reachable."""
     if not _configured():
         return {"ok": False, "configured": False, "error": "Firebase is not configured."}
-    try:
-        bucket = _bucket()
-        # exists() performs an authenticated bucket metadata request without
-        # creating or changing any user data.
-        exists = bool(bucket.exists())
-        if not exists:
-            return {"ok": False, "configured": True, "error": "Firebase Storage bucket was not found."}
-        latest = bucket.blob(_POINTER_NAME)
-        has_latest = bool(latest.exists())
-        result = {"ok": True, "configured": True, "bucket": bucket.name, "hasLatest": has_latest}
-        if has_latest:
-            try:
-                pointer = json.loads(latest.download_as_bytes().decode("utf-8"))
-                result.update({"createdAt": pointer.get("createdAt"), "sizeBytes": pointer.get("sizeBytes", 0), "fileCount": pointer.get("fileCount", 0)})
-            except Exception:
-                result["hasLatest"] = False
-        return result
-    except Exception as exc:
-        return {"ok": False, "configured": True, "error": str(exc)}
+    candidates = _bucket_candidates()
+    if not candidates:
+        return {"ok": False, "configured": True, "error": "No Firebase Storage bucket could be inferred."}
+    errors: list[str] = []
+    for candidate in candidates:
+        try:
+            bucket = _bucket(candidate)
+            # exists() performs an authenticated bucket metadata request without
+            # creating or changing any user data.
+            if not bool(bucket.exists()):
+                errors.append(f"{candidate}: not found")
+                continue
+            latest = bucket.blob(_POINTER_NAME)
+            has_latest = bool(latest.exists())
+            # Keep the validated bucket for this process so subsequent backup
+            # and restore calls do not continue using a stale inferred name.
+            os.environ["FIREBASE_STORAGE_BUCKET"] = str(bucket.name)
+            result = {"ok": True, "configured": True, "bucket": bucket.name, "hasLatest": has_latest}
+            if has_latest:
+                try:
+                    pointer = json.loads(latest.download_as_bytes().decode("utf-8"))
+                    result.update({"createdAt": pointer.get("createdAt"), "sizeBytes": pointer.get("sizeBytes", 0), "fileCount": pointer.get("fileCount", 0)})
+                except Exception:
+                    result["hasLatest"] = False
+            return result
+        except Exception as exc:
+            errors.append(f"{candidate}: {str(exc)[:180]}")
+    return {"ok": False, "configured": True,
+            "error": "Firebase Storage bucket was not found or could not be accessed.",
+            "attempted": candidates, "details": errors[:5]}
 
 
 def firebase_backup_now(base_dir: str | Path, passphrase: str) -> Dict[str, Any]:

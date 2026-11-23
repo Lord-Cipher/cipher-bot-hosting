@@ -5949,11 +5949,20 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         def _run_firebase_test() -> None:
             result = firebase_check_connection()
             if result.get("ok"):
+                if result.get("bucket"):
+                    set_setting("firebase_storage_bucket", str(result["bucket"]))
                 set_setting("firebase_backup_available", bool(result.get("hasLatest")))
             status = "CONNECTED" if result.get("ok") else "FAILED"
-            detail = "Latest pointer found" if result.get("hasLatest") else "Bucket reachable; no backup has been synced yet"
+            detail = (
+                f"Bucket: {result.get('bucket')} · Latest pointer found"
+                if result.get("hasLatest") else
+                f"Bucket: {result.get('bucket')} · Bucket reachable; no backup has been synced yet"
+            )
             if not result.get("ok"):
                 detail = result.get("error", "Unknown Firebase error")
+                attempted = result.get("attempted") or []
+                if attempted:
+                    detail += " Tried: " + ", ".join(str(item) for item in attempted[:3])
             bot.send_message(uid, f"<b>{'🟢' if result.get('ok') else '🔴'} Firebase Connection {status}</b>\n{esc(str(detail)[:1200])}", parse_mode="HTML")
         threading.Thread(target=_run_firebase_test, daemon=True, name="firebase-connection-test").start()
         return
