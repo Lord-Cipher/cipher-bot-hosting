@@ -36,7 +36,7 @@ from telebot import types
 from telebot.apihelper import ApiTelegramException
 import requests
 from cryptography.fernet import Fernet, InvalidToken
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 from vault_sync import download_latest_snapshot, materialize_snapshot, sync_vault, export_portable_backup, import_portable_backup
 from firebase_backup import firebase_auto_loop, firebase_backup_now, firebase_check_connection, firebase_preview, firebase_restore_now, firebase_restore_on_boot, firebase_status
 from node_manager import test_node, new_node, CredentialStore
@@ -658,7 +658,7 @@ except Exception as _ssf_err:
     import sys as _sys
     print(f"[security] security_scanner_free.py not found — using built-in scanner ({_ssf_err})", file=_sys.stderr)
 import urllib.request as _urllib_req
-from urllib.parse import urlencode as _urlencode
+from urllib.parse import urlencode as _urlencode, parse_qsl
 import json as _json
 _AI_SCAN_PROMPT = """You are a security expert reviewing uploaded bot code.
 Analyze the code below for malicious behavior. Look for:
@@ -2125,6 +2125,79 @@ def _ka_root() -> Any:  # noqa: D401
             "mode": "webhook" if get_setting("webhook_enabled", False) else "polling"
         }
     )
+def _telegram_webapp_user(init_data: str) -> Optional[Dict[str, Any]]:
+    """Validate Telegram Web App initData and return its authenticated user."""
+    try:
+        fields = dict(parse_qsl(str(init_data or ""), keep_blank_values=True))
+        supplied_hash = fields.pop("hash", "")
+        if not supplied_hash or not fields:
+            return None
+        check_string = "\n".join(f"{k}={fields[k]}" for k in sorted(fields))
+        secret = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+        expected_hash = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected_hash, supplied_hash):
+            return None
+        if int(fields.get("auth_date", "0")) < int(time.time()) - 86400:
+            return None
+        user = json.loads(fields.get("user", "{}"))
+        return user if isinstance(user, dict) and user.get("id") else None
+    except Exception:
+        return None
+@_ka.route("/telegram-payment-mini-app")
+def _telegram_payment_mini_app() -> Any:
+    """Serve the lightweight Telegram Mini App checkout shell."""
+    return Response("""<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Cipher Tech Host Checkout</title><script src='https://telegram.org/js/telegram-web-app.js'></script>
+<style>body{font-family:system-ui;background:var(--tg-theme-bg-color,#10131a);color:var(--tg-theme-text-color,#fff);padding:20px}main{max-width:520px;margin:auto}.card{background:var(--tg-theme-secondary-bg-color,#1c2230);border-radius:18px;padding:18px;margin:12px 0}button{width:100%;padding:14px;margin-top:10px;border:0;border-radius:12px;font-weight:700;background:#2ea6ff;color:#fff}button.alt{background:#273449}.muted{opacity:.7}.error{color:#ff7777}</style></head>
+<body><main><h2>Cipher Tech Host</h2><p class='muted'>Secure Telegram checkout</p><div id='app'>Loading plans…</div></main>
+<script>(async()=>{const tg=window.Telegram.WebApp;tg.ready();tg.expand();const init=tg.initData;
+const root=document.getElementById('app');if(!init){root.innerHTML='<p class="error">Open this checkout from Telegram.</p>';return;}
+const r=await fetch('/telegram-payment-mini-app/plans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:init})});const d=await r.json();
+if(!d.ok){root.innerHTML='<p class="error">'+(d.error||'Unable to load plans')+'</p>';return;}
+root.innerHTML=d.plans.map(p=>`<div class="card"><b>${p.name}</b><div class="muted">${p.duration} · ${p.amount}</div><button data-plan="${p.id}">Continue</button></div>`).join('');
+root.querySelectorAll('button').forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent='Creating secure invoice…';const x=await fetch('/telegram-payment-mini-app/invoice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:init,plan:b.dataset.plan})});const v=await x.json();if(!v.ok){b.disabled=false;b.textContent='Try again';alert(v.error||'Invoice failed');return;}root.innerHTML='<div class="card"><h3>Invoice ready</h3><p>'+v.plan+' · '+v.amount+'</p><p class="muted">Payment confirmation is handled by OxaPay and the bot webhook.</p><button onclick="location.href='+JSON.stringify(v.payment_url)+'">Pay securely</button><button class="alt" onclick="Telegram.WebApp.close()">Return to Telegram</button></div>';});})();</script></body></html>""", mimetype="text/html")
+@_ka.route("/telegram-payment-mini-app/plans", methods=["POST"])
+def _telegram_payment_plans() -> Any:
+    user = _telegram_webapp_user((request.get_json(silent=True) or {}).get("init_data"))
+    if not user:
+        return jsonify({"ok": False, "error": "Invalid or expired Telegram session"}), 401
+    currency = str(get_setting("payment_currency", "USD") or "USD").upper()
+    symbol = cur_sym()
+    plans = [{"id": key, "name": p["name"], "duration": "Lifetime" if key == "lifetime" else f"{p['days']} days",
+              "amount": f"{p['price']:g}{symbol} {currency}"} for key, p in PLAN_LIMITS.items()
+             if key != "free" and float(p.get("price", 0)) > 0]
+    return jsonify({"ok": True, "plans": plans})
+@_ka.route("/telegram-payment-mini-app/invoice", methods=["POST"])
+def _telegram_payment_invoice() -> Any:
+    body = request.get_json(silent=True) or {}
+    user = _telegram_webapp_user(body.get("init_data"))
+    plan = str(body.get("plan", ""))
+    p = PLAN_LIMITS.get(plan)
+    if not user or not p or plan == "free":
+        return jsonify({"ok": False, "error": "Invalid checkout request"}), 400
+    if not _configured_oxapay_key():
+        return jsonify({"ok": False, "error": "Automatic payments are not configured"}), 503
+    uid = int(user["id"])
+    currency = str(get_setting("payment_currency", "USD") or "USD").upper()
+    amount = float(p.get("price", 0))
+    doc = db_load_ro().get("users", {}).get(str(uid), {})
+    coupon = doc.get("active_coupon")
+    if coupon:
+        c = db_load_ro().get("coupons", {}).get(str(coupon).upper()) or {}
+        amount = round(amount * (1 - float(c.get("discount_pct", c.get("percent", 0))) / 100), 2)
+        amount = max(0, round(amount - float(c.get("discount_flat", 0)), 2))
+    bundle = _active_bundle_discount(plan)
+    if bundle:
+        amount = round(amount * (1 - bundle / 100), 2)
+    try:
+        pay_url, track_id, error, usd = _create_oxapay_invoice(amount, currency, uid, plan)
+        if not pay_url or not track_id:
+            return jsonify({"ok": False, "error": error or "Invoice creation failed"}), 502
+        return jsonify({"ok": True, "payment_url": pay_url, "track_id": track_id,
+                        "plan": p["name"], "amount": f"{amount:g}{cur_sym()} (~${usd:.2f})"})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:200]}), 502
 @_ka.route("/tg-webhook/<token>", methods=["POST"])
 def _tg_webhook_listener(token: str) -> Any:
     """Listen for authenticated Telegram updates via webhook."""
@@ -2716,6 +2789,12 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
                 f"{G['div']}{FOOTER}"
             )
             kb = types.InlineKeyboardMarkup()
+            mini_app_url = str(get_setting("public_url", "") or "").rstrip("/") + "/telegram-payment-mini-app"
+            if mini_app_url.startswith("https://"):
+                kb.add(types.InlineKeyboardButton(
+                    "📲  Open Telegram Checkout",
+                    web_app=types.WebAppInfo(url=mini_app_url),
+                ))
             kb.add(Btn(f"💳  Pᴀʏ Nᴏᴡ (${usd_price:.2f})", url=pay_url, style="success"))
             kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="danger"))
             show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
@@ -4956,6 +5035,28 @@ def notify_owner(html: str) -> None:
         bot.send_message(OWNER_ID, html, parse_mode="HTML")
     except Exception as e:
         print(f"[notify_owner] {e}")
+def _send_referral_join_notification(ref_uid: int, referred_user: Any, total_refs: int, credits: int) -> None:
+    """Notify the account that supplied the referral link, not the new user."""
+    try:
+        name = esc(str(getattr(referred_user, "first_name", "") or "New member"))
+        username = str(getattr(referred_user, "username", "") or "").strip()
+        identity = f"@{esc(username)}" if username else name
+        bot.send_message(
+            int(ref_uid),
+            f"<b>🎁 {sc('New referral activated')}</b>\n"
+            f"{G['div']}\n"
+            f"<b>🚀 {sc('Your invite link brought in a new member')}</b>\n\n"
+            f"{bullet('New member', identity)}\n"
+            f"{bullet('User ID', getattr(referred_user, 'id', '—'))}\n"
+            f"{bullet('Reward added', '+1 referral credit')}\n"
+            f"{bullet('Referral balance', credits)}\n"
+            f"{bullet('Total referrals', total_refs)}\n"
+            f"{G['div']}\n"
+            f"{sc('Use your referral credits for bot slots or file coins from the Referral menu.')}{FOOTER}",
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        print(f"[referral_notify] {exc}")
 def post_announcement(html: str) -> None:
     if not ANNOUNCE_CHANNEL:
         return
@@ -4993,15 +5094,10 @@ def get_or_create_user(u: types.User, ref: Optional[int] = None) -> Tuple[Dict[s
             new_achievements = award_for_event(db, ref_user, "referral")
             record_activity(db, int(ref), "referral", f"{ref_user.get('name', 'A user')} earned a referral bonus")
             db_save(db)
-            try:
-                bot.send_message(
-                    ref,
-                    f"<b>{G['plus']} {sc('You earned a referral bonus')}</b>\n"
-                    f"{bullet('From', f'@{u.username or u.first_name}')}\n"
-                    f"{bullet('Referral credit', '+1 redeemable credit')}",
-                )
-            except Exception:
-                pass
+            _send_referral_join_notification(
+                ref, u, int(ref_user.get("ref_count", 0) or 0),
+                int(ref_user.get("ref_credit", 0) or 0),
+            )
         notify_owner(
             f"<b>{G['plus']} {sc('New user joined')}</b>\n"
             f"{bullet('Name', u.first_name)}\n"
@@ -15268,7 +15364,8 @@ def _ref_process(new_uid, ref_uid):
         return False
     d       = db_load()
     ref_u   = d["users"].get(str(ref_uid), {})
-    if new_uid in ref_u.get("referrals", []):
+    existing_refs = ref_u.get("referrals", []) or []
+    if any((item.get("uid") if isinstance(item, dict) else item) == new_uid for item in existing_refs):
         return False
     reward  = float(get_setting("referral_reward", 0) or 0)
     ref_u.setdefault("referrals", []).append(new_uid)
@@ -15277,10 +15374,13 @@ def _ref_process(new_uid, ref_uid):
     db_save(d)
     try:
         new_name = d["users"].get(str(new_uid), {}).get("name", str(new_uid))
-        bot.send_message(ref_uid,
-            f"<b>{G['spark']} Referral Reward!</b>\n"
-            f"{bullet('New user', esc(str(new_name)))}\n"
-            f"{bullet('Credits', reward)}", parse_mode="HTML")
+        referred = d["users"].get(str(new_uid), {})
+        _send_referral_join_notification(
+            ref_uid,
+            type("ReferralUser", (), {"id": new_uid, "first_name": new_name, "username": referred.get("username", "")})(),
+            len(ref_u.get("referrals", []) or []),
+            int(ref_u.get("credits", 0) or 0),
+        )
     except Exception:
         pass
     _wh_fire("referral", {"ref_uid": ref_uid, "new_uid": new_uid, "reward": reward})
