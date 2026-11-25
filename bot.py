@@ -1382,6 +1382,7 @@ def divider(width: int = 22, ch: str = "\u2501") -> str:
 def bullet(label: str, value: Any, glyph: str = G["bullet"]) -> str:
     return f"{glyph}  <b>{esc(label)}</b>: <code>{esc(value)}</code>"
 _db_lock = threading.RLock()
+_oxapay_webhook_lock = threading.Lock()
 def _atomic_write(path: Path, data: Any) -> None:
     """Write JSON atomically. Falls back to copy+rename if `replace` fails
     across filesystem boundaries (some Docker volume setups)."""
@@ -2219,52 +2220,114 @@ def _tg_webhook_listener(token: str) -> Any:
     return "Invalid Content-Type", 400
 @_ka.route("/oxapay-webhook", methods=["POST"])
 def _oxapay_webhook_listener() -> Any:
-    """Listen for OxaPay payment notifications."""
+    """Receive authenticated OxaPay status callbacks and fulfill paid orders once."""
     try:
-        data = request.get_json() if request.is_json else request.form.to_dict()
+        raw_body = request.get_data(cache=True)
+        merchant_key = _configured_oxapay_key()
+        supplied_hmac = str(request.headers.get("HMAC", "") or "").strip().lower()
+        expected_hmac = hmac.new(
+            merchant_key.encode("utf-8"), raw_body, hashlib.sha512
+        ).hexdigest() if merchant_key else ""
+        if not merchant_key or not supplied_hmac or not hmac.compare_digest(supplied_hmac, expected_hmac):
+            logging.warning("[oxapay] rejected callback with invalid HMAC")
+            return "Invalid HMAC signature", 400
+
+        data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
         if not data:
             print("[oxapay] webhook received with no data", flush=True)
             return "No data", 400
-        
+
         nested = data.get("data") if isinstance(data.get("data"), dict) else {}
         status = str(data.get("status") or data.get("payment_status") or nested.get("status") or "").lower()
         track_id = data.get("trackId") or data.get("track_id") or nested.get("track_id") or nested.get("trackId")
         order_id = data.get("orderId") or data.get("order_id") or nested.get("order_id") or ""
         uid_str = data.get("description") or nested.get("description") or ""
-        
+
         print(f"[oxapay] webhook: status={status}, track={track_id}, order={order_id}, uid={uid_str}", flush=True)
-        
-        if status in {"paid", "pay", "completed", "success"}:
-            try:
-                uid = int(uid_str)
-                # Product orders use product_<product_id>_<uid>_<timestamp>.
-                if str(order_id).startswith("product_"):
-                    product_id = str(order_id).split("_")[1]
-                    db = db_load(); product = db.get("product_files", {}).get(product_id)
-                    user = db.get("users", {}).get(str(uid), {})
-                    if not product:
-                        raise ValueError("product not found")
-                    ok, reason, granted = product_access(db, uid, product_id, plan_active=lambda _plan: True, purchase=True)
-                    if not ok:
-                        raise ValueError(reason)
-                    user.setdefault("product_access", {})[product_id] = granted["buyers"][str(uid)]
-                    db_save(db)
-                    log_notification("PAYMENT", f"OxaPay product purchase successful for UID {uid} (Product: {product_id})", uid=uid)
-                    bot.send_message(uid, f"{G['ok']} Payment confirmed. Your file is now unlocked.")
-                    _send_product_file(uid, product)
-                else:
-                    # Extract plan from order_id (format: plan_uid_timestamp)
-                    plan_key = order_id.split("_")[0] if "_" in order_id else "pro"
-                    grant_plan(uid, plan_key)
-                    log_notification("PAYMENT", f"OxaPay auto-payment successful for UID {uid} (Plan: {plan_key})", uid=uid)
-                    send_elite_receipt(uid, str(track_id), plan_key)
-                
-                _flush_map_buffer(uid)
+
+        # OxaPay sends an initial "paying" callback. Only "paid" means the
+        # funds are confirmed and safe to fulfill.
+        if status not in {"paid", "pay", "completed", "success"}:
+            return "OK", 200
+        if not track_id or not order_id:
+            logging.warning("[oxapay] paid callback missing track_id or order_id")
+            return "Invalid callback", 400
+
+        with _oxapay_webhook_lock:
+            db = db_load()
+            payments = db.setdefault("payments", [])
+            payment = next(
+                (row for row in payments
+                 if str(row.get("method", "")).lower() == "oxapay"
+                 and (str(row.get("track_id", "")) == str(track_id)
+                      or str(row.get("order_id", "")) == str(order_id))),
+                None,
+            )
+            if payment and payment.get("status") == "approved":
                 return "OK", 200
-            except Exception as e:
-                print(f"[oxapay] processing error: {e}", flush=True)
-        
-        return "OK", 200
+
+            uid = int(uid_str)
+            order_parts = str(order_id).split("_")
+            if len(order_parts) < 3:
+                raise ValueError("invalid order_id")
+            order_uid = int(order_parts[-2])
+            if order_uid != uid:
+                raise ValueError("order user mismatch")
+
+            callback_amount = data.get("amount") or nested.get("amount")
+            if payment and payment.get("uid") not in (None, uid):
+                raise ValueError("payment user mismatch")
+            if payment and callback_amount is not None and payment.get("amount_usd") is not None:
+                if abs(float(callback_amount) - float(payment["amount_usd"])) > 0.02:
+                    raise ValueError("payment amount mismatch")
+
+            # Product IDs may contain underscores, so strip the fixed uid and
+            # timestamp suffix rather than taking only split('_')[1].
+            if order_parts[0] == "product":
+                product_id = "_".join(order_parts[1:-2])
+                product = db.get("product_files", {}).get(product_id)
+                if not product:
+                    raise ValueError("product not found")
+                ok, reason, granted = product_access(
+                    db, uid, product_id, plan_active=lambda _plan: True, purchase=True
+                )
+                if not ok:
+                    raise ValueError(reason)
+                user = db.get("users", {}).get(str(uid), {})
+                user.setdefault("product_access", {})[product_id] = granted["buyers"][str(uid)]
+                if payment:
+                    payment.update({"status": "approved", "paid_ts": ts_iso(), "callback_amount": callback_amount, "callback_currency": data.get("currency")})
+                else:
+                    payments.append({"id": rand_token(8), "uid": uid, "method": "oxapay", "kind": "product", "product_id": product_id, "order_id": str(order_id), "track_id": str(track_id), "amount_usd": callback_amount, "status": "approved", "paid_ts": ts_iso(), "ts": ts_iso()})
+                db_save(db)
+                log_notification("PAYMENT", f"OxaPay product purchase successful for UID {uid} (Product: {product_id})", uid=uid)
+                bot.send_message(uid, f"{G['ok']} Payment confirmed. Your file is now unlocked.")
+                _send_product_file(uid, product)
+            else:
+                plan_key = "_".join(order_parts[:-2])
+                if plan_key not in PLAN_LIMITS or plan_key == "free":
+                    raise ValueError("invalid plan in order_id")
+                if payment:
+                    payment.update({"status": "processing", "processing_ts": ts_iso(), "callback_amount": callback_amount, "callback_currency": data.get("currency")})
+                else:
+                    payment = {"id": rand_token(8), "uid": uid, "method": "oxapay", "plan": plan_key, "order_id": str(order_id), "track_id": str(track_id), "amount_usd": callback_amount, "status": "processing", "processing_ts": ts_iso(), "ts": ts_iso()}
+                    payments.append(payment)
+                grant_plan(uid, plan_key)
+                # grant_plan() persists its own freshly loaded database. Reload
+                # before marking this invoice approved so we do not overwrite it.
+                settled = db_load()
+                settled_payment = next((row for row in settled.get("payments", []) if row.get("order_id") == str(order_id) or row.get("track_id") == str(track_id)), None)
+                if settled_payment:
+                    settled_payment.update({"status": "approved", "paid_ts": ts_iso(), "callback_amount": callback_amount, "callback_currency": data.get("currency")})
+                    db_save(settled)
+                log_notification("PAYMENT", f"OxaPay auto-payment successful for UID {uid} (Plan: {plan_key})", uid=uid)
+                send_elite_receipt(uid, str(track_id), plan_key)
+
+            _flush_map_buffer(uid)
+            return "OK", 200
+    except ValueError as e:
+        print(f"[oxapay] rejected callback: {e}", flush=True)
+        return "Invalid callback", 400
     except Exception as e:
         print(f"[oxapay] webhook error: {e}", flush=True)
         return "Internal Error", 500
@@ -2738,7 +2801,23 @@ def _create_oxapay_invoice(local_amount: float, currency_code: str, uid: int, pl
         if isinstance(error, dict): error = error.get("message") or str(error)
         return None, None, str(error)[:300], None
     data = body.get("data") or {}
-    return data.get("payment_url"), data.get("track_id"), "", usd_amount
+    payment_url, track_id = data.get("payment_url"), data.get("track_id")
+    if payment_url and track_id:
+        try:
+            db = db_load()
+            db.setdefault("payments", []).append({
+                "id": rand_token(8), "uid": uid, "method": "oxapay",
+                "plan": None if str(plan).startswith("product_") else plan,
+                "kind": "product" if str(plan).startswith("product_") else "plan",
+                "product_id": str(plan)[len("product_"):] if str(plan).startswith("product_") else None,
+                "order_id": order_id, "track_id": str(track_id),
+                "amount": float(local_amount), "currency": str(currency_code).upper(),
+                "amount_usd": float(usd_amount), "status": "pending", "ts": ts_iso(),
+            })
+            db_save(db)
+        except Exception as exc:
+            logging.error("[oxapay] could not record invoice %s: %s", track_id, exc)
+    return payment_url, track_id, "", usd_amount
 def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
     p = PLAN_LIMITS.get(plan)
     if not p: ack(call, "Unknown plan"); return
