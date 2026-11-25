@@ -1530,6 +1530,17 @@ def set_setting(key: str, value: Any) -> None:
         # stale nested copy.
         s[key] = value
     settings_save(s)
+def _public_base_url() -> str:
+    """Return the HTTPS origin used by Telegram Web Apps and callbacks."""
+    value = str(
+        get_setting("public_url", "")
+        or os.environ.get("PUBLIC_URL", "")
+        or os.environ.get("RAILWAY_STATIC_URL", "")
+        or ""
+    ).strip().rstrip("/")
+    if value and not value.startswith(("http://", "https://")):
+        value = "https://" + value
+    return value if value.startswith("https://") else ""
 def _oxapay_cipher() -> Fernet:
     """Create the local application cipher used for admin-entered secrets."""
     material = f"{TOKEN}|{OWNER_ID}|oxapay".encode("utf-8")
@@ -2795,7 +2806,7 @@ def _create_oxapay_invoice(local_amount: float, currency_code: str, uid: int, pl
     usd_amount, fx_error = _local_amount_to_usd(local_amount, currency_code)
     if usd_amount is None:
         return None, None, fx_error, None
-    public_url = str(get_setting("public_url", "") or "").rstrip("/")
+    public_url = _public_base_url()
     order_id = f"{plan}_{uid}_{int(time.time())}"
     payload = {
         "amount": float(usd_amount),
@@ -2849,6 +2860,14 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
     if not _configured_oxapay_key():
         bot.answer_callback_query(call.id, "⚠️ Automatic payments are not configured by admin.", show_alert=True)
         return
+    public_url = _public_base_url()
+    if not public_url:
+        bot.answer_callback_query(
+            call.id,
+            "⚠️ Telegram Mini App checkout needs an HTTPS Public URL configured by admin.",
+            show_alert=True,
+        )
+        return
 
     # Apply coupons in the configured display currency first.
     currency_code = str(get_setting("payment_currency", "USD") or "USD").upper()
@@ -2886,19 +2905,17 @@ def render_auto_payment_screen(call: types.CallbackQuery, plan: str) -> None:
                 f"{bullet('Track ID', f'<code>{track_id}</code>')}\n"
                 f"{G['div']}\n"
                 f"<b>{sc('Instructions')}:</b>\n"
-                f"1. {sc('Tap the button below to pay via OxaPay')}.\n"
+                f"1. {sc('Tap the Telegram checkout button below to pay via OxaPay')}.\n"
                 f"2. {sc('You can use any crypto wallet (Binance, Trust, etc.)')}.\n"
                 f"3. {sc('Slots will unlock automatically after confirmation')}.\n"
                 f"{G['div']}{FOOTER}"
             )
             kb = types.InlineKeyboardMarkup()
-            mini_app_url = str(get_setting("public_url", "") or "").rstrip("/") + "/telegram-payment-mini-app"
-            if mini_app_url.startswith("https://"):
-                kb.add(types.InlineKeyboardButton(
-                    "📲  Open Telegram Checkout",
-                    web_app=types.WebAppInfo(url=mini_app_url),
-                ))
-            kb.add(Btn(f"💳  Pᴀʏ Nᴏᴡ (${usd_price:.2f})", url=pay_url, style="success"))
+            mini_app_url = public_url + "/telegram-payment-mini-app"
+            kb.add(types.InlineKeyboardButton(
+                "📲  Open Telegram Checkout",
+                web_app=types.WebAppInfo(url=mini_app_url),
+            ))
             kb.add(Btn(f"{G['back']}  Pᴀʏᴍᴇɴᴛ Hᴜʙ", callback_data=f"plan_buy_{plan}", style="danger"))
             show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
         else:
