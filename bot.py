@@ -2152,12 +2152,12 @@ def _telegram_payment_mini_app() -> Any:
 <title>Cipher Tech Host Checkout</title><script src='https://telegram.org/js/telegram-web-app.js'></script>
 <style>body{font-family:system-ui;background:var(--tg-theme-bg-color,#10131a);color:var(--tg-theme-text-color,#fff);padding:20px}main{max-width:520px;margin:auto}.card{background:var(--tg-theme-secondary-bg-color,#1c2230);border-radius:18px;padding:18px;margin:12px 0}button{width:100%;padding:14px;margin-top:10px;border:0;border-radius:12px;font-weight:700;background:#2ea6ff;color:#fff}button.alt{background:#273449}.muted{opacity:.7}.error{color:#ff7777}</style></head>
 <body><main><h2>Cipher Tech Host</h2><p class='muted'>Secure Telegram checkout</p><div id='app'>Loading plans…</div></main>
-<script>(async()=>{const tg=window.Telegram.WebApp;tg.ready();tg.expand();const init=tg.initData;
-const root=document.getElementById('app');if(!init){root.innerHTML='<p class="error">Open this checkout from Telegram.</p>';return;}
-const r=await fetch('/telegram-payment-mini-app/plans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:init})});const d=await r.json();
-if(!d.ok){root.innerHTML='<p class="error">'+(d.error||'Unable to load plans')+'</p>';return;}
-root.innerHTML=d.plans.map(p=>`<div class="card"><b>${p.name}</b><div class="muted">${p.duration} · ${p.amount}</div><button data-plan="${p.id}">Continue</button></div>`).join('');
-root.querySelectorAll('button').forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent='Creating secure invoice…';const x=await fetch('/telegram-payment-mini-app/invoice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:init,plan:b.dataset.plan})});const v=await x.json();if(!v.ok){b.disabled=false;b.textContent='Try again';alert(v.error||'Invoice failed');return;}root.innerHTML='<div class="card"><h3>Invoice ready</h3><p>'+v.plan+' · '+v.amount+'</p><p class="muted">Payment confirmation is handled by OxaPay and the bot webhook.</p><button onclick="location.href='+JSON.stringify(v.payment_url)+'">Pay securely</button><button class="alt" onclick="Telegram.WebApp.close()">Return to Telegram</button></div>';});})();</script></body></html>""", mimetype="text/html")
+	<script>(async()=>{const tg=window.Telegram.WebApp;tg.ready();tg.expand();const init=tg.initData;
+	const root=document.getElementById('app');if(!init){root.innerHTML='<p class="error">Open this checkout from Telegram.</p>';return;}
+	const r=await fetch('/telegram-payment-mini-app/plans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:init})});const d=await r.json();
+	if(!d.ok){root.innerHTML='<p class="error">'+(d.error||'Unable to load plans')+'</p>';return;}
+	root.innerHTML=d.plans.map(p=>`<div class="card"><b>${p.name}</b><div class="muted">${p.duration} · ${p.amount}</div><button data-plan="${p.id}">Continue</button></div>`).join('');
+	root.querySelectorAll('button').forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent='Creating secure invoice…';const x=await fetch('/telegram-payment-mini-app/invoice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:init,plan:b.dataset.plan})});const v=await x.json();if(!v.ok){b.disabled=false;b.textContent='Try again';alert(v.error||'Invoice failed');return;}root.innerHTML='<div class="card"><h3>Invoice ready</h3><p>'+v.plan+' · '+v.amount+'</p><p class="muted">Payment confirmation is handled by OxaPay and this screen will update automatically.</p><button id="pay-now">Pay securely</button><p id="payment-status" class="muted">Payment not started.</p><button class="alt" id="close-checkout">Return to Telegram</button></div>';const pay=document.getElementById('pay-now'),status=document.getElementById('payment-status');let timer=null,checks=0;const poll=async()=>{checks++;try{const q=await fetch('/telegram-payment-mini-app/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:init,track_id:v.track_id})});const s=await q.json();if(!q.ok){status.textContent=s.error||'Unable to check payment status';return;}if(s.status==='approved'){if(timer)clearInterval(timer);pay.disabled=true;pay.textContent='Payment confirmed';status.textContent='Success — your plan is now active.';status.className='';if(tg.HapticFeedback)tg.HapticFeedback.notificationOccurred('success');return;}if(s.status==='rejected'){if(timer)clearInterval(timer);status.textContent='Payment was not confirmed. Please contact support.';return;}status.textContent='Waiting for OxaPay confirmation…';if(checks>=300){if(timer)clearInterval(timer);status.textContent='Still waiting. You can keep this screen open or check again later.';}}catch(e){status.textContent='Connection interrupted; retrying…';}};pay.onclick=()=>{pay.disabled=true;pay.textContent='Checkout opened';status.textContent='Complete payment in OxaPay; waiting for confirmation…';try{tg.openLink(v.payment_url)}catch(e){location.href=v.payment_url}poll();timer=setInterval(poll,3000)};document.getElementById('close-checkout').onclick=()=>{if(timer)clearInterval(timer);tg.close()};});})();</script></body></html>""", mimetype="text/html")
 @_ka.route("/telegram-payment-mini-app/plans", methods=["POST"])
 def _telegram_payment_plans() -> Any:
     user = _telegram_webapp_user((request.get_json(silent=True) or {}).get("init_data"))
@@ -2199,6 +2199,30 @@ def _telegram_payment_invoice() -> Any:
                         "plan": p["name"], "amount": f"{amount:g}{cur_sym()} (~${usd:.2f})"})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)[:200]}), 502
+@_ka.route("/telegram-payment-mini-app/status", methods=["POST"])
+def _telegram_payment_status() -> Any:
+    """Return the authenticated user's OxaPay invoice status for Mini App polling."""
+    body = request.get_json(silent=True) or {}
+    user = _telegram_webapp_user(body.get("init_data"))
+    track_id = str(body.get("track_id", "") or "").strip()
+    if not user or not track_id or len(track_id) > 160:
+        return jsonify({"ok": False, "error": "Invalid checkout status request"}), 400
+    uid = int(user["id"])
+    payment = next(
+        (row for row in db_load_ro().get("payments", [])
+         if str(row.get("method", "")).lower() == "oxapay"
+         and str(row.get("track_id", "")) == track_id
+         and str(row.get("uid", "")) == str(uid)),
+        None,
+    )
+    if not payment:
+        return jsonify({"ok": False, "error": "Payment session not found"}), 404
+    return jsonify({
+        "ok": True,
+        "status": str(payment.get("status", "pending")).lower(),
+        "plan": payment.get("plan"),
+        "paid_at": payment.get("paid_ts"),
+    })
 @_ka.route("/tg-webhook/<token>", methods=["POST"])
 def _tg_webhook_listener(token: str) -> Any:
     """Listen for authenticated Telegram updates via webhook."""
