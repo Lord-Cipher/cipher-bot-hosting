@@ -1558,6 +1558,100 @@ def _configured_oxapay_key() -> str:
 def _save_oxapay_key(value: str) -> None:
     cipher = _oxapay_cipher().encrypt(value.strip().encode("utf-8")).decode("ascii")
     set_setting("oxapay_key_cipher", cipher)
+def _configured_cloudflare_token() -> str:
+    env_token = str(os.getenv("CLOUDFLARE_API_TOKEN", "") or "").strip()
+    if env_token:
+        return env_token
+    encrypted = str(get_setting("cloudflare_api_token_cipher", "") or "")
+    if not encrypted:
+        return ""
+    try:
+        return _oxapay_cipher().decrypt(encrypted.encode("ascii")).decode("utf-8").strip()
+    except Exception:
+        logging.warning("[cloudflare] stored API token could not be decrypted")
+        return ""
+def _save_cloudflare_token(value: str) -> None:
+    token = value.strip()
+    if not token:
+        raise ValueError("Cloudflare API token cannot be empty")
+    encrypted = _oxapay_cipher().encrypt(token.encode("utf-8")).decode("ascii")
+    set_setting("cloudflare_api_token_cipher", encrypted)
+def _cloudflare_headers(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+def _cloudflare_api_json(response: requests.Response) -> Dict[str, Any]:
+    try:
+        body = response.json()
+    except Exception:
+        body = {}
+    if not response.ok or not body.get("success"):
+        errors = body.get("errors") or body.get("messages") or []
+        detail = errors[0].get("message") if errors and isinstance(errors[0], dict) else str(errors or response.text[:200])
+        raise RuntimeError(f"Cloudflare API error ({response.status_code}): {detail}")
+    return body
+def _cloudflare_normalize_hostname(value: str) -> str:
+    hostname = str(value or "").strip().lower().rstrip(".")
+    hostname = re.sub(r"^https?://", "", hostname).split("/", 1)[0]
+    if not hostname or "." not in hostname or any(ch.isspace() for ch in hostname):
+        raise ValueError("Enter a valid subdomain such as bot.example.com")
+    if len(hostname) > 253 or any(not part or len(part) > 63 for part in hostname.split(".")):
+        raise ValueError("The subdomain is too long or malformed")
+    return hostname
+def _cloudflare_find_zone(token: str, hostname: str) -> Dict[str, Any]:
+    body = _cloudflare_api_json(requests.get(
+        "https://api.cloudflare.com/client/v4/zones",
+        headers=_cloudflare_headers(token),
+        params={"status": "active", "per_page": 100}, timeout=20,
+    ))
+    matches = [z for z in body.get("result", []) if hostname == z.get("name") or hostname.endswith("." + str(z.get("name", "")))]
+    if not matches:
+        raise RuntimeError("No active Cloudflare zone matches this subdomain")
+    return max(matches, key=lambda z: len(str(z.get("name", ""))))
+def _cloudflare_upsert_dns(token: str, hostname: str, target: str, proxied: bool = True) -> Tuple[bool, str]:
+    hostname = _cloudflare_normalize_hostname(hostname)
+    target = str(target or "").strip().rstrip(".")
+    if not target or any(ch.isspace() for ch in target):
+        raise ValueError("Enter the server IPv4 address or hostname")
+    record_type = "A" if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", target) else "CNAME"
+    zone = _cloudflare_find_zone(token, hostname)
+    zone_id = zone.get("id")
+    existing_body = _cloudflare_api_json(requests.get(
+        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+        headers=_cloudflare_headers(token),
+        params={"name": hostname}, timeout=20,
+    ))
+    existing = next((r for r in existing_body.get("result", []) if r.get("type") == record_type), None)
+    payload = {"type": record_type, "name": hostname, "content": target, "ttl": 1, "proxied": bool(proxied)}
+    if existing:
+        _cloudflare_api_json(requests.put(
+            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{existing['id']}",
+            headers=_cloudflare_headers(token), json=payload, timeout=20,
+        ))
+        action = "updated"
+    else:
+        _cloudflare_api_json(requests.post(
+            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+            headers=_cloudflare_headers(token), json=payload, timeout=20,
+        ))
+        action = "created"
+    set_setting("cloudflare_hostname", hostname)
+    set_setting("cloudflare_target", target)
+    set_setting("cloudflare_zone_id", str(zone_id))
+    set_setting("public_url", f"https://{hostname}")
+    set_setting("cloudflare_last_action", f"{action}:{ts_iso()}")
+    return True, f"Cloudflare DNS record {action}: https://{hostname} → {target}"
+def _cloudflare_test_connection(token: str, hostname: str = "") -> Tuple[bool, str]:
+    try:
+        if hostname:
+            hostname = _cloudflare_normalize_hostname(hostname)
+            zone = _cloudflare_find_zone(token, hostname)
+            return True, f"Connected. Zone <code>{esc(zone.get('name'))}</code> is active."
+        _cloudflare_api_json(requests.get(
+            "https://api.cloudflare.com/client/v4/user/tokens/verify",
+            headers=_cloudflare_headers(token), timeout=20,
+        ))
+        return True, "Cloudflare API token is valid."
+    except Exception as exc:
+        return False, str(exc)[:280]
 def _mask_oxapay_key(value: str) -> str:
     value = value or ""
     return f"{value[:4]}…{value[-4:]}" if len(value) >= 10 else "configured"
@@ -5615,6 +5709,7 @@ _ADMIN_ROUTE_ACTION: Dict[str, str] = {
     # Configuration and transport controls are owner/full-access only.
     "adm_settings": "full_access",
     "adm_set_public_url": "full_access",
+    "adm_altare_domain": "full_access",
     "adm_notifications": "broadcast_view",
     "adm_webhook_toggle": "full_access",
     "adm_bot_manager": "full_access",
@@ -6328,6 +6423,23 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
         set_setting("resource_alerts_enabled", not bool(get_setting("resource_alerts_enabled", True)))
         audit(call.from_user.id, "resource_alerts_toggle", str(get_setting("resource_alerts_enabled", True)))
         return render_adm_resource_alerts(call)
+    if data == "adm_cloudflare":
+        return render_adm_cloudflare(call)
+    if data == "adm_cf_setup":
+        if not admin_only_call(call, "view_stats"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_cf_token"}
+        bot.send_message(call.message.chat.id,
+            "<b>☁️ Cloudflare setup — step 1 of 3</b>\n\n"
+            "Send a Cloudflare API token with Zone DNS edit permission. It will be encrypted before storage.\n"
+            "/cancel to abort.", parse_mode="HTML")
+        return ack(call)
+    if data == "adm_cf_test":
+        if not admin_only_call(call, "view_stats"): return
+        token = _configured_cloudflare_token()
+        ok, message = _cloudflare_test_connection(token, str(get_setting("cloudflare_hostname", "") or "")) if token else (False, "Cloudflare API token is not configured.")
+        audit(call.from_user.id, "cloudflare_connection_test", "success" if ok else "failed")
+        bot.answer_callback_query(call.id, ("✅ " if ok else "❌ ") + re.sub(r"<[^>]+>", "", message)[:180], show_alert=True)
+        return render_adm_cloudflare(call)
     if data == "adm_resource_alerts_threshold":
         if not admin_only_call(call, "view_stats"): return
         USER_STATES[call.from_user.id] = {"flow": "await_adm_resource_threshold"}
@@ -6349,6 +6461,18 @@ def render_admin_subroute(call: types.CallbackQuery, data: str) -> None:
             f"{sc('Send your platform URL (e.g. https://my-hosting.railway.app)')}.\n"
             f"{sc('This is required for GitHub Webhooks to work.')}\n/cancel {sc('to abort')}.",
             parse_mode="HTML")
+        return ack(call)
+    if data == "adm_altare_domain":
+        if not admin_only_call(call, "full_access"): return
+        USER_STATES[call.from_user.id] = {"flow": "await_altare_domain"}
+        current = str(get_setting("public_url", "") or "Not set")
+        bot.send_message(call.message.chat.id,
+            "<b>🟣 Altare domain setup</b>\n"
+            f"{G['div']}Current Public URL: <code>{esc(current)}</code>\n\n"
+            "Send the HTTPS domain assigned to this bot by Altare, for example "
+            "<code>https://ciphertech.go.altare.global</code>.\n"
+            "The bot will verify <code>/health</code> before saving it for the Mini App and OxaPay webhook.\n"
+            "/cancel to abort.", parse_mode="HTML")
         return ack(call)
     if data == "adm_set_support":
         if not admin_only_call(call, "view_stats"): return
@@ -12009,6 +12133,67 @@ def on_text(m: types.Message) -> None:
             set_setting("trial_hours", days * 24)
             USER_STATES.pop(uid, None)
             bot.reply_to(m, f"Free trial duration set to {days * 24} hours")
+            return
+        if flow == "await_cf_token":
+            if len(text) < 20 or len(text) > 300:
+                bot.reply_to(m, "That does not look like a Cloudflare API token. Send the token or /cancel.")
+                return
+            try:
+                _save_cloudflare_token(text)
+            except Exception as exc:
+                bot.reply_to(m, f"Could not store the Cloudflare token: {esc(exc)}", parse_mode="HTML")
+                return
+            USER_STATES[uid] = {"flow": "await_cf_hostname"}
+            bot.reply_to(m, "<b>Cloudflare setup — step 2 of 3</b>\nSend the subdomain to create, for example <code>bot.example.com</code>.", parse_mode="HTML")
+            return
+        if flow == "await_cf_hostname":
+            try:
+                hostname = _cloudflare_normalize_hostname(text)
+            except ValueError as exc:
+                bot.reply_to(m, esc(exc), parse_mode="HTML")
+                return
+            USER_STATES[uid] = {"flow": "await_cf_target", "hostname": hostname}
+            bot.reply_to(m, "<b>Cloudflare setup — step 3 of 3</b>\nSend the server IPv4 address or hostname that this subdomain should target.", parse_mode="HTML")
+            return
+        if flow == "await_cf_target":
+            hostname = str(st.get("hostname", ""))
+            token = _configured_cloudflare_token()
+            try:
+                ok, message = _cloudflare_upsert_dns(token, hostname, text)
+                USER_STATES.pop(uid, None)
+                audit(uid, "cloudflare_dns_configured", f"hostname={hostname}")
+                bot.reply_to(m, f"{G['ok']} {message}\n\nThe Mini App public URL is now <code>https://{esc(hostname)}</code>.", parse_mode="HTML")
+            except Exception as exc:
+                bot.reply_to(m, f"{G['no']} Cloudflare setup failed: <code>{esc(exc)}</code>", parse_mode="HTML")
+            return
+        if flow == "await_altare_domain":
+            from urllib.parse import urlparse
+            raw_url = text.strip().rstrip("/")
+            if not raw_url.startswith("https://"):
+                bot.reply_to(m, "Send the Altare domain with HTTPS, for example https://ciphertech.go.altare.global")
+                return
+            parsed = urlparse(raw_url)
+            if not parsed.netloc or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+                bot.reply_to(m, "Send only the HTTPS hostname without a path, query string, or fragment.")
+                return
+            if not (parsed.hostname or "").lower().endswith(".altare.global"):
+                bot.reply_to(m, "This wizard is for an Altare hostname ending in .altare.global. Use the Public URL wizard for another provider.")
+                return
+            try:
+                health = requests.get(f"{raw_url}/health", timeout=15, allow_redirects=True)
+                body = health.json() if health.headers.get("content-type", "").startswith("application/json") else {}
+                if not health.ok or body.get("status") != "alive":
+                    raise RuntimeError(f"/health returned HTTP {health.status_code}; the Altare service is not ready")
+                set_setting("public_url", raw_url)
+                USER_STATES.pop(uid, None)
+                audit(uid, "altare_domain_configured", raw_url)
+                bot.reply_to(m,
+                    f"<b>{G['ok']} Altare domain verified and saved</b>\n{G['div']}\n"
+                    f"{bullet('Public URL', esc(raw_url))}\n"
+                    f"{bullet('Mini App', esc(raw_url + '/telegram-payment-mini-app'))}\n"
+                    f"{bullet('OxaPay webhook', esc(raw_url + '/oxapay-webhook'))}", parse_mode="HTML")
+            except Exception as exc:
+                bot.reply_to(m, f"{G['no']} Altare verification failed: <code>{esc(exc)}</code>\nFix the Altare deployment and try again.", parse_mode="HTML")
             return
         if flow == "await_adm_public_url":
             url = text.strip().rstrip('/')
@@ -20440,6 +20625,28 @@ def render_adm_maintenance(call: types.CallbackQuery) -> None:
                style="danger" if on else "success"))
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
+def render_adm_cloudflare(call: types.CallbackQuery) -> None:
+    if not admin_only_call(call, "view_stats"):
+        return
+    token = _configured_cloudflare_token()
+    hostname = str(get_setting("cloudflare_hostname", "") or "")
+    target = str(get_setting("cloudflare_target", "") or "")
+    public_url = str(get_setting("public_url", "") or "")
+    last_action = str(get_setting("cloudflare_last_action", "") or "")
+    cap = (
+        f"<b>☁️ {sc('Cloudflare Mini App Domain')}</b>\n{G['div_eq']}\n"
+        f"{bullet('API token', 'Configured' if token else 'Not configured')}\n"
+        f"{bullet('Subdomain', hostname or '—')}\n"
+        f"{bullet('Target', target or '—')}\n"
+        f"{bullet('Public URL', public_url or '—')}\n"
+        f"{bullet('Last DNS action', last_action or '—')}\n"
+        f"{G['div']}Enter the token, subdomain, and server target once. The bot will create or update the DNS record and save the HTTPS Mini App URL.{FOOTER}"
+    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(Btn("🔐  Configure / Replace", callback_data="adm_cf_setup", style="primary"))
+    kb.add(Btn("🔌  Test Connection", callback_data="adm_cf_test", style="success"))
+    kb.add(Btn(f"{G['back']}  Settings", callback_data="adm_settings", style="danger"))
+    show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 def render_adm_settings(call: types.CallbackQuery) -> None:
     if not admin_only_call(call, "view_stats"):
         return
@@ -20502,6 +20709,8 @@ def render_adm_settings(call: types.CallbackQuery) -> None:
         Btn("\U0001f310  Public URL",        callback_data="adm_set_public_url",  style="primary"),
         Btn(f"{'🟢' if wh_on else '⚪'} Webhook Mode", callback_data="adm_webhook_toggle", style="success" if wh_on else "primary"),
     )
+    kb.add(Btn("🟣  Altare Domain Wizard", callback_data="adm_altare_domain", style="primary"))
+    kb.add(Btn("☁️  Cloudflare Mini App Domain", callback_data="adm_cloudflare", style="primary"))
     kb.add(Btn(f"{G['back']}  Admin", callback_data="menu_admin", style="danger"))
     show_menu(call.message.chat.id, PHOTOS["admin"], cap, kb, call=call)
 def render_adm_resource_alerts(call: types.CallbackQuery) -> None:

@@ -56,6 +56,25 @@ on the VPS filesystem and preserve it across upgrades. Set `CIPHER_VAULT_KEY`
 only when importing an existing encrypted vault. Never commit `.env` or send
 secrets in chat.
 
+### Cloudflare Mini App domain setup
+
+The admin panel includes **Settings → Cloudflare Mini App Domain**. The guided
+wizard stores a Cloudflare API token encrypted with the bot's existing
+credential cipher, discovers the matching active zone, creates or updates the
+requested A or CNAME DNS record, and saves the resulting `https://subdomain`
+as the platform Public URL. The token should be limited to the required Zone
+DNS edit permission. Cloudflare DNS automation does not configure a private
+panel's reverse proxy or origin firewall; the target service must still be
+reachable over HTTPS, or the deployment must use an appropriate Cloudflare
+proxy/tunnel configuration.
+
+For an Altare-hosted deployment, use **Settings → Altare Domain Wizard**
+instead of Cloudflare DNS. Enter the HTTPS hostname assigned by Altare, such as
+`https://ciphertech.go.altare.global`. The wizard checks `/health` first and
+saves the URL only after the service responds with `{"status":"alive"}`. It
+sets the Mini App and OxaPay public base URL without changing Telegram polling
+mode.
+
 ### 4. Create and start the systemd service
 
 ```bash
