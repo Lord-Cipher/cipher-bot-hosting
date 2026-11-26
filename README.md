@@ -75,6 +75,13 @@ saves the URL only after the service responds with `{"status":"alive"}`. It
 sets the Mini App and OxaPay public base URL without changing Telegram polling
 mode.
 
+For Pterodactyl, the web server uses `PORT` when supplied and otherwise falls
+back to the allocation variables `SERVER_PORT` or
+`PTERODACTYL_SERVER_PORT`. This lets an Altare reverse proxy target the
+Pterodactyl allocation without changing the VPS SSH port. The Pterodactyl
+server allocation and Altare upstream must use the same port, and the upstream
+protocol should be HTTP because Flask is behind the HTTPS proxy.
+
 ### 4. Create and start the systemd service
 
 ```bash

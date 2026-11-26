@@ -120,7 +120,16 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=20)
 ANNOUNCE_CHANNEL = os.environ.get("ANNOUNCE_CHANNEL", "").strip()
 try:
-    KEEPALIVE_PORT = int(os.environ.get("PORT", 10460))
+    # Pterodactyl/Wings commonly exposes the allocation as SERVER_PORT,
+    # while other hosts use PORT. Prefer an explicit PORT, then fall back to
+    # the Pterodactyl allocation so the reverse proxy reaches this process.
+    _listen_port = (
+        os.environ.get("PORT")
+        or os.environ.get("SERVER_PORT")
+        or os.environ.get("PTERODACTYL_SERVER_PORT")
+        or 10460
+    )
+    KEEPALIVE_PORT = int(_listen_port)
 except (TypeError, ValueError):
     KEEPALIVE_PORT = 10000
 BRAND       = "ᶜᴵᴾᴴᴱᴿ ᵀᴱᶜʜ ᴴᴼˢᵀ"
